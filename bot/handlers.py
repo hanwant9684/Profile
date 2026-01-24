@@ -149,12 +149,12 @@ async def download_handler(client, message):
                     print(f"[DEBUG] Found media type: {type(msg.media)}")
                     if user_client == client and isinstance(chat_id, str):
                         try:
-                            caption = msg.caption if msg.caption else f"Original Link: {link}"
+                            # For public channels, use copy_message which preserves original formatting and media type better
                             sent = await user_client.copy_message(
                                 chat_id=user_id,
                                 from_chat_id=chat_id,
-                                message_id=message_id,
-                                caption=caption
+                                message_id=message_id
+                                # We remove the caption parameter entirely to keep the original one as-is
                             )
                             path = "COPIED"
                             sent_msg = sent
@@ -180,8 +180,23 @@ async def download_handler(client, message):
                     print(f"[DEBUG] Download result path: {path}")
                 else:
                     print(f"[DEBUG] Message found but has no media. Content: {msg.text[:50] if msg.text else 'No text'}")
-                    path = None
-                    await status_msg.edit_text("❌ No media found in this link.")
+                    if msg.text:
+                        try:
+                            # Handle text-only messages by copying them
+                            sent = await user_client.copy_message(
+                                chat_id=user_id,
+                                from_chat_id=chat_id,
+                                message_id=message_id
+                            )
+                            path = "COPIED"
+                            sent_msg = sent
+                        except Exception as e:
+                            print(f"[DEBUG] Text copy failed: {e}")
+                            await status_msg.edit_text(f"❌ Error copying text: {str(e)}")
+                            path = None
+                    else:
+                        path = None
+                        await status_msg.edit_text("❌ No media or text found in this link.")
             except Exception as e:
                 print(f"[DEBUG] Direct extraction failed: {str(e)}")
                 print(f"Direct extraction failed, trying fallback: {e}")
@@ -211,13 +226,39 @@ async def download_handler(client, message):
 
         if path != "COPIED":
             caption = msg.caption if (msg and msg.caption) else f"Original Link: {link}"
-            sent_msg = await client.send_document(
-                user_id, 
-                path, 
-                caption=caption,
-                progress=progress_bar,
-                progress_args=(status_msg, "📤 Uploading")
-            )
+            
+            if msg.photo:
+                sent_msg = await client.send_photo(
+                    user_id,
+                    path,
+                    caption=caption,
+                    progress=progress_bar,
+                    progress_args=(status_msg, "📤 Uploading")
+                )
+            elif msg.audio:
+                sent_msg = await client.send_audio(
+                    user_id,
+                    path,
+                    caption=caption,
+                    progress=progress_bar,
+                    progress_args=(status_msg, "📤 Uploading")
+                )
+            elif msg.video:
+                 sent_msg = await client.send_video(
+                    user_id,
+                    path,
+                    caption=caption,
+                    progress=progress_bar,
+                    progress_args=(status_msg, "📤 Uploading")
+                )
+            else:
+                sent_msg = await client.send_document(
+                    user_id, 
+                    path, 
+                    caption=caption,
+                    progress=progress_bar,
+                    progress_args=(status_msg, "📤 Uploading")
+                )
         
         dump_id = os.environ.get("DUMP_CHANNEL_ID")
         db_dump = await get_setting("dump_channel_id")
