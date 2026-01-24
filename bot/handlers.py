@@ -180,23 +180,8 @@ async def download_handler(client, message):
                     print(f"[DEBUG] Download result path: {path}")
                 else:
                     print(f"[DEBUG] Message found but has no media. Content: {msg.text[:50] if msg.text else 'No text'}")
-                    if msg.text:
-                        try:
-                            # Handle text-only messages by copying them
-                            sent = await user_client.copy_message(
-                                chat_id=user_id,
-                                from_chat_id=chat_id,
-                                message_id=message_id
-                            )
-                            path = "COPIED"
-                            sent_msg = sent
-                        except Exception as e:
-                            print(f"[DEBUG] Text copy failed: {e}")
-                            await status_msg.edit_text(f"❌ Error copying text: {str(e)}")
-                            path = None
-                    else:
-                        path = None
-                        await status_msg.edit_text("❌ No media or text found in this link.")
+                    path = None
+                    await status_msg.edit_text("❌ No media found in this link.")
             except Exception as e:
                 print(f"[DEBUG] Direct extraction failed: {str(e)}")
                 print(f"Direct extraction failed, trying fallback: {e}")
