@@ -1,6 +1,6 @@
 import os
 import asyncio
-from hydrogram import Client
+from pyrogram import Client
 
 # API Credentials
 API_ID = os.environ.get("API_ID")

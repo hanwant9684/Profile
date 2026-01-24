@@ -1,8 +1,8 @@
 import asyncio
 import os
 import time
-from hydrogram import filters, Client
-from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram import filters, Client
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting
 
@@ -43,7 +43,7 @@ async def verify_force_sub(client, user_id):
         
     channel = setting['value']
     try:
-        from hydrogram.errors import UserNotParticipant
+        from pyrogram.errors import UserNotParticipant
         member = await client.get_chat_member(channel, user_id)
         if member.status in ["left", "kicked"]:
              return False, channel

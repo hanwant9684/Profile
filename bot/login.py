@@ -1,9 +1,8 @@
-from hydrogram import filters
-from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from hydrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
+from pyrogram import filters, Client
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
 from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import get_user, create_user, update_user_terms, save_session_string, logout_user, users_collection
-from hydrogram import Client
 
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
