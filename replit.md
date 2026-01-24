@@ -32,7 +32,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Bot Framework
 - **Framework**: Hydrogram (Pyrogram fork) for Telegram Bot API interaction
-- **Entry Point**: `src/main.py` initializes the database and starts the bot
+- **Entry Point**: `main.py` initializes the database and starts the bot
 - **Modular Design**: Handlers are split across multiple files and imported to register with the bot client
 
 ### Module Structure

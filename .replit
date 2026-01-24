@@ -1,7 +1,7 @@
 modules = ["python-3.12"]
 [nix]
 channel = "stable-25_05"
-packages = ["unzip"]
+packages = ["cacert", "unzip"]
 
 [agent]
 expertMode = true
@@ -27,4 +27,4 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd src && python main.py"
+args = "python main.py"

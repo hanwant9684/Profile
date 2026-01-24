@@ -1,0 +1,4 @@
+dnspython
+hydrogram
+motor
+pymongo
