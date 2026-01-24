@@ -1,27 +1,17 @@
 import asyncio
 from hydrogram import filters
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
-from bot.database import get_db, set_user_role, ban_user, update_setting, get_setting, User
-
-# --- Admin Commands ---
+from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
     if str(message.from_user.id) != str(OWNER_ID): return
     
-    database = get_db()
-    total_users = database.query(User).count()
-    premium_users = database.query(User).filter(User.role == "premium").count()
-    
-    from sqlalchemy import func
-    total_downloads_today = database.query(func.sum(User.downloads_today)).scalar() or 0
-    database.close()
+    total_users = await get_user_count()
     
     await message.reply(
         f"📊 **Bot Statistics**\n\n"
         f"👥 Total Users: `{total_users}`\n"
-        f"💎 Premium Users: `{premium_users}`\n"
-        f"📥 Downloads Today: `{total_downloads_today}`\n"
         f"⚡ Active Downloads: `{len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}`"
     )
 
@@ -59,7 +49,7 @@ async def setrole(client, message):
             await message.reply("Invalid role. Use: free, premium, admin, owner")
             return
             
-        set_user_role(target_id, new_role, duration)
+        await set_user_role(target_id, new_role, duration)
         
         resp = f"✅ User `{target_id}` role updated to **{new_role}**."
         if duration and new_role == 'premium':
@@ -79,7 +69,7 @@ async def ban(client, message):
         
     try:
         target_id = message.text.split()[1]
-        ban_user(target_id, True)
+        await ban_user(target_id, True)
         await message.reply(f"🚫 User `{target_id}` has been **BANNED**.")
     except:
         await message.reply("Usage: `/ban <user_id>`")
@@ -92,7 +82,7 @@ async def unban(client, message):
         
     try:
         target_id = message.text.split()[1]
-        ban_user(target_id, False)
+        await ban_user(target_id, False)
         await message.reply(f"✅ User `{target_id}` has been **UNBANNED**.")
     except:
         await message.reply("Usage: `/unban <user_id>`")
@@ -105,7 +95,7 @@ async def set_force_sub(client, message):
     
     try:
         channel = message.text.split()[1]
-        update_setting("force_sub_channel", channel)
+        await update_setting("force_sub_channel", channel)
         await message.reply(f"✅ Force Sub channel set to: {channel}")
     except:
         await message.reply("Usage: `/set_force_sub @channel`")
@@ -118,7 +108,7 @@ async def set_dump(client, message):
     
     try:
         channel_id = message.text.split()[1]
-        update_setting("dump_channel_id", channel_id)
+        await update_setting("dump_channel_id", channel_id)
         await message.reply(f"✅ Dump channel ID set to: `{channel_id}`")
     except:
         await message.reply("Usage: `/set_dump <channel_id>`")
@@ -129,13 +119,13 @@ async def view_settings(client, message):
     if user_id != str(OWNER_ID):
         return
         
-    fs = get_setting("force_sub_channel")
-    dc = get_setting("dump_channel_id")
-    ac = get_setting("ad_config")
+    fs = await get_setting("force_sub_channel")
+    dc = await get_setting("dump_channel_id")
+    ac = await get_setting("ad_config")
     
-    fs_val = fs.value if fs else "Not Set"
-    dc_val = dc.value if dc else "Not Set"
-    ac_val = ac.json_value if ac else "Disabled"
+    fs_val = fs.get('value') if fs else "Not Set"
+    dc_val = dc.get('value') if dc else "Not Set"
+    ac_val = ac.get('json_value') if ac else "Disabled"
     
     text = (
         "⚙️ **Current Settings**\n\n"
@@ -157,19 +147,17 @@ async def broadcast(client, message):
         
     msg = await message.reply("🚀 Starting broadcast...")
     
-    db = get_db()
-    users = db.query(User).all()
+    users = await get_all_users()
     
     count = 0
     blocked = 0
     
     for row in users:
         try:
-            await message.reply_to_message.copy(row.telegram_id)
+            await message.reply_to_message.copy(row.get('telegram_id'))
             count += 1
             await asyncio.sleep(0.05)
         except Exception:
             blocked += 1
     
-    db.close()
     await msg.edit_text(f"✅ Broadcast complete.\nSent: {count}\nFailed/Blocked: {blocked}")

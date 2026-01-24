@@ -8,12 +8,12 @@ from hydrogram import Client
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = message.from_user.id
-    user = get_user(user_id)
+    user = await get_user(user_id)
     
     if not user:
-        user = create_user(user_id)
+        user = await create_user(user_id)
     
-    if not user.is_agreed_terms:
+    if not user or not user.get('is_agreed_terms'):
         text = (
             "Welcome to the Downloader Bot!\n\n"
             "Before we proceed, please accept our Terms & Conditions:\n"
@@ -28,26 +28,24 @@ async def start(client, message):
             ])
         )
     else:
-        await message.reply(f"Welcome back! Your role is: **{user.role}**.\nUse /myinfo to check stats.")
+        await message.reply(f"Welcome back! Your role is: **{user.get('role', 'free')}**.\nUse /myinfo to check stats.")
 
 @app.on_callback_query(filters.regex("accept_terms"))
 async def accept_terms(client, callback_query):
     user_id = callback_query.from_user.id
-    update_user_terms(user_id, True)
+    await update_user_terms(user_id, True)
     await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
-
-# --- Login Flow ---
 
 @app.on_message(filters.command("login") & filters.private)
 async def login_start(client, message):
     user_id = message.from_user.id
-    user = get_user(user_id)
+    user = await get_user(user_id)
     
-    if not user or not user.is_agreed_terms:
+    if not user or not user.get('is_agreed_terms'):
         await message.reply("Please agree to the Terms & Conditions first using /start.")
         return
 
-    if user.phone_session_string:
+    if user.get('phone_session_string'):
         await message.reply("You are already logged in! Contact support if you need to re-login.")
         return
 
@@ -61,7 +59,6 @@ async def login_start(client, message):
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
-        # Ignore random text if not logging in and not a link
         return
 
     state = login_states[user_id]
@@ -108,7 +105,7 @@ async def handle_login_steps(client, message: Message):
                 return
 
             session_string = await temp_client.export_session_string()
-            save_session_string(user_id, session_string)
+            await save_session_string(user_id, session_string)
             await temp_client.disconnect()
             del login_states[user_id]
             await message.reply("✅ Login Successful!")
@@ -126,7 +123,7 @@ async def handle_login_steps(client, message: Message):
                 return
 
             session_string = await temp_client.export_session_string()
-            save_session_string(user_id, session_string)
+            await save_session_string(user_id, session_string)
             await temp_client.disconnect()
             del login_states[user_id]
             await message.reply("✅ Login Successful!")

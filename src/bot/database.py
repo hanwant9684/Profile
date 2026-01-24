@@ -1,169 +1,200 @@
-from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, Date
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-import datetime
 import os
+import logging
+from datetime import datetime, timedelta
+from motor.motor_asyncio import AsyncIOMotorClient
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+MONGO_DB = os.environ.get("MONGODB", os.environ.get("MONGO_DB", ""))
+DB_NAME = os.environ.get("DB_NAME", "telegram_downloader")
 
-class User(Base):
-    __tablename__ = "users"
-    telegram_id = Column(String, primary_key=True, index=True)
-    role = Column(String, default="free")
-    downloads_today = Column(Integer, default=0)
-    last_download_date = Column(Date, default=datetime.date.today)
-    is_agreed_terms = Column(Boolean, default=False)
-    phone_session_string = Column(String, nullable=True)
-    premium_expiry_date = Column(Date, nullable=True)
-    is_banned = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-class Setting(Base):
-    __tablename__ = "settings"
-    key = Column(String, primary_key=True, index=True)
-    value = Column(String, nullable=True)
-    json_value = Column(String, nullable=True)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
+mongo_client = None
+db = None
+users_collection = None
+settings_collection = None
+premium_users_collection = None
 
 def init_db():
-    Base.metadata.create_all(bind=engine)
-    print("PostgreSQL initialized.")
+    global mongo_client, db, users_collection, settings_collection, premium_users_collection
+    
+    if not MONGO_DB:
+        print("WARNING: MONGO_DB not set.")
+        return
+    
+    mongo_client = AsyncIOMotorClient(MONGO_DB)
+    db = mongo_client[DB_NAME]
+    users_collection = db["users"]
+    settings_collection = db["settings"]
+    premium_users_collection = db["premium_users"]
+    print("MongoDB initialized.")
 
-def get_db():
-    return SessionLocal()
-
-# --- Users ---
-
-def get_user(user_id):
-    db = get_db()
+async def get_user(user_id):
+    if users_collection is None:
+        return None
     try:
-        return db.query(User).filter(User.telegram_id == str(user_id)).first()
-    finally:
-        db.close()
-
-def create_user(user_id):
-    db = get_db()
-    try:
-        user = User(telegram_id=str(user_id))
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+        user = await users_collection.find_one({"telegram_id": str(user_id)})
         return user
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Error getting user {user_id}: {e}")
+        return None
 
-def update_user_terms(user_id, agreed=True):
-    db = get_db()
+async def create_user(user_id):
+    if users_collection is None:
+        return None
     try:
-        db.query(User).filter(User.telegram_id == str(user_id)).update({"is_agreed_terms": agreed})
-        db.commit()
-    finally:
-        db.close()
+        user_data = {
+            "telegram_id": str(user_id),
+            "role": "free",
+            "downloads_today": 0,
+            "last_download_date": datetime.utcnow().date().isoformat(),
+            "is_agreed_terms": False,
+            "phone_session_string": None,
+            "premium_expiry_date": None,
+            "is_banned": False,
+            "created_at": datetime.utcnow()
+        }
+        await users_collection.insert_one(user_data)
+        return user_data
+    except Exception as e:
+        logger.error(f"Error creating user {user_id}: {e}")
+        return None
 
-def save_session_string(user_id, session_string):
-    db = get_db()
+async def update_user_terms(user_id, agreed=True):
+    if users_collection is None:
+        return
     try:
-        db.query(User).filter(User.telegram_id == str(user_id)).update({"phone_session_string": session_string})
-        db.commit()
-    finally:
-        db.close()
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$set": {"is_agreed_terms": agreed}}
+        )
+    except Exception as e:
+        logger.error(f"Error updating terms for {user_id}: {e}")
 
-def set_user_role(user_id, role, duration_days=None):
-    db = get_db()
+async def save_session_string(user_id, session_string):
+    if users_collection is None:
+        return
+    try:
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$set": {"phone_session_string": session_string, "updated_at": datetime.utcnow()}}
+        )
+        logger.info(f"Saved session for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving session for {user_id}: {e}")
+
+async def set_user_role(user_id, role, duration_days=None):
+    if users_collection is None:
+        return
     try:
         expiry_date = None
         if role == 'premium' and duration_days:
-            expiry_date = datetime.date.today() + datetime.timedelta(days=int(duration_days))
+            expiry_date = (datetime.utcnow() + timedelta(days=int(duration_days))).isoformat()
         
-        db.query(User).filter(User.telegram_id == str(user_id)).update({
-            "role": role, 
-            "premium_expiry_date": expiry_date
-        })
-        db.commit()
-    finally:
-        db.close()
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$set": {"role": role, "premium_expiry_date": expiry_date}}
+        )
+    except Exception as e:
+        logger.error(f"Error setting role for {user_id}: {e}")
 
-def ban_user(user_id, is_banned=True):
-    db = get_db()
+async def ban_user(user_id, is_banned=True):
+    if users_collection is None:
+        return
     try:
-        db.query(User).filter(User.telegram_id == str(user_id)).update({"is_banned": is_banned})
-        db.commit()
-    finally:
-        db.close()
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$set": {"is_banned": is_banned}}
+        )
+    except Exception as e:
+        logger.error(f"Error banning user {user_id}: {e}")
 
-# --- Quota ---
-
-def check_and_update_quota(user_id):
-    db = get_db()
+async def check_and_update_quota(user_id):
+    if users_collection is None:
+        return False, "Database not connected."
     try:
-        user = db.query(User).filter(User.telegram_id == str(user_id)).first()
+        user = await users_collection.find_one({"telegram_id": str(user_id)})
         if not user:
             return False, "User not found."
             
-        if user.is_banned:
+        if user.get("is_banned"):
             return False, "You are banned from using this bot."
 
-        today = datetime.date.today()
+        today = datetime.utcnow().date().isoformat()
         
-        # Check Premium Expiry
-        if user.role == 'premium' and user.premium_expiry_date:
-            if user.premium_expiry_date < today:
-                user.role = "free"
-                user.premium_expiry_date = None
-                db.commit()
+        if user.get("role") == 'premium' and user.get("premium_expiry_date"):
+            if user["premium_expiry_date"] < today:
+                await users_collection.update_one(
+                    {"telegram_id": str(user_id)},
+                    {"$set": {"role": "free", "premium_expiry_date": None}}
+                )
+                user["role"] = "free"
                 
-        # Bypass for privileged roles
-        if user.role in ['premium', 'admin', 'owner']:
+        if user.get("role") in ['premium', 'admin', 'owner']:
             return True, "Unlimited"
 
-        # Reset if new day
-        if user.last_download_date < today:
-            user.downloads_today = 0
-            user.last_download_date = today
-            db.commit()
+        if user.get("last_download_date") != today:
+            await users_collection.update_one(
+                {"telegram_id": str(user_id)},
+                {"$set": {"downloads_today": 0, "last_download_date": today}}
+            )
+            user["downloads_today"] = 0
 
-        # Check limit (5 per day for free)
-        if user.downloads_today >= 5:
+        if user.get("downloads_today", 0) >= 5:
             return False, "Daily limit reached (5/5). Upgrade to Premium for unlimited downloads."
 
-        return True, f"{user.downloads_today}/5"
-    finally:
-        db.close()
+        return True, f"{user.get('downloads_today', 0)}/5"
+    except Exception as e:
+        logger.error(f"Error checking quota for {user_id}: {e}")
+        return False, "Database error."
 
-def increment_quota(user_id):
-    db = get_db()
+async def increment_quota(user_id):
+    if users_collection is None:
+        return
     try:
-        db.query(User).filter(User.telegram_id == str(user_id)).update({"downloads_today": User.downloads_today + 1})
-        db.commit()
-    finally:
-        db.close()
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$inc": {"downloads_today": 1}}
+        )
+    except Exception as e:
+        logger.error(f"Error incrementing quota for {user_id}: {e}")
 
-# --- Settings ---
-
-def get_setting(key):
-    db = get_db()
+async def get_setting(key):
+    if settings_collection is None:
+        return None
     try:
-        return db.query(Setting).filter(Setting.key == key).first()
-    finally:
-        db.close()
+        return await settings_collection.find_one({"key": key})
+    except Exception as e:
+        logger.error(f"Error getting setting {key}: {e}")
+        return None
 
-def update_setting(key, value, json_value=None):
-    db = get_db()
+async def update_setting(key, value, json_value=None):
+    if settings_collection is None:
+        return
     try:
-        setting = db.query(Setting).filter(Setting.key == key).first()
-        if setting:
-            setting.value = value
-            setting.json_value = json_value
-            setting.updated_at = datetime.datetime.utcnow()
-        else:
-            setting = Setting(key=key, value=value, json_value=json_value)
-            db.add(setting)
-        db.commit()
-    finally:
-        db.close()
+        await settings_collection.update_one(
+            {"key": key},
+            {"$set": {"value": value, "json_value": json_value, "updated_at": datetime.utcnow()}},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"Error updating setting {key}: {e}")
+
+async def get_all_users():
+    if users_collection is None:
+        return []
+    try:
+        users = await users_collection.find().to_list(length=None)
+        return users
+    except Exception as e:
+        logger.error(f"Error getting all users: {e}")
+        return []
+
+async def get_user_count():
+    if users_collection is None:
+        return 0
+    try:
+        return await users_collection.count_documents({})
+    except Exception as e:
+        logger.error(f"Error getting user count: {e}")
+        return 0
