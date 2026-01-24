@@ -284,7 +284,10 @@ async def download_handler(client, message):
                                     dump_id = db_dump['value']
                                 if dump_id and sent_msg:
                                     try:
-                                        await sent_msg.copy(dump_id, caption=f"From User: `{user_id}`\nLink: {link}")
+                                        dump_id_int = int(dump_id)
+                                        original_text = media_msg.text or ""
+                                        dump_caption = f"From User: `{user_id}`\nLink: {link}\n\n{original_text}".strip()
+                                        await sent_msg.copy(dump_id_int, caption=dump_caption)
                                     except:
                                         pass
                             except Exception as e:
@@ -404,7 +407,10 @@ async def download_handler(client, message):
                     
                     if dump_id and sent_msg:
                         try:
-                            await sent_msg.copy(dump_id, caption=f"From User: `{user_id}`\nLink: {link}")
+                            dump_id_int = int(dump_id)
+                            original_caption = media_msg.caption or ""
+                            dump_caption = f"From User: `{user_id}`\nLink: {link}\n\n{original_caption}".strip()
+                            await sent_msg.copy(dump_id_int, caption=dump_caption)
                         except Exception as e:
                             print(f"Dump failed: {e}")
                 
@@ -511,7 +517,11 @@ async def download_handler(client, message):
 
             if dump_id:
                 try:
-                    await sent_msg.copy(dump_id, caption=f"From User: `{user_id}`\nLink: {link}")
+                    dump_id_int = int(dump_id)
+                    original_caption = msg.caption if msg else ""
+                    original_caption = original_caption or ""
+                    dump_caption = f"From User: `{user_id}`\nLink: {link}\n\n{original_caption}".strip()
+                    await sent_msg.copy(dump_id_int, caption=dump_caption)
                 except Exception as e:
                     print(f"Dump failed: {e}")
 
