@@ -1,6 +1,9 @@
 import asyncio
+import logging
 from bot.config import app
 from bot.database import init_db
+
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 # Import all modules to register handlers
 import bot.login

@@ -8,3 +8,5 @@ kurigram
 motor
 pymongo
 TgCrypto
+dnspython
+kurigram
