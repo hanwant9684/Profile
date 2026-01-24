@@ -2,3 +2,4 @@ dnspython
 hydrogram
 motor
 pymongo
+TgCrypto
