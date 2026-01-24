@@ -3,12 +3,6 @@ kurigram
 motor
 pymongo
 TgCrypto
-kurigram
-dnspython
-kurigram
-motor
-pymongo
-TgCrypto
 dnspython
 kurigram
 motor
