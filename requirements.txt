@@ -3,3 +3,8 @@ hydrogram
 motor
 pymongo
 TgCrypto
+dnspython
+hydrogram
+motor
+pymongo
+TgCrypto
