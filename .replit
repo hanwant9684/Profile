@@ -1,7 +1,7 @@
-modules = ["python-3.11"]
+modules = ["python-3.12"]
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "unzip"]
+packages = ["unzip"]
 
 [agent]
 expertMode = true
@@ -16,10 +16,10 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Main Script"
+args = "Run Python"
 
 [[workflows.workflow]]
-name = "Main Script"
+name = "Run Python"
 author = "agent"
 
 [workflows.workflow.metadata]
@@ -27,4 +27,4 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python src/main.py"
+args = "cd src && python main.py"
