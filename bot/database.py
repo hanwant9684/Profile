@@ -171,16 +171,39 @@ async def check_and_update_quota(user_id):
         logger.error(f"Error checking quota for {user_id}: {e}")
         return False, "Database error."
 
-async def increment_quota(user_id):
+async def increment_quota(user_id, count=1):
     if users_collection is None:
         return
     try:
         await users_collection.update_one(
             {"telegram_id": str(user_id)},
-            {"$inc": {"downloads_today": 1}}
+            {"$inc": {"downloads_today": count}}
         )
     except Exception as e:
         logger.error(f"Error incrementing quota for {user_id}: {e}")
+
+async def get_remaining_quota(user_id):
+    if users_collection is None:
+        return 0, False
+    try:
+        user = await users_collection.find_one({"telegram_id": str(user_id)})
+        if not user:
+            return 0, False
+        
+        if user.get("role") in ['premium', 'admin', 'owner']:
+            return 999999, True
+        
+        today = datetime.utcnow().date().isoformat()
+        downloads_today = user.get("downloads_today", 0)
+        
+        if user.get("last_download_date") != today:
+            downloads_today = 0
+        
+        remaining = max(0, 5 - downloads_today)
+        return remaining, False
+    except Exception as e:
+        logger.error(f"Error getting remaining quota for {user_id}: {e}")
+        return 0, False
 
 async def get_setting(key):
     if settings_collection is None:
