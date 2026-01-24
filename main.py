@@ -1,3 +1,4 @@
+import asyncio
 from bot.config import app
 from bot.database import init_db
 
@@ -10,5 +11,8 @@ import bot.info
 if __name__ == "__main__":
     print("Initializing database...")
     init_db()
+    print("Starting cleanup task...")
+    from bot.login import cleanup_expired_logins
+    asyncio.get_event_loop().create_task(cleanup_expired_logins())
     print("Starting bot...")
     app.run()
