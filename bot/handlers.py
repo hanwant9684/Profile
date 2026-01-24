@@ -120,22 +120,27 @@ async def download_handler(client, message):
             global_download_semaphore.release()
             return
 
-        user_client = client
-        
-        session_str = user.get('phone_session_string') if user else None
-        if session_str and len(session_str) > 10:
-             try:
-                 user_client = Client(
-                     f"user_{user_id}", 
-                     session_string=session_str, 
-                     in_memory=True, 
-                     api_id=API_ID, 
-                     api_hash=API_HASH
-                 )
-                 await user_client.connect()
-             except Exception as e:
-                 print(f"User client connection error: {e}")
-                 user_client = client
+        # If it's a public link, we prefer using the main bot client (client)
+        # even if the user is logged in, as it's more stable for public links.
+        # User client is only strictly necessary for private links.
+        if is_private:
+            user_client = client
+            session_str = user.get('phone_session_string') if user else None
+            if session_str and len(session_str) > 10:
+                 try:
+                     user_client = Client(
+                         f"user_{user_id}", 
+                         session_string=session_str, 
+                         in_memory=True, 
+                         api_id=API_ID, 
+                         api_hash=API_HASH
+                     )
+                     await user_client.connect()
+                 except Exception as e:
+                     print(f"User client connection error: {e}")
+                     user_client = client
+        else:
+            user_client = client
         
         await status_msg.edit_text("📥 Downloading...")
         

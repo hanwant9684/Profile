@@ -2,7 +2,7 @@ from hydrogram import filters
 from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from hydrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
 from bot.config import app, login_states, API_ID, API_HASH
-from bot.database import get_user, create_user, update_user_terms, save_session_string
+from bot.database import get_user, create_user, update_user_terms, save_session_string, logout_user, users_collection
 from hydrogram import Client
 
 @app.on_message(filters.command("start") & filters.private)
@@ -146,3 +146,14 @@ async def cancel_login(client, message):
         await message.reply("Login cancelled.")
     else:
         await message.reply("Nothing to cancel.")
+
+@app.on_message(filters.command("logout") & filters.private)
+async def logout(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if user and user.get('phone_session_string'):
+        await logout_user(user_id)
+        await message.reply("✅ Logged out successfully! Your session has been cleared.")
+    else:
+        await message.reply("You are not logged in.")

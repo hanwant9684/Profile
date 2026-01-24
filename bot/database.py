@@ -94,6 +94,18 @@ async def save_session_string(user_id, session_string):
     except Exception as e:
         logger.error(f"Error saving session for {user_id}: {e}")
 
+async def logout_user(user_id):
+    if users_collection is None:
+        return
+    try:
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$set": {"phone_session_string": None, "updated_at": datetime.utcnow()}}
+        )
+        logger.info(f"User {user_id} logged out")
+    except Exception as e:
+        logger.error(f"Error logging out user {user_id}: {e}")
+
 async def set_user_role(user_id, role, duration_days=None):
     if users_collection is None:
         return
