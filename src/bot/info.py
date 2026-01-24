@@ -1,6 +1,6 @@
 from hydrogram import filters
-from bot.config import app
-from bot.database import get_user, check_and_update_quota
+from src.bot.config import app
+from src.bot.database import get_user, check_and_update_quota
 
 @app.on_message(filters.command("myinfo") & filters.private)
 async def myinfo(client, message):

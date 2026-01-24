@@ -3,8 +3,8 @@ import os
 import time
 from hydrogram import filters, Client
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
-from bot.database import get_user, check_and_update_quota, increment_quota, get_setting
+from src.bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
+from src.bot.database import get_user, check_and_update_quota, increment_quota, get_setting
 
 async def progress_bar(current, total, message, type_msg):
     if total == 0:

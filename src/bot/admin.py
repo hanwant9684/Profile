@@ -1,7 +1,7 @@
 import asyncio
 from hydrogram import filters
-from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
-from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count
+from src.bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
+from src.bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
