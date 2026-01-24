@@ -15,6 +15,7 @@ DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 # Performance Settings
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 5))
 active_downloads = set()
+cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states = {}
 

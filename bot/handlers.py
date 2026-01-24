@@ -10,6 +10,8 @@ async def progress_bar(current, total, message, type_msg):
     if total == 0:
         return
     percentage = current * 100 / total
+    
+    # Minimal progress bar (standard 10 blocks)
     finished_blocks = int(percentage / 10)
     remaining_blocks = 10 - finished_blocks
     bar = "✅" * finished_blocks + "⬜" * remaining_blocks
@@ -20,13 +22,11 @@ async def progress_bar(current, total, message, type_msg):
     msg_id = message.id
     last_val = progress_bar.last_update.get(msg_id, 0)
     
-    if abs(percentage - last_val) >= 5 or current == total:
+    if abs(percentage - last_val) >= 10 or current == total:
         progress_bar.last_update[msg_id] = percentage
         try:
             await message.edit_text(
-                f"**{type_msg}...**\n\n"
-                f"|{bar}| {percentage:.1f}%\n"
-                f"📦 {current / (1024*1024):.1f}MB / {total / (1024*1024):.1f}MB"
+                f"**{type_msg}... {percentage:.1f}%**"
             )
         except:
             pass
@@ -52,6 +52,80 @@ async def verify_force_sub(client, user_id):
         if "USER_NOT_PARTICIPANT" in str(e):
              return False, channel
         return True, None
+
+@app.on_message(filters.command("help") & filters.private)
+async def help_command(client, message):
+    help_text = (
+        "📖 **Help Menu**\n\n"
+        "🔗 **Downloads**\n"
+        "Just send any Telegram link (public or private) to download.\n"
+        "For private links, you must /login first.\n\n"
+        "⚡ **Commands**\n"
+        "• /start - Start the bot\n"
+        "• /login - Connect your Telegram account\n"
+        "• /logout - Disconnect your account\n"
+        "• /myinfo - Check your account stats\n"
+        "• /batch - Download multiple messages\n"
+        "• /upgrade - View premium plans\n"
+        "• /help - Show this menu\n"
+    )
+    await message.reply(help_text)
+
+@app.on_message(filters.command("batch") & filters.private)
+async def batch_command(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    if not user or user.get('role') == 'free':
+        await message.reply("⛔ Batch download is for **Premium** users only. Use /upgrade to level up!")
+        return
+        
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+             await message.reply("Usage: `/batch <start_link> <end_link>`")
+             return
+             
+        start_link = parts[1]
+        end_link = parts[2]
+        
+        import re
+        start_match = re.search(r"t\.me/([^/]+)/(\d+)", start_link) or re.search(r"t\.me/c/(\d+)/(\d+)", start_link)
+        end_match = re.search(r"t\.me/([^/]+)/(\d+)", end_link) or re.search(r"t\.me/c/(\d+)/(\d+)", end_link)
+        
+        if not start_match or not end_match:
+            await message.reply("❌ Invalid links provided.")
+            return
+            
+        chat_id = start_match.group(1)
+        if "t.me/c/" in start_link:
+            chat_id = int("-100" + chat_id)
+            
+        start_id = int(start_match.group(2))
+        end_id = int(end_match.group(2))
+        
+        if start_id > end_id:
+            start_id, end_id = end_id, start_id
+            
+        count = end_id - start_id + 1
+        if count > 50:
+            await message.reply("⚠️ You can only batch up to 50 messages at a time.")
+            return
+            
+        await message.reply(f"🚀 Starting batch download of {count} messages...")
+        
+        for msg_id in range(start_id, end_id + 1):
+            # Create a mock message to reuse download_handler logic
+            mock_message = message
+            mock_message.text = f"https://t.me/{start_match.group(1)}/{msg_id}"
+            if "t.me/c/" in start_link:
+                 mock_message.text = f"https://t.me/c/{start_match.group(1)}/{msg_id}"
+            
+            await download_handler(client, mock_message)
+            await asyncio.sleep(1) # Small delay to avoid flood
+            
+    except Exception as e:
+        await message.reply(f"❌ Batch error: {str(e)}")
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
 async def download_handler(client, message):
@@ -185,7 +259,36 @@ async def download_handler(client, message):
                 
                 downloaded_count = 0
                 for idx, media_msg in enumerate(messages_to_process[:files_to_download]):
+                    from bot.config import cancel_flags
+                    if user_id in cancel_flags:
+                        await status_msg.edit_text("❌ Download cancelled by user.")
+                        cancel_flags.discard(user_id)
+                        active_downloads.discard(user_id)
+                        global_download_semaphore.release()
+                        return
+
                     if not media_msg.media:
+                        if media_msg.text:
+                            # Handle text-only messages
+                            try:
+                                sent_msg = await client.send_message(
+                                    user_id,
+                                    media_msg.text,
+                                    entities=media_msg.entities
+                                )
+                                downloaded_count += 1
+                                # Handle dumping for text messages
+                                dump_id = os.environ.get("DUMP_CHANNEL_ID")
+                                db_dump = await get_setting("dump_channel_id")
+                                if db_dump and db_dump.get('value'):
+                                    dump_id = db_dump['value']
+                                if dump_id and sent_msg:
+                                    try:
+                                        await sent_msg.copy(dump_id, caption=f"From User: `{user_id}`\nLink: {link}")
+                                    except:
+                                        pass
+                            except Exception as e:
+                                print(f"Error sending text message: {e}")
                         continue
                     
                     current_status = f"📥 Downloading file {idx + 1}/{files_to_download}..." if files_to_download > 1 else "📥 Downloading..."
@@ -228,7 +331,7 @@ async def download_handler(client, message):
                         )
                     
                     if path and path != "COPIED":
-                        caption = media_msg.caption if media_msg.caption else f"Original Link: {link}"
+                        caption = media_msg.caption if media_msg.caption else None
                         
                         try:
                             await status_msg.edit_text(f"📤 Uploading file {idx + 1}/{files_to_download}...")
@@ -348,7 +451,7 @@ async def download_handler(client, message):
         elif not path and not status_msg.text.startswith("❌"):
              raise Exception("Download failed or empty.")
         elif path and path not in ["COPIED", "PROCESSED"]:
-            caption = msg.caption if (msg and msg.caption) else f"Original Link: {link}"
+            caption = msg.caption if (msg and msg.caption) else None
             
             if msg.photo:
                 sent_msg = await client.send_photo(
