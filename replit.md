@@ -56,6 +56,12 @@ Preferred communication style: Simple, everyday language.
 - **Phone Session**: Users can login with their Telegram account for extended functionality
 - **Ban System**: Users can be banned by admin
 
+### Download Features
+- **Media Group Support**: When a link points to a message in a media group, ALL files in that group are automatically downloaded with a single link
+- **Quota-Aware Downloading**: Free users are limited by their remaining daily quota. If a media group has more files than remaining quota, only partial download occurs with an upgrade prompt
+- **Video Streaming**: Videos are uploaded with proper thumbnail, duration, width/height for streaming playback
+- **Progress Tracking**: Real-time progress bars show download/upload status for each file
+
 ### Data Models (MongoDB)
 Users collection stores:
 - `telegram_id`, `role`, `downloads_today`, `last_download_date`
