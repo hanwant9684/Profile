@@ -1,1 +1,175 @@
+import asyncio
+from hydrogram import filters
+from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
+from bot.database import get_db, set_user_role, ban_user, update_setting, get_setting, User
 
+# --- Admin Commands ---
+
+@app.on_message(filters.command("stats") & filters.private)
+async def stats(client, message):
+    if str(message.from_user.id) != str(OWNER_ID): return
+    
+    database = get_db()
+    total_users = database.query(User).count()
+    premium_users = database.query(User).filter(User.role == "premium").count()
+    
+    from sqlalchemy import func
+    total_downloads_today = database.query(func.sum(User.downloads_today)).scalar() or 0
+    database.close()
+    
+    await message.reply(
+        f"📊 **Bot Statistics**\n\n"
+        f"👥 Total Users: `{total_users}`\n"
+        f"💎 Premium Users: `{premium_users}`\n"
+        f"📥 Downloads Today: `{total_downloads_today}`\n"
+        f"⚡ Active Downloads: `{len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}`"
+    )
+
+@app.on_message(filters.command("kill") & filters.private)
+async def kill_process(client, message):
+    if str(message.from_user.id) != str(OWNER_ID): return
+    
+    try:
+        target_id = int(message.text.split()[1])
+        if target_id in active_downloads:
+            active_downloads.discard(target_id)
+            await message.reply(f"✅ Killed process for user `{target_id}`.")
+        else:
+            await message.reply("⚠️ User does not have an active download.")
+    except:
+        await message.reply("Usage: `/kill <user_id>`")
+
+@app.on_message(filters.command("setrole") & filters.private)
+async def setrole(client, message):
+    user_id = str(message.from_user.id)
+    if user_id != str(OWNER_ID):
+        await message.reply("⛔ Authorized personnel only.")
+        return
+        
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+             raise ValueError("Not enough arguments")
+        
+        target_id = parts[1]
+        new_role = parts[2]
+        duration = parts[3] if len(parts) > 3 else None
+
+        if new_role not in ['free', 'premium', 'admin', 'owner']:
+            await message.reply("Invalid role. Use: free, premium, admin, owner")
+            return
+            
+        set_user_role(target_id, new_role, duration)
+        
+        resp = f"✅ User `{target_id}` role updated to **{new_role}**."
+        if duration and new_role == 'premium':
+            resp += f" (Expires in {duration} days)"
+            
+        await message.reply(resp)
+    except ValueError:
+        await message.reply("Usage: `/setrole <user_id> <role> [days]`")
+    except Exception as e:
+        await message.reply(f"Error: {e}")
+
+@app.on_message(filters.command("ban") & filters.private)
+async def ban(client, message):
+    user_id = str(message.from_user.id)
+    if user_id != str(OWNER_ID):
+        return
+        
+    try:
+        target_id = message.text.split()[1]
+        ban_user(target_id, True)
+        await message.reply(f"🚫 User `{target_id}` has been **BANNED**.")
+    except:
+        await message.reply("Usage: `/ban <user_id>`")
+
+@app.on_message(filters.command("unban") & filters.private)
+async def unban(client, message):
+    user_id = str(message.from_user.id)
+    if user_id != str(OWNER_ID):
+        return
+        
+    try:
+        target_id = message.text.split()[1]
+        ban_user(target_id, False)
+        await message.reply(f"✅ User `{target_id}` has been **UNBANNED**.")
+    except:
+        await message.reply("Usage: `/unban <user_id>`")
+
+@app.on_message(filters.command("set_force_sub") & filters.private)
+async def set_force_sub(client, message):
+    user_id = str(message.from_user.id)
+    if user_id != str(OWNER_ID):
+        return
+    
+    try:
+        channel = message.text.split()[1]
+        update_setting("force_sub_channel", channel)
+        await message.reply(f"✅ Force Sub channel set to: {channel}")
+    except:
+        await message.reply("Usage: `/set_force_sub @channel`")
+
+@app.on_message(filters.command("set_dump") & filters.private)
+async def set_dump(client, message):
+    user_id = str(message.from_user.id)
+    if user_id != str(OWNER_ID):
+        return
+    
+    try:
+        channel_id = message.text.split()[1]
+        update_setting("dump_channel_id", channel_id)
+        await message.reply(f"✅ Dump channel ID set to: `{channel_id}`")
+    except:
+        await message.reply("Usage: `/set_dump <channel_id>`")
+
+@app.on_message(filters.command("settings") & filters.private)
+async def view_settings(client, message):
+    user_id = str(message.from_user.id)
+    if user_id != str(OWNER_ID):
+        return
+        
+    fs = get_setting("force_sub_channel")
+    dc = get_setting("dump_channel_id")
+    ac = get_setting("ad_config")
+    
+    fs_val = fs.value if fs else "Not Set"
+    dc_val = dc.value if dc else "Not Set"
+    ac_val = ac.json_value if ac else "Disabled"
+    
+    text = (
+        "⚙️ **Current Settings**\n\n"
+        f"📢 Force Sub: `{fs_val}`\n"
+        f"🗑️ Dump Channel: `{dc_val}`\n"
+        f"📺 Ads Config: `{ac_val}`"
+    )
+    await message.reply(text)
+
+@app.on_message(filters.command("broadcast") & filters.private)
+async def broadcast(client, message):
+    user_id = str(message.from_user.id)
+    if user_id != str(OWNER_ID):
+        return
+        
+    if not message.reply_to_message:
+        await message.reply("Reply to a message to broadcast it.")
+        return
+        
+    msg = await message.reply("🚀 Starting broadcast...")
+    
+    db = get_db()
+    users = db.query(User).all()
+    
+    count = 0
+    blocked = 0
+    
+    for row in users:
+        try:
+            await message.reply_to_message.copy(row.telegram_id)
+            count += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            blocked += 1
+    
+    db.close()
+    await msg.edit_text(f"✅ Broadcast complete.\nSent: {count}\nFailed/Blocked: {blocked}")
