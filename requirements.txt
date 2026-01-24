@@ -1,5 +1,6 @@
 dnspython
-hydrogram
+kurigram
 motor
 pymongo
 TgCrypto
+kurigram
