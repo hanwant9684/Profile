@@ -1,9 +1,11 @@
 import asyncio
 import os
 import time
+import io
+import aiofiles
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
+from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore, MEMORY_BUFFER_LIMIT
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
 
 async def progress_bar(current, total, message, type_msg):
@@ -17,13 +19,13 @@ async def progress_bar(current, total, message, type_msg):
     bar = "✅" * finished_blocks + "⬜" * remaining_blocks
     
     if not hasattr(progress_bar, "last_update"):
-        progress_bar.last_update = {}
+        setattr(progress_bar, "last_update", {})
     
     msg_id = message.id
-    last_val = progress_bar.last_update.get(msg_id, 0)
+    last_val = getattr(progress_bar, "last_update").get(msg_id, 0)
     
     if abs(percentage - last_val) >= 10 or current == total:
-        progress_bar.last_update[msg_id] = percentage
+        getattr(progress_bar, "last_update")[msg_id] = percentage
         try:
             await message.edit_text(
                 f"**{type_msg}... {percentage:.1f}%**"
@@ -134,7 +136,7 @@ async def download_handler(client, message):
     
     # Check force sub before starting download
     is_subbed, channel = await verify_force_sub(client, user_id)
-    if not is_subbed:
+    if not is_subbed and channel:
         await message.reply(
             f"⛔ You must join our channel to use this bot.\n\n👉 {channel}",
             reply_markup=InlineKeyboardMarkup([
@@ -310,19 +312,35 @@ async def download_handler(client, message):
                     
                     path = None
                     sent_msg = None
+                    file_size = 0
                     
-                    if user_client == client and isinstance(chat_id, str):
+                    if media_msg.document: file_size = media_msg.document.file_size
+                    elif media_msg.video: file_size = media_msg.video.file_size
+                    elif media_msg.audio: file_size = media_msg.audio.file_size
+                    elif media_msg.photo: file_size = media_msg.photo.file_size
+
+                    use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
+
+                    if user_client == client and isinstance(chat_id, (str, int)):
                         try:
-                            sent = await user_client.copy_message(
+                            # Direct copy is fastest for public links
+                            sent = await client.copy_message(
                                 chat_id=user_id,
                                 from_chat_id=chat_id,
                                 message_id=media_msg.id
                             )
-                            path = "COPIED"
-                            sent_msg = sent
-                            downloaded_count += 1
+                            if sent:
+                                path = "COPIED"
+                                sent_msg = sent
+                                downloaded_count += 1
                         except Exception as e:
-                            print(f"[DEBUG] copy_message failed for msg {media_msg.id}: {e}, falling back to download")
+                            print(f"[DEBUG] copy_message failed: {e}, falling back to download")
+                    
+                    if not path:
+                        if use_memory:
+                            path = await user_client.download_media(media_msg, in_memory=True)
+                        else:
+                            # Optimized fast transfer
                             path = await asyncio.wait_for(
                                 user_client.download_media(
                                     media_msg, 
@@ -331,15 +349,6 @@ async def download_handler(client, message):
                                 ), 
                                 timeout=600
                             )
-                    else:
-                        path = await asyncio.wait_for(
-                            user_client.download_media(
-                                media_msg, 
-                                progress=progress_bar, 
-                                progress_args=(status_msg, f"📥 Downloading {idx + 1}/{files_to_download}")
-                            ), 
-                            timeout=600
-                        )
                     
                     if path and path != "COPIED":
                         caption = media_msg.caption if media_msg.caption else None
@@ -354,16 +363,16 @@ async def download_handler(client, message):
                                 user_id,
                                 path,
                                 caption=caption,
-                                progress=progress_bar,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}")
+                                progress=progress_bar if not use_memory else None,
+                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
                             )
                         elif media_msg.audio:
                             sent_msg = await client.send_audio(
                                 user_id,
                                 path,
                                 caption=caption,
-                                progress=progress_bar,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}")
+                                progress=progress_bar if not use_memory else None,
+                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
                             )
                         elif media_msg.video:
                             thumb_path = None
@@ -382,8 +391,8 @@ async def download_handler(client, message):
                                 height=media_msg.video.height or 0,
                                 thumb=thumb_path,
                                 supports_streaming=True,
-                                progress=progress_bar,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}")
+                                progress=progress_bar if not use_memory else None,
+                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
                             )
                             
                             if thumb_path and os.path.exists(thumb_path):
@@ -396,13 +405,13 @@ async def download_handler(client, message):
                                 user_id, 
                                 path, 
                                 caption=caption,
-                                progress=progress_bar,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}")
+                                progress=progress_bar if not use_memory else None,
+                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
                             )
                         
                         downloaded_count += 1
                         
-                        if os.path.exists(path):
+                        if not use_memory and os.path.exists(path):
                             try:
                                 os.remove(path)
                             except:
