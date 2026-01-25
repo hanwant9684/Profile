@@ -20,6 +20,9 @@ if __name__ == "__main__":
     init_db()
     print("Starting cleanup task...")
     from bot.login import cleanup_expired_logins
+    from bot.web import start_health_check
+    
+    start_health_check()
     asyncio.get_event_loop().create_task(cleanup_expired_logins())
     print("Starting bot...")
     app.run()
