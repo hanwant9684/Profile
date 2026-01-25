@@ -579,8 +579,16 @@ async def upgrade(client, message):
     )
     text = (
         "💎 **Premium Plans**\n\n"
-        "⚡ **Standard** - $5 / Month\n"
+        "⚡ **Standard**\n"
+        " -------------------"\n
+        "🔸 07 days :- $1 / ₹90"\n
+        "🔸 15 days :- $1.5 / ₹135"\n
+        "🔸 30 days :- $2 / ₹180"\n
+        " -------------------"\n
         "• Unlimited Downloads\n"
+        "• Batch Download upto (50) Files\n"
+        "• Every Minute Admin Support\n"
+        "• Extra bot If services goes down\n"
         "• Fast Speed\n\n"
         "🔥 **Lifetime** - $25\n"
         "• All Premium Features\n"
