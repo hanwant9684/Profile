@@ -13,7 +13,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 # Bot Configuration
 OWNER_ID = os.environ.get("OWNER_ID")
 OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "OwnerUsername")
-SUPPORT_BOT = os.environ.get("SUPPORT_BOT", "https://t.me/Wolfy004chatbot")
+SUPPORT_CHAT_LINK = os.environ.get("SUPPORT_CHAT_LINK", "https://t.me/Wolfy004chatbot")
 PAYPAL_URL = os.environ.get("PAYPAL_URL", "Contact Owner")
 UPI_ID = os.environ.get("UPI_ID", "Contact Owner")
 APPLE_PAY = os.environ.get("APPLE_PAY", "Contact Owner")
