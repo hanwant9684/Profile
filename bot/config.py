@@ -1,6 +1,9 @@
 import os
 import asyncio
 from pyrogram import Client
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # API Credentials
 API_ID = os.environ.get("API_ID")
