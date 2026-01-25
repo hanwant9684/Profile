@@ -145,7 +145,10 @@ async def download_handler(client, message):
 
     allowed, msg = await check_and_update_quota(user_id)
     if not allowed:
-        await message.reply(f"⛔ {msg}")
+        await message.reply(
+            f"⛔ {msg}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Upgrade to Premium", callback_data="upgrade_prompt")]])
+        )
         return
 
     ad_setting = await get_setting("ad_config")
@@ -249,7 +252,10 @@ async def download_handler(client, message):
                 quota_limited = files_to_download < total_files and not is_unlimited
                 
                 if files_to_download == 0:
-                    await status_msg.edit_text("⛔ Daily limit reached (5/5). Upgrade to Premium for unlimited downloads using /upgrade")
+                    await status_msg.edit_text(
+                        "⛔ Daily limit reached (5/5). Upgrade to Premium for unlimited downloads.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Upgrade to Premium", callback_data="upgrade_prompt")]])
+                    )
                     active_downloads.discard(user_id)
                     global_download_semaphore.release()
                     return
@@ -423,7 +429,8 @@ async def download_handler(client, message):
                     await status_msg.edit_text(
                         f"✅ Downloaded {downloaded_count}/{total_files} files.\n\n"
                         f"⚠️ {skipped} file(s) skipped due to daily limit.\n"
-                        f"💎 Upgrade to Premium for unlimited downloads! Use /upgrade"
+                        f"💎 Upgrade to Premium for unlimited downloads!",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Upgrade to Premium", callback_data="upgrade_prompt")]])
                     )
                 else:
                     await status_msg.delete()
@@ -549,6 +556,11 @@ async def download_handler(client, message):
                 await user_client.disconnect()
             except:
                 pass
+
+@app.on_callback_query(filters.regex("upgrade_prompt"))
+async def upgrade_prompt_callback(client, callback_query):
+    await upgrade(client, callback_query.message)
+    await callback_query.answer()
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
