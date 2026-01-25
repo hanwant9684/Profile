@@ -9,6 +9,18 @@ from bot.database import get_user, create_user, update_user_terms, save_session_
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = message.from_user.id
+
+    from bot.handlers import verify_force_sub
+    is_subbed, channel = await verify_force_sub(client, user_id)
+    if not is_subbed:
+        await message.reply(
+            f"⛔ You must join our channel to use this bot.\n\n👉 {channel}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Join Channel", url=f"https://t.me/{channel.replace('@', '')}")]
+            ])
+        )
+        return
+
     user = await get_user(user_id)
     
     if not user:
@@ -83,6 +95,7 @@ async def cleanup_expired_logins():
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
+    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK
     help_text = (
         "📖 **Help Menu**\n\n"
         "🔗 **Downloads**\n"
@@ -97,7 +110,13 @@ async def help_command(client, message):
         "• /upgrade - View premium plans\n"
         "• /help - Show this menu\n"
     )
-    await message.reply(help_text)
+    await message.reply(
+        help_text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Support Chat", url=SUPPORT_CHAT_LINK)],
+            [InlineKeyboardButton("👤 Contact Owner", url=f"https://t.me/{OWNER_USERNAME}")]
+        ])
+    )
 
 @app.on_message(filters.command("batch") & filters.private)
 async def batch_command(client, message):

@@ -131,16 +131,6 @@ async def batch_command(client, message):
 async def download_handler(client, message):
     user_id = message.from_user.id
     
-    is_subbed, channel = await verify_force_sub(client, user_id)
-    if not is_subbed:
-        await message.reply(
-            f"⛔ You must join our channel to use this bot.\n\n👉 {channel}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Join Channel", url=f"https://t.me/{channel.replace('@', '')}")]
-            ])
-        )
-        return
-
     allowed, msg = await check_and_update_quota(user_id)
     if not allowed:
         await message.reply(f"⛔ {msg}")
@@ -550,15 +540,31 @@ async def download_handler(client, message):
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
-    text = (
-        "💎 **Premium Benefits**\n"
-        "• Unlimited Downloads\n"
-        "• Priority Support\n"
-        "• No Ads\n\n"
-        "💰 **Pricing**\n"
-        "• 1 Month: $5\n"
-        "• Lifetime: $25\n\n"
-        "To upgrade, please contact the owner: @OwnerUsername\n"
-        "(Payment methods: PayPal, Crypto, UPI)"
+    from bot.config import (
+        OWNER_USERNAME, SUPPORT_CHAT_LINK, PAYPAL_LINK, 
+        UPI_ID, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
     )
-    await message.reply(text)
+    text = (
+        "💎 **Premium Plans**\n\n"
+        "⚡ **Standard** - $5 / Month\n"
+        "• Unlimited Downloads\n"
+        "• Fast Speed\n\n"
+        "🔥 **Lifetime** - $25\n"
+        "• All Premium Features\n"
+        "• Priority Support\n\n"
+        "💳 **Payment Details**\n"
+        f"• **PayPal**:\n └{PAYPAL_LINK}\n\n"
+        f"• **UPI**:\n └`{UPI_ID}`\n\n"
+        f"• **Apple Pay**:\n └{APPLE_PAY_ID}`\n\n"
+        f"• **Crypto**:\n └`{CRYPTO_ADDRESS}`\n\n"
+        f"• **Card**:\n └{CARD_PAYMENT_LINK}\n\n"
+        f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
+    )
+    await message.reply(
+        text,
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Support Chat", url=SUPPORT_CHAT_LINK)],
+            [InlineKeyboardButton("👤 Contact Owner", url=f"https://t.me/{OWNER_USERNAME}")]
+        ])
+    )
