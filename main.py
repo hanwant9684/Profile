@@ -1,5 +1,9 @@
 import asyncio
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from bot.config import app
 from bot.database import init_db
 
