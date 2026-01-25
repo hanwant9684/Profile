@@ -580,11 +580,11 @@ async def upgrade(client, message):
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
-        " -------------------"\n
-        "🔸 07 days :- $1 / ₹90"\n
-        "🔸 15 days :- $1.5 / ₹135"\n
-        "🔸 30 days :- $2 / ₹180"\n
-        " -------------------"\n
+        " -------------------\n"
+        "🔸 07 days :- $1 / ₹90\n"
+        "🔸 15 days :- $1.5 / ₹135\n"
+        "🔸 30 days :- $2 / ₹180\n"
+        " -------------------\n"
         "• Unlimited Downloads\n"
         "• Batch Download upto (50) Files\n"
         "• Every Minute Admin Support\n"
