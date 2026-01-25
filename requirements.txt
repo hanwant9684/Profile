@@ -10,3 +10,8 @@ pymongo
 TgCrypto
 dnspython
 kurigram
+dnspython
+kurigram
+motor
+pymongo
+TgCrypto
