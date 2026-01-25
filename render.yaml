@@ -1,1 +1,4 @@
 python main.py
+envVars:
+  - key: RUN_WEB_SERVER
+    value: "True"
