@@ -3,15 +3,4 @@ kurigram
 motor
 pymongo
 TgCrypto
-dnspython
-kurigram
-motor
-pymongo
-TgCrypto
-dnspython
-kurigram
-dnspython
-kurigram
-motor
-pymongo
-TgCrypto
+python-dotenv
