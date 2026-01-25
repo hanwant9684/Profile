@@ -5,3 +5,14 @@ pymongo
 TgCrypto
 python-dotenv
 flask
+dnspython
+flask
+kurigram
+motor
+pymongo
+python-dotenv
+TgCrypto
+aiofiles
+aiohttp
+tgcrypto
+uvloop

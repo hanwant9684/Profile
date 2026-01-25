@@ -1,6 +1,11 @@
 import asyncio
 import logging
 import os
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
 from dotenv import load_dotenv
 
 load_dotenv()
