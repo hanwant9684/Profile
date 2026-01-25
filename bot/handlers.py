@@ -33,25 +33,26 @@ async def progress_bar(current, total, message, type_msg):
 
 async def verify_force_sub(client, user_id):
     from bot.config import OWNER_ID
-    user = await get_user(user_id)
-    if user and user.get('role') in ['owner', 'admin']:
-        return True, None
-
+    
+    # Check database setting for force sub channel
     setting = await get_setting("force_sub_channel")
     if not setting or not setting.get('value'):
         return True, None
         
     channel = setting['value']
+    # Ensure channel starts with @ for compatibility
+    if not channel.startswith("@") and not channel.startswith("-100"):
+        channel = f"@{channel}"
+        
     try:
-        from pyrogram.errors import UserNotParticipant
         member = await client.get_chat_member(channel, user_id)
         if member.status in ["left", "kicked"]:
              return False, channel
         return True, None
     except Exception as e:
-        if "USER_NOT_PARTICIPANT" in str(e):
-             return False, channel
-        return True, None
+        # If user is not in the channel, pyrogram raises an error
+        # We catch it and return False to trigger the join prompt
+        return False, channel
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
@@ -131,6 +132,17 @@ async def batch_command(client, message):
 async def download_handler(client, message):
     user_id = message.from_user.id
     
+    # Check force sub before starting download
+    is_subbed, channel = await verify_force_sub(client, user_id)
+    if not is_subbed:
+        await message.reply(
+            f"⛔ You must join our channel to use this bot.\n\n👉 {channel}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Join Channel", url=f"https://t.me/{channel.replace('@', '')}")]
+            ])
+        )
+        return
+
     allowed, msg = await check_and_update_quota(user_id)
     if not allowed:
         await message.reply(f"⛔ {msg}")
@@ -553,16 +565,15 @@ async def upgrade(client, message):
         "• All Premium Features\n"
         "• Priority Support\n\n"
         "💳 **Payment Details**\n"
-        f"• **PayPal**:\n └{PAYPAL_LINK}\n\n"
-        f"• **UPI**:\n └`{UPI_ID}`\n\n"
-        f"• **Apple Pay**:\n └{APPLE_PAY_ID}`\n\n"
-        f"• **Crypto**:\n └`{CRYPTO_ADDRESS}`\n\n"
-        f"• **Card**:\n └{CARD_PAYMENT_LINK}\n\n"
+        f"• **PayPal**:\n {PAYPAL_LINK}\n"
+        f"• **UPI**: `{UPI_ID}`\n"
+        f"• **Apple Pay**: `{APPLE_PAY_ID}`\n"
+        f"• **Crypto**: `{CRYPTO_ADDRESS}`\n"
+        f"• **Card**: {CARD_PAYMENT_LINK}\n\n"
         f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
     )
     await message.reply(
         text,
-        disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("💬 Support Chat", url=SUPPORT_CHAT_LINK)],
             [InlineKeyboardButton("👤 Contact Owner", url=f"https://t.me/{OWNER_USERNAME}")]
