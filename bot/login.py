@@ -26,6 +26,13 @@ async def start(client, message):
     if not user:
         user = await create_user(user_id)
     
+    # Show RichAds on start
+    try:
+        from bot.ads import show_ad
+        await show_ad(client, user_id)
+    except Exception as e:
+        print(f"Error showing RichAds: {e}")
+    
     if not user or not user.get('is_agreed_terms'):
         text = (
             "Welcome to the Downloader Bot!\n\n"

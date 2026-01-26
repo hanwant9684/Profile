@@ -153,10 +153,12 @@ async def download_handler(client, message):
         )
         return
 
-    ad_setting = await get_setting("ad_config")
-    user = await get_user(user_id)
-    if user and user.get('role') == 'free' and ad_setting and ad_setting.get('json_value'):
-         await message.reply("📢 [Ad] Join @RichAds for best crypto signals!")
+    # Show RichAds for free users
+    try:
+        from bot.ads import show_ad
+        await show_ad(client, user_id)
+    except Exception as e:
+        print(f"Error showing RichAds: {e}")
 
     if user_id in active_downloads:
         await message.reply("⚠️ You already have a download in progress. Please wait.")
