@@ -57,6 +57,69 @@ async def verify_force_sub(client, user_id):
         # We catch it and return False to trigger the join prompt
         return False, channel
 
+import bot.info
+from bot.ads import show_ad
+
+@app.on_message(filters.command("start") & filters.private)
+async def start_command(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    
+    # Store user info in DB
+    user_info = {
+        "first_name": message.from_user.first_name,
+        "last_name": message.from_user.last_name,
+        "username": message.from_user.username
+    }
+    
+    if not user:
+        await create_user(user_id)
+        # We need to update with name info since create_user only sets defaults
+        from bot.database import users_collection
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$set": user_info}
+        )
+        user = await get_user(user_id)
+    else:
+        # Update existing user info
+        from bot.database import users_collection
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$set": user_info}
+        )
+        
+    if not user.get("is_agreed_terms"):
+        # Show ad before terms for new user
+        await show_ad(client, user_id)
+        
+        terms_text = (
+            "👋 **Welcome to the Bot!**\n\n"
+            "By using this bot, you agree to our Terms and Conditions.\n\n"
+            "✅ You will not use this bot for illegal activities.\n"
+            "✅ You respect copyright and ownership.\n\n"
+            "Click the button below to agree and start using the bot."
+        )
+        await message.reply(
+            terms_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("I Agree ✅", callback_data="agree_terms")]
+            ])
+        )
+    else:
+        # Show ad for existing user
+        await show_ad(client, user_id)
+        await bot.info.myinfo(client, message)
+
+@app.on_callback_query(filters.regex("agree_terms"))
+async def agree_terms_callback(client, callback_query):
+    user_id = callback_query.from_user.id
+    from bot.database import update_user_terms
+    await update_user_terms(user_id, True)
+    await callback_query.answer("Terms accepted! 🎉")
+    await callback_query.message.edit_text("✅ You have agreed to the terms. You can now use the bot!")
+    await bot.info.myinfo(client, callback_query.message)
+
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
     help_text = (
@@ -177,11 +240,9 @@ async def download_handler(client, message):
     
     try:
         link = message.text.strip()
-        print(f"[DEBUG] Processing link: {link}")
         
         # Improved parsing for links with ?single or other queries
         link_no_query = link.split('?')[0]
-        print(f"[DEBUG] Link without query: {link_no_query}")
 
         public_match = re.search(r"t\.me/([^/]+)/(\d+)", link_no_query)
         private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link_no_query)
@@ -194,16 +255,13 @@ async def download_handler(client, message):
             chat_id = int("-100" + private_match.group(1))
             message_id = int(private_match.group(2))
             is_private = True
-            print(f"[DEBUG] Private link detected: chat_id={chat_id}, message_id={message_id}")
         elif public_match:
             chat_id = public_match.group(1)
             if chat_id.isdigit():
                  chat_id = int("-100" + chat_id)
             message_id = int(public_match.group(2))
-            print(f"[DEBUG] Public link detected: chat_id={chat_id}, message_id={message_id}")
 
         if is_private and (not user or not user.get('phone_session_string')):
-            print(f"[DEBUG] User {user_id} not logged in for private link")
             await status_msg.edit_text("❌ Login is mandatory for private channel links. Use /login to connect your account.")
             return
 
@@ -212,9 +270,7 @@ async def download_handler(client, message):
             try:
                 user_client = Client(f"user_{user_id}", session_string=session_str, in_memory=True, api_id=API_ID, api_hash=API_HASH)
                 await user_client.connect()
-                print(f"[DEBUG] User client connected")
             except Exception as e:
-                print(f"[DEBUG] User client connection error: {e}")
                 await status_msg.edit_text(f"❌ User session error: {e}")
                 return
 
@@ -223,12 +279,10 @@ async def download_handler(client, message):
         if chat_id and message_id:
             try:
                 fetch_client = user_client if is_private else app
-                print(f"[DEBUG] Fetching message {message_id} from {chat_id}")
                 msg = await asyncio.wait_for(fetch_client.get_messages(chat_id, message_id), timeout=30)
                 
                 if not msg or msg.empty:
                     if not is_private and user and user.get('phone_session_string'):
-                        print(f"[DEBUG] Retrying with user client")
                         try:
                             # Use the persistent user_client if available or create one
                             if not user_client or user_client == client:
@@ -237,10 +291,9 @@ async def download_handler(client, message):
                                 await user_client.connect()
                             msg = await asyncio.wait_for(user_client.get_messages(chat_id, message_id), timeout=30)
                         except Exception as e:
-                            print(f"[DEBUG] Retry with user client failed: {e}")
+                            pass
 
                 if not msg or msg.empty:
-                    print(f"[DEBUG] Failed to fetch message {message_id} from {chat_id}")
                     await status_msg.edit_text("❌ Message restricted or not found. Download message by Login, Use ⚡ /login . And Follow bot Instructions")
                     return
                 
@@ -285,7 +338,6 @@ async def download_handler(client, message):
                             path = "COPIED"
                             downloaded_count += 1
                     except Exception as e:
-                        print(f"[DEBUG] Copy failed: {e}")
                         # Fallback: try copy with user client if available
                         if user_client and user_client != client:
                             try:
@@ -328,16 +380,20 @@ async def download_handler(client, message):
 
                 await increment_quota(user_id, downloaded_count)
                 await status_msg.delete()
+                
+                # Show ad after successful download
+                from bot.ads import show_ad
+                await show_ad(client, user_id)
+                
                 path = "PROCESSED"
 
             except Exception as e:
-                print(f"[DEBUG] Process error: {e}")
                 await status_msg.edit_text(f"❌ Error: {e}")
         else:
             await status_msg.edit_text("❌ Could not parse link.")
 
     except Exception as e:
-        print(f"Global error: {e}")
+        pass
     finally:
         active_downloads.discard(user_id)
         global_download_semaphore.release()

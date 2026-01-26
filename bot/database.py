@@ -60,6 +60,8 @@ async def create_user(user_id):
             "downloads_today": 0,
             "last_download_date": datetime.utcnow().date().isoformat(),
             "is_agreed_terms": False,
+            "ads_today": 0,
+            "last_ad_date": datetime.utcnow().date().isoformat(),
             "phone_session_string": None,
             "premium_expiry_date": None,
             "is_banned": False,
@@ -235,6 +237,39 @@ async def get_all_users():
     except Exception as e:
         logger.error(f"Error getting all users: {e}")
         return []
+
+async def increment_ad_count(user_id):
+    if users_collection is None:
+        return
+    try:
+        today = datetime.utcnow().date().isoformat()
+        await users_collection.update_one(
+            {"telegram_id": str(user_id)},
+            {"$inc": {"ads_today": 1}, "$set": {"last_ad_date": today}}
+        )
+    except Exception as e:
+        logger.error(f"Error incrementing ad count for {user_id}: {e}")
+
+async def get_ad_count_today(user_id):
+    if users_collection is None:
+        return 0
+    try:
+        user = await users_collection.find_one({"telegram_id": str(user_id)})
+        if not user:
+            return 0
+        
+        today = datetime.utcnow().date().isoformat()
+        if user.get("last_ad_date") != today:
+            await users_collection.update_one(
+                {"telegram_id": str(user_id)},
+                {"$set": {"ads_today": 0, "last_ad_date": today}}
+            )
+            return 0
+            
+        return user.get("ads_today", 0)
+    except Exception as e:
+        logger.error(f"Error getting ad count for {user_id}: {e}")
+        return 0
 
 async def get_user_count():
     if users_collection is None:
