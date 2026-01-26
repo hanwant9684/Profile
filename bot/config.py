@@ -53,6 +53,6 @@ app = Client(
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    workers=4, # Reduced workers for 1.5GB RAM
-    max_concurrent_transmissions=2 # Limit concurrent streams to save RAM
+    workers=20, # Reduced workers for 1.5GB RAM
+    max_concurrent_transmissions=8 # Limit concurrent streams to save RAM
 )
