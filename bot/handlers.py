@@ -3,6 +3,7 @@ import os
 import time
 import io
 import aiofiles
+import re
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore, MEMORY_BUFFER_LIMIT
@@ -92,7 +93,6 @@ async def batch_command(client, message):
         start_link = parts[1]
         end_link = parts[2]
         
-        import re
         start_match = re.search(r"t\.me/([^/]+)/(\d+)", start_link) or re.search(r"t\.me/c/(\d+)/(\d+)", start_link)
         end_match = re.search(r"t\.me/([^/]+)/(\d+)", end_link) or re.search(r"t\.me/c/(\d+)/(\d+)", end_link)
         
@@ -145,10 +145,10 @@ async def download_handler(client, message):
         )
         return
 
-    allowed, msg = await check_and_update_quota(user_id)
+    allowed, quota_msg = await check_and_update_quota(user_id)
     if not allowed:
         await message.reply(
-            f"⛔ {msg}",
+            f"⛔ {quota_msg}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Upgrade to Premium", callback_data="upgrade_prompt")]])
         )
         return
@@ -169,402 +169,181 @@ async def download_handler(client, message):
     active_downloads.add(user_id)
     status_msg = await message.reply("🔍 Checking link...")
     
-    user_client = None
+    user_client = client
     path = None
+    msg = None
     
     await global_download_semaphore.acquire()
     
     try:
         link = message.text.strip()
+        print(f"[DEBUG] Processing link: {link}")
         
-        import re
-        chat_id = None
-        message_id = None
-        
-        public_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
-        private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
+        # Improved parsing for links with ?single or other queries
+        link_no_query = link.split('?')[0]
+        print(f"[DEBUG] Link without query: {link_no_query}")
+
+        public_match = re.search(r"t\.me/([^/]+)/(\d+)", link_no_query)
+        private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link_no_query)
         
         is_private = False
+        chat_id = None
+        message_id = None
+
         if private_match:
             chat_id = int("-100" + private_match.group(1))
             message_id = int(private_match.group(2))
             is_private = True
+            print(f"[DEBUG] Private link detected: chat_id={chat_id}, message_id={message_id}")
         elif public_match:
             chat_id = public_match.group(1)
+            if chat_id.isdigit():
+                 chat_id = int("-100" + chat_id)
             message_id = int(public_match.group(2))
+            print(f"[DEBUG] Public link detected: chat_id={chat_id}, message_id={message_id}")
 
-        user = await get_user(user_id)
-        
-        if is_private and (not user or not user.get('phone_session_string') or len(user.get('phone_session_string', '')) < 10):
+        if is_private and (not user or not user.get('phone_session_string')):
+            print(f"[DEBUG] User {user_id} not logged in for private link")
             await status_msg.edit_text("❌ Login is mandatory for private channel links. Use /login to connect your account.")
-            active_downloads.discard(user_id)
-            global_download_semaphore.release()
             return
 
-        # If it's a public link, we prefer using the main bot client (client)
-        # even if the user is logged in, as it's more stable for public links.
-        # User client is only strictly necessary for private links.
         if is_private:
-            user_client = client
-            session_str = user.get('phone_session_string') if user else None
-            if session_str and len(session_str) > 10:
-                 try:
-                     user_client = Client(
-                         f"user_{user_id}", 
-                         session_string=session_str, 
-                         in_memory=True, 
-                         api_id=API_ID, 
-                         api_hash=API_HASH
-                     )
-                     await user_client.connect()
-                 except Exception as e:
-                     print(f"User client connection error: {e}")
-                     user_client = client
-        else:
-            user_client = client
-        
+            session_str = user.get('phone_session_string')
+            try:
+                user_client = Client(f"user_{user_id}", session_string=session_str, in_memory=True, api_id=API_ID, api_hash=API_HASH)
+                await user_client.connect()
+                print(f"[DEBUG] User client connected")
+            except Exception as e:
+                print(f"[DEBUG] User client connection error: {e}")
+                await status_msg.edit_text(f"❌ User session error: {e}")
+                return
+
         await status_msg.edit_text("📥 Checking media...")
         
         if chat_id and message_id:
             try:
-                msg = await user_client.get_messages(chat_id, message_id)
-                if not msg:
-                    print(f"[DEBUG] get_messages returned None for chat_id={chat_id}, message_id={message_id}")
-                    await status_msg.edit_text("❌ Could not find message. Link might be invalid or expired.")
-                    active_downloads.discard(user_id)
-                    global_download_semaphore.release()
+                fetch_client = user_client if is_private else app
+                print(f"[DEBUG] Fetching message {message_id} from {chat_id}")
+                msg = await asyncio.wait_for(fetch_client.get_messages(chat_id, message_id), timeout=30)
+                
+                if not msg or msg.empty:
+                    if not is_private and user and user.get('phone_session_string'):
+                        print(f"[DEBUG] Retrying with user client")
+                        try:
+                            # Use the persistent user_client if available or create one
+                            if not user_client or user_client == client:
+                                session_str = user.get('phone_session_string')
+                                user_client = Client(f"user_{user_id}", session_string=session_str, in_memory=True, api_id=API_ID, api_hash=API_HASH)
+                                await user_client.connect()
+                            msg = await asyncio.wait_for(user_client.get_messages(chat_id, message_id), timeout=30)
+                        except Exception as e:
+                            print(f"[DEBUG] Retry with user client failed: {e}")
+
+                if not msg or msg.empty:
+                    print(f"[DEBUG] Failed to fetch message {message_id} from {chat_id}")
+                    await status_msg.edit_text("❌ Message restricted or not found. Download message by Login, Use ⚡ /login . And Follow bot Instructions")
                     return
                 
                 messages_to_process = [msg]
-                is_media_group = False
-                
                 if msg.media_group_id:
-                    is_media_group = True
                     try:
-                        media_group = await user_client.get_media_group(chat_id, message_id)
-                        messages_to_process = media_group
-                        print(f"[DEBUG] Found media group with {len(messages_to_process)} items")
-                    except Exception as e:
-                        print(f"[DEBUG] get_media_group failed: {e}, processing single message")
-                        messages_to_process = [msg]
+                        # Use the client that successfully fetched the first message
+                        active_fetcher = user_client if (user_client and user_client != client) else app
+                        messages_to_process = await asyncio.wait_for(active_fetcher.get_media_group(chat_id, message_id), timeout=30)
+                    except:
+                        pass
                 
                 remaining_quota, is_unlimited = await get_remaining_quota(user_id)
-                total_files = len(messages_to_process)
-                files_to_download = min(total_files, remaining_quota) if not is_unlimited else total_files
-                quota_limited = files_to_download < total_files and not is_unlimited
+                files_to_download = min(len(messages_to_process), remaining_quota) if not is_unlimited else len(messages_to_process)
                 
                 if files_to_download == 0:
-                    await status_msg.edit_text(
-                        "⛔ Daily limit reached (5/5). Upgrade to Premium for unlimited downloads.",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Upgrade to Premium", callback_data="upgrade_prompt")]])
-                    )
-                    active_downloads.discard(user_id)
-                    global_download_semaphore.release()
+                    await status_msg.edit_text("⛔ Daily limit reached.")
                     return
-                
-                if is_media_group and total_files > 1:
-                    await status_msg.edit_text(f"📥 Found {total_files} files in media group. Downloading {files_to_download}...")
-                else:
-                    await status_msg.edit_text("📥 Downloading...")
                 
                 downloaded_count = 0
                 for idx, media_msg in enumerate(messages_to_process[:files_to_download]):
                     from bot.config import cancel_flags
                     if user_id in cancel_flags:
-                        await status_msg.edit_text("❌ Download cancelled by user.")
+                        await status_msg.edit_text("❌ Cancelled.")
                         cancel_flags.discard(user_id)
-                        active_downloads.discard(user_id)
-                        global_download_semaphore.release()
                         return
 
                     if not media_msg.media:
                         if media_msg.text:
-                            # Handle text-only messages
-                            try:
-                                sent_msg = await client.send_message(
-                                    user_id,
-                                    media_msg.text,
-                                    entities=media_msg.entities
-                                )
-                                downloaded_count += 1
-                                # Handle dumping for text messages
-                                dump_id = os.environ.get("DUMP_CHANNEL_ID")
-                                db_dump = await get_setting("dump_channel_id")
-                                if db_dump and db_dump.get('value'):
-                                    dump_id = db_dump['value']
-                                if dump_id and sent_msg:
-                                    try:
-                                        dump_id_int = int(dump_id)
-                                        original_text = media_msg.text or ""
-                                        dump_caption = f"From User: `{user_id}`\nLink: {link}\n\n{original_text}".strip()
-                                        await sent_msg.copy(dump_id_int, caption=dump_caption)
-                                    except:
-                                        pass
-                            except Exception as e:
-                                print(f"Error sending text message: {e}")
+                            sent = await app.send_message(user_id, media_msg.text, entities=media_msg.entities)
+                            if sent: downloaded_count += 1
                         continue
                     
-                    current_status = f"📥 Downloading file {idx + 1}/{files_to_download}..." if files_to_download > 1 else "📥 Downloading..."
-                    try:
-                        await status_msg.edit_text(current_status)
-                    except:
-                        pass
+                    await status_msg.edit_text(f"📥 Processing {idx+1}/{files_to_download}...")
                     
+                    # Try direct copy for all links first (it's fastest and bypasses local download)
                     path = None
-                    sent_msg = None
-                    file_size = 0
-                    
-                    if media_msg.document: file_size = media_msg.document.file_size
-                    elif media_msg.video: file_size = media_msg.video.file_size
-                    elif media_msg.audio: file_size = media_msg.audio.file_size
-                    elif media_msg.photo: file_size = media_msg.photo.file_size
-
-                    use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
-
-                    if user_client == client and isinstance(chat_id, (str, int)):
-                        try:
-                            # Direct copy is fastest for public links
-                            sent = await client.copy_message(
-                                chat_id=user_id,
-                                from_chat_id=chat_id,
-                                message_id=media_msg.id
-                            )
-                            if sent:
-                                path = "COPIED"
-                                sent_msg = sent
-                                downloaded_count += 1
-                        except Exception as e:
-                            print(f"[DEBUG] copy_message failed: {e}, falling back to download")
-                    
-                    if not path:
-                        if use_memory:
-                            path = await user_client.download_media(media_msg, in_memory=True)
-                        else:
-                            # Optimized fast transfer
-                            path = await asyncio.wait_for(
-                                user_client.download_media(
-                                    media_msg, 
-                                    progress=progress_bar, 
-                                    progress_args=(status_msg, f"📥 Downloading {idx + 1}/{files_to_download}")
-                                ), 
-                                timeout=600
-                            )
-                    
-                    if path and path != "COPIED":
-                        caption = media_msg.caption if media_msg.caption else None
-                        
-                        try:
-                            await status_msg.edit_text(f"📤 Uploading file {idx + 1}/{files_to_download}...")
-                        except:
-                            pass
-                        
-                        if media_msg.photo:
-                            sent_msg = await client.send_photo(
-                                user_id,
-                                path,
-                                caption=caption,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
-                        elif media_msg.audio:
-                            sent_msg = await client.send_audio(
-                                user_id,
-                                path,
-                                caption=caption,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
-                        elif media_msg.video:
-                            thumb_path = None
+                    try:
+                        # Try with main bot first
+                        sent = await app.copy_message(user_id, chat_id, media_msg.id)
+                        if sent:
+                            path = "COPIED"
+                            downloaded_count += 1
+                    except Exception as e:
+                        print(f"[DEBUG] Copy failed: {e}")
+                        # Fallback: try copy with user client if available
+                        if user_client and user_client != client:
                             try:
-                                if media_msg.video.thumbs:
-                                    thumb_path = await user_client.download_media(media_msg.video.thumbs[0].file_id)
-                            except Exception as e:
-                                print(f"[DEBUG] Thumbnail download failed: {e}")
-                            
-                            sent_msg = await client.send_video(
-                                user_id,
-                                path,
-                                caption=caption,
-                                duration=media_msg.video.duration or 0,
-                                width=media_msg.video.width or 0,
-                                height=media_msg.video.height or 0,
-                                thumb=thumb_path,
-                                supports_streaming=True,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
-                            
-                            if thumb_path and os.path.exists(thumb_path):
-                                try:
-                                    os.remove(thumb_path)
-                                except:
-                                    pass
-                        else:
-                            sent_msg = await client.send_document(
-                                user_id, 
-                                path, 
-                                caption=caption,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
-                        
-                        downloaded_count += 1
-                        
-                        if not use_memory and os.path.exists(path):
-                            try:
-                                os.remove(path)
+                                # User client copy works if bot can't see the message but user can
+                                sent = await user_client.copy_message(user_id, chat_id, media_msg.id)
+                                if sent:
+                                    path = "COPIED"
+                                    downloaded_count += 1
                             except:
                                 pass
                     
-                    dump_id = os.environ.get("DUMP_CHANNEL_ID")
-                    db_dump = await get_setting("dump_channel_id")
-                    if db_dump and db_dump.get('value'):
-                        dump_id = db_dump['value']
-                    
-                    if dump_id and sent_msg:
-                        try:
-                            dump_id_int = int(dump_id)
-                            original_caption = media_msg.caption or ""
-                            dump_caption = f"From User: `{user_id}`\nLink: {link}\n\n{original_caption}".strip()
-                            await sent_msg.copy(dump_id_int, caption=dump_caption)
-                        except Exception as e:
-                            print(f"Dump failed: {e}")
-                
+                    if not path:
+                        # Full download fallback
+                        file_size = 0
+                        if media_msg.document: file_size = media_msg.document.file_size
+                        elif media_msg.video: file_size = media_msg.video.file_size
+                        elif media_msg.audio: file_size = media_msg.audio.file_size
+                        elif media_msg.photo: file_size = media_msg.photo.file_size
+
+                        use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
+                        
+                        # Use whichever client can see the media
+                        downloader = user_client if (user_client and user_client != client) else app
+                        path = await downloader.download_media(media_msg, in_memory=use_memory, progress=progress_bar, progress_args=(status_msg, "📥 Downloading"))
+                        
+                        if path:
+                            await status_msg.edit_text(f"📤 Uploading {idx+1}/{files_to_download}...")
+                            caption = media_msg.caption
+                            sent_msg = None
+                            if media_msg.photo: sent_msg = await app.send_photo(user_id, path, caption=caption)
+                            elif media_msg.audio: sent_msg = await app.send_audio(user_id, path, caption=caption)
+                            elif media_msg.video:
+                                thumb = await downloader.download_media(media_msg.video.thumbs[0].file_id) if (media_msg.video and media_msg.video.thumbs) else None
+                                sent_msg = await app.send_video(user_id, path, caption=caption, thumb=thumb, supports_streaming=True)
+                                if thumb and os.path.exists(thumb): os.remove(thumb)
+                            else: sent_msg = await app.send_document(user_id, path, caption=caption)
+                            
+                            if sent_msg: downloaded_count += 1
+                            if not use_memory and os.path.exists(path): os.remove(path)
+
                 await increment_quota(user_id, downloaded_count)
-                
-                if quota_limited:
-                    skipped = total_files - files_to_download
-                    await status_msg.edit_text(
-                        f"✅ Downloaded {downloaded_count}/{total_files} files.\n\n"
-                        f"⚠️ {skipped} file(s) skipped due to daily limit.\n"
-                        f"💎 Upgrade to Premium for unlimited downloads!",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💎 Upgrade to Premium", callback_data="upgrade_prompt")]])
-                    )
-                else:
-                    await status_msg.delete()
-                
+                await status_msg.delete()
                 path = "PROCESSED"
-                
+
             except Exception as e:
-                print(f"[DEBUG] Direct extraction failed: {str(e)}")
-                print(f"Direct extraction failed, trying fallback: {e}")
-                path = await asyncio.wait_for(
-                    user_client.download_media(
-                        link, 
-                        progress=progress_bar, 
-                        progress_args=(status_msg, "📥 Downloading")
-                    ), 
-                    timeout=600
-                )
-                print(f"[DEBUG] Fallback download result path: {path}")
+                print(f"[DEBUG] Process error: {e}")
+                await status_msg.edit_text(f"❌ Error: {e}")
         else:
-            print(f"[DEBUG] No specific chat_id/message_id parsed from link: {link}")
-            path = await asyncio.wait_for(
-                user_client.download_media(
-                    link, 
-                    progress=progress_bar, 
-                    progress_args=(status_msg, "📥 Downloading")
-                ), 
-                timeout=600
-            )
-            print(f"[DEBUG] General download result path: {path}")
-        
-        if path == "PROCESSED":
-            pass
-        elif not path and not status_msg.text.startswith("❌"):
-             raise Exception("Download failed or empty.")
-        elif path and path not in ["COPIED", "PROCESSED"]:
-            caption = msg.caption if (msg and msg.caption) else None
-            
-            if msg.photo:
-                sent_msg = await client.send_photo(
-                    user_id,
-                    path,
-                    caption=caption,
-                    progress=progress_bar,
-                    progress_args=(status_msg, "📤 Uploading")
-                )
-            elif msg.audio:
-                sent_msg = await client.send_audio(
-                    user_id,
-                    path,
-                    caption=caption,
-                    progress=progress_bar,
-                    progress_args=(status_msg, "📤 Uploading")
-                )
-            elif msg.video:
-                 thumb_path = None
-                 try:
-                     if msg.video.thumbs:
-                         thumb_path = await user_client.download_media(msg.video.thumbs[0].file_id)
-                 except Exception as e:
-                     print(f"[DEBUG] Thumbnail download failed: {e}")
-                 
-                 sent_msg = await client.send_video(
-                    user_id,
-                    path,
-                    caption=caption,
-                    duration=msg.video.duration or 0,
-                    width=msg.video.width or 0,
-                    height=msg.video.height or 0,
-                    thumb=thumb_path,
-                    supports_streaming=True,
-                    progress=progress_bar,
-                    progress_args=(status_msg, "📤 Uploading")
-                )
-                 
-                 if thumb_path and os.path.exists(thumb_path):
-                     try:
-                         os.remove(thumb_path)
-                     except:
-                         pass
-            else:
-                sent_msg = await client.send_document(
-                    user_id, 
-                    path, 
-                    caption=caption,
-                    progress=progress_bar,
-                    progress_args=(status_msg, "📤 Uploading")
-                )
-        
-            dump_id = os.environ.get("DUMP_CHANNEL_ID")
-            db_dump = await get_setting("dump_channel_id")
-            if db_dump and db_dump.get('value'):
-                 dump_id = db_dump['value']
+            await status_msg.edit_text("❌ Could not parse link.")
 
-            if dump_id:
-                try:
-                    dump_id_int = int(dump_id)
-                    original_caption = msg.caption if msg else ""
-                    original_caption = original_caption or ""
-                    dump_caption = f"From User: `{user_id}`\nLink: {link}\n\n{original_caption}".strip()
-                    await sent_msg.copy(dump_id_int, caption=dump_caption)
-                except Exception as e:
-                    print(f"Dump failed: {e}")
-
-            await increment_quota(user_id)
-            await status_msg.delete()
-        
-    except asyncio.TimeoutError:
-        await status_msg.edit_text("❌ Download timed out (limit: 10 mins).")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        print(f"Global error: {e}")
     finally:
-        global_download_semaphore.release()
         active_downloads.discard(user_id)
-        
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-            except:
-                pass
-                
-        if user_client and user_client != client:
-            try:
-                await user_client.disconnect()
-            except:
-                pass
+        global_download_semaphore.release()
+        if is_private and user_client and user_client != client:
+            try: await user_client.disconnect()
+            except: pass
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))
 async def upgrade_prompt_callback(client, callback_query):
@@ -573,38 +352,16 @@ async def upgrade_prompt_callback(client, callback_query):
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
-    from bot.config import (
-        OWNER_USERNAME, SUPPORT_CHAT_LINK, PAYPAL_LINK, 
-        UPI_ID, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
-    )
+    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, PAYPAL_LINK, UPI_ID, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
-        " -------------------\n"
-        "🔸 07 days :- $1 / ₹90\n"
-        "🔸 15 days :- $1.5 / ₹135\n"
-        "🔸 30 days :- $2 / ₹180\n"
-        " -------------------\n"
         "• Unlimited Downloads\n"
         "• Batch Download upto (50) Files\n"
-        "• Every Minute Admin Support\n"
-        "• Extra bot If services goes down\n"
         "• Fast Speed\n\n"
-        "🔥 **Lifetime** - $25\n"
-        "• All Premium Features\n"
-        "• Priority Support\n\n"
         "💳 **Payment Details**\n"
-        f"• **PayPal**:\n └ {PAYPAL_LINK}\n"
-        f"• **UPI**:\n └ `{UPI_ID}`\n"
-        f"• **Apple Pay**:\n └ `{APPLE_PAY_ID}`\n"
-        f"• **Crypto**:\n └ `{CRYPTO_ADDRESS}`\n"
-        f"• **Card**:\n └ {CARD_PAYMENT_LINK}\n\n"
-        f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
+        f"• **PayPal**: {PAYPAL_LINK}\n"
+        f"• **UPI**: `{UPI_ID}`\n"
+        f"🚀 Contact: @{OWNER_USERNAME}"
     )
-    await message.reply(
-        text,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Support Chat", url=SUPPORT_CHAT_LINK)],
-            [InlineKeyboardButton("👤 Contact Owner", url=f"https://t.me/{OWNER_USERNAME}")]
-        ])
-    )
+    await message.reply(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Support Chat", url=SUPPORT_CHAT_LINK)]]))

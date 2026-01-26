@@ -217,7 +217,7 @@ async def batch_command(client, message):
     except Exception as e:
         await message.reply(f"❌ Batch error: {str(e)}")
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch"]) & ~filters.regex(r"https://t\.me/"))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
