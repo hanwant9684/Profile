@@ -13,23 +13,28 @@ async def progress_bar(current, total, message, type_msg):
         return
     percentage = current * 100 / total
     
-    # Minimal progress bar (standard 10 blocks)
-    finished_blocks = int(percentage / 10)
-    remaining_blocks = 10 - finished_blocks
-    bar = "✅" * finished_blocks + "⬜" * remaining_blocks
-    
     if not hasattr(progress_bar, "last_update"):
         setattr(progress_bar, "last_update", {})
+    if not hasattr(progress_bar, "last_time"):
+        setattr(progress_bar, "last_time", {})
     
     msg_id = message.id
     last_val = getattr(progress_bar, "last_update").get(msg_id, 0)
+    last_time = getattr(progress_bar, "last_time").get(msg_id, 0)
+    now = time.time()
     
-    if abs(percentage - last_val) >= 10 or current == total:
-        getattr(progress_bar, "last_update")[msg_id] = percentage
+    if current == total:
+        getattr(progress_bar, "last_update").pop(msg_id, None)
+        getattr(progress_bar, "last_time").pop(msg_id, None)
         try:
-            await message.edit_text(
-                f"**{type_msg}... {percentage:.1f}%**"
-            )
+            await message.edit_text(f"**{type_msg}... 100%**")
+        except:
+            pass
+    elif (now - last_time) >= 3 and abs(percentage - last_val) >= 5:
+        getattr(progress_bar, "last_update")[msg_id] = percentage
+        getattr(progress_bar, "last_time")[msg_id] = now
+        try:
+            await message.edit_text(f"**{type_msg}... {percentage:.0f}%**")
         except:
             pass
 
