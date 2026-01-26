@@ -47,3 +47,13 @@ TgCrypto
 uvloop
 tgcrypto
 uvloop
+aiofiles
+aiohttp
+dnspython
+flask
+kurigram
+motor
+pymongo
+python-dotenv
+TgCrypto
+uvloop
