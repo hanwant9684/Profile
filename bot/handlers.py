@@ -11,31 +11,82 @@ from bot.database import get_user, check_and_update_quota, increment_quota, get_
 async def progress_bar(current, total, message, type_msg):
     if total == 0:
         return
-    percentage = current * 100 / total
     
-    if not hasattr(progress_bar, "last_update"):
-        setattr(progress_bar, "last_update", {})
-    if not hasattr(progress_bar, "last_time"):
-        setattr(progress_bar, "last_time", {})
+    now = time.time()
+    if not hasattr(progress_bar, "data"):
+        setattr(progress_bar, "data", {})
     
     msg_id = message.id
-    last_val = getattr(progress_bar, "last_update").get(msg_id, 0)
-    last_time = getattr(progress_bar, "last_time").get(msg_id, 0)
-    now = time.time()
+    if msg_id not in progress_bar.data:
+        progress_bar.data[msg_id] = {
+            "last_val": 0,
+            "last_time": now,
+            "start_time": now,
+            "last_edit": 0
+        }
     
+    data = progress_bar.data[msg_id]
+    percentage = current * 100 / total
+    
+    # Throttle updates: Update at most every 4 seconds to avoid bottleneck
+    if current != total and (now - data["last_edit"]) < 4:
+        return
+
+    # Calculate speed (bytes per second)
+    elapsed_time = now - data["start_time"]
+    if elapsed_time > 0:
+        speed = current / elapsed_time
+    else:
+        speed = 0
+        
+    # Calculate ETA
+    if speed > 0:
+        remaining_bytes = total - current
+        eta = remaining_bytes / speed
+    else:
+        eta = 0
+
+    def format_size(size):
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} TB"
+
+    def format_time(seconds):
+        if seconds <= 0: return "0s"
+        minutes, seconds = divmod(int(seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0: return f"{hours}h {minutes}m {seconds}s"
+        if minutes > 0: return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
+    speed_str = format_size(speed) + "/s"
+    eta_str = format_time(eta)
+    
+    # Progress bar visual
+    completed = int(percentage / 10)
+    bar = "█" * completed + "░" * (10 - completed)
+    
+    text = (
+        f"**{type_msg}**\n"
+        f"[{bar}] {percentage:.1f}%\n"
+        f"🚀 **Speed:** `{speed_str}`\n"
+        f"⏳ **ETA:** `{eta_str}`\n"
+        f"📦 **Size:** `{format_size(current)} / {format_size(total)}`"
+    )
+
     if current == total:
-        getattr(progress_bar, "last_update").pop(msg_id, None)
-        getattr(progress_bar, "last_time").pop(msg_id, None)
+        progress_bar.data.pop(msg_id, None)
         try:
-            await message.edit_text(f"**{type_msg}... 100%**")
+            await message.edit_text(f"**{type_msg} Completed!**\n📦 **Total Size:** `{format_size(total)}`")
         except:
             pass
-    elif (now - last_time) >= 3 and abs(percentage - last_val) >= 5:
-        getattr(progress_bar, "last_update")[msg_id] = percentage
-        getattr(progress_bar, "last_time")[msg_id] = now
+    else:
+        data["last_edit"] = now
         try:
-            await message.edit_text(f"**{type_msg}... {percentage:.0f}%**")
-        except:
+            await message.edit_text(text)
+        except Exception:
             pass
 
 async def verify_force_sub(client, user_id):
@@ -589,18 +640,24 @@ async def upgrade(client, message):
     )
     text = (
         "💎 **Premium Plans**\n\n"
-        "⚡ **Standard** - $5 / Month\n"
+        "⚡ **Standard**\n"
+        "•——————————————————————•\n"
+        "🔸 **7** days - **$1**\n"
+        "🔸 **15** days - **$1.5**\n"
+        "🔸 **30** days - **$2**\n"
+        "•——————————————————————•\n"
         "• Unlimited Downloads\n"
+        "• Batch Download upto (50)\n"
         "• Fast Speed\n\n"
         "🔥 **Lifetime** - $25\n"
         "• All Premium Features\n"
         "• Priority Support\n\n"
         "💳 **Payment Details**\n"
-        f"• **PayPal**:\n {PAYPAL_LINK}\n"
-        f"• **UPI**: `{UPI_ID}`\n"
-        f"• **Apple Pay**: `{APPLE_PAY_ID}`\n"
-        f"• **Crypto**: `{CRYPTO_ADDRESS}`\n"
-        f"• **Card**: {CARD_PAYMENT_LINK}\n\n"
+        f"• **PayPal**:\n ╰{PAYPAL_LINK}\n"
+        f"• **UPI**:\n ╰`{UPI_ID}`\n"
+        f"• **Apple Pay**:\n ╰{APPLE_PAY_ID}\n"
+        f"• **Crypto**:\n ╰`{CRYPTO_ADDRESS}`\n"
+        f"• **Card**:\n ╰{CARD_PAYMENT_LINK}\n\n"
         f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
     )
     await message.reply(
