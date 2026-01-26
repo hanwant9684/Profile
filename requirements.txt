@@ -25,3 +25,13 @@ motor
 pymongo
 python-dotenv
 TgCrypto
+aiofiles
+aiohttp
+dnspython
+flask
+kurigram
+motor
+pymongo
+python-dotenv
+TgCrypto
+uvloop
