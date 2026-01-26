@@ -24,8 +24,8 @@ DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 5))
-MEMORY_BUFFER_LIMIT = 10 * 1024 * 1024  # 10MB
-CHUNK_SIZE = 1024 * 1024 # 1MB optimized chunk size
+MEMORY_BUFFER_LIMIT = 20 * 1024 * 1024  # 10MB
+CHUNK_SIZE = 2 * 1024 * 1024 # 1MB optimized chunk size
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
