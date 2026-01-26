@@ -12,6 +12,15 @@ load_dotenv()
 
 from bot.config import app
 from bot.database import init_db
+import bot.transfer # Ensure transfer is available
+
+# Optimization for 1.5GB RAM VPS
+import resource
+try:
+    # Set soft memory limit to 1.2GB to leave room for system
+    resource.setrlimit(resource.RLIMIT_AS, (1200 * 1024 * 1024, -1))
+except Exception:
+    pass
 
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
