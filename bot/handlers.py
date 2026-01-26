@@ -167,7 +167,7 @@ async def batch_command(client, message):
             start_id, end_id = end_id, start_id
             
         count = end_id - start_id + 1
-        if count > 50:
+        if count > 1500:
             await message.reply("⚠️ You can only batch up to 50 messages at a time.")
             return
             
