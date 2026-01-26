@@ -168,7 +168,7 @@ async def batch_command(client, message):
             
         count = end_id - start_id + 1
         if count > 1500:
-            await message.reply("⚠️ You can only batch up to 50 messages at a time.")
+            await message.reply("⚠️ You can only batch up to 1500 messages at a time.")
             return
             
         await message.reply(f"🚀 Starting batch download of {count} messages...")
