@@ -41,22 +41,17 @@ if not MONGO_DB: missing_vars.append("MONGO_DB")
 if missing_vars:
     print(f"CRITICAL WARNING: Missing environment variables: {', '.join(missing_vars)}")
     # If missing critical variables, we won't try to start the app object to avoid crash
-    if not all([API_ID, API_HASH, BOT_TOKEN]):
-        print("Missing API_ID, API_HASH, or BOT_TOKEN. App will not start.")
-        app = None
-    else:
-        app = Client(
-            "bot_session", 
-            api_id=API_ID, 
-            api_hash=API_HASH, 
-            bot_token=BOT_TOKEN,
-            workers=10
-        )
-else:
-    app = Client(
-        "bot_session", 
-        api_id=API_ID, 
-        api_hash=API_HASH, 
-        bot_token=BOT_TOKEN,
-        workers=10
-    )
+
+# RichAds Configuration
+RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "792361")
+RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "351352")
+AD_DAILY_LIMIT = int(os.environ.get("AD_DAILY_LIMIT", 5))
+AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "False").lower() == "true"
+
+app = Client(
+    "bot_session", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN,
+    workers=20
+)
