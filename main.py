@@ -34,4 +34,7 @@ if __name__ == "__main__":
         
     asyncio.get_event_loop().create_task(cleanup_expired_logins())
     print("Starting bot...")
-    app.run()
+    if app:
+        app.run()
+    else:
+        print("Bot app not initialized due to missing config. Exiting.")
