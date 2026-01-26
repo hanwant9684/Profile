@@ -1,7 +1,7 @@
 modules = ["python-3.12"]
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "unzip"]
+packages = ["cacert", "libuv", "unzip"]
 
 [agent]
 expertMode = true
