@@ -50,7 +50,7 @@ if missing_vars:
             api_id=API_ID, 
             api_hash=API_HASH, 
             bot_token=BOT_TOKEN,
-            workers=20
+            workers=10
         )
 else:
     app = Client(
@@ -58,5 +58,5 @@ else:
         api_id=API_ID, 
         api_hash=API_HASH, 
         bot_token=BOT_TOKEN,
-        workers=20
+        workers=10
     )
