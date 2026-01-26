@@ -344,16 +344,19 @@ async def download_handler(client, message):
                             print(f"[DEBUG] copy_message failed: {e}, falling back to download")
                     
                     if not path:
+                        from bot.transfer import download_media_fast
                         if use_memory:
                             path = await user_client.download_media(media_msg, in_memory=True)
                         else:
                             # Optimized fast transfer
                             path = await asyncio.wait_for(
-                                user_client.download_media(
-                                    media_msg, 
-                                    progress=progress_bar, 
+                                download_media_fast(
+                                    user_client,
+                                    media_msg,
+                                    f"downloads/{user_id}_{media_msg.id}",
+                                    progress_callback=progress_bar,
                                     progress_args=(status_msg, f"📥 Downloading {idx + 1}/{files_to_download}")
-                                ), 
+                                ),
                                 timeout=600
                             )
                     

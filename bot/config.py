@@ -23,8 +23,8 @@ MONGO_DB = os.environ.get("MONGO_DB") or os.environ.get("MONGODB")
 DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 5))
-MEMORY_BUFFER_LIMIT = 20 * 1024 * 1024  # 10MB
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 3)) # Reduced for 1.5GB RAM
+MEMORY_BUFFER_LIMIT = 10 * 1024 * 1024  # Reduced to 10MB for RAM safety
 CHUNK_SIZE = 512 * 1024 # 512KB optimized chunk size
 active_downloads = set()
 cancel_flags = set()
@@ -53,5 +53,6 @@ app = Client(
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    workers=10
+    workers=4, # Reduced workers for 1.5GB RAM
+    max_concurrent_transmissions=2 # Limit concurrent streams to save RAM
 )
