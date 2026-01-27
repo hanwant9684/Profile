@@ -52,10 +52,10 @@ if missing_vars:
     # If missing critical variables, we won't try to start the app object to avoid crash
 
 # RichAds Configuration
-RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "792361")
-RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "351352")
+RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "989337")
+RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "381546")
 AD_DAILY_LIMIT = int(os.environ.get("AD_DAILY_LIMIT", 5))
-AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "False").lower() == "true"
+AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
 app = Client(
     "bot_session", 
