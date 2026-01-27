@@ -5,7 +5,7 @@ import io
 import aiofiles
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore, MEMORY_BUFFER_LIMIT
+from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
 
 async def progress_bar(current, total, message, type_msg):
