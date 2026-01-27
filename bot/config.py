@@ -31,8 +31,9 @@ DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 DOWNLOAD_WORKERS = int(os.environ.get("DOWNLOAD_WORKERS", 4))
 UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", 8))
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 2)) 
-MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 4))  
-CHUNK_SIZE = 512 * 1024 
+MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 4))
+MEMORY_BUFFER_LIMIT = 10 * 1024 * 1024  
+CHUNK_SIZE = 1024 * 1024 
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -51,10 +52,10 @@ if missing_vars:
     # If missing critical variables, we won't try to start the app object to avoid crash
 
 # RichAds Configuration
-RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "989337")
-RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "381546")
+RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "792361")
+RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "351352")
 AD_DAILY_LIMIT = int(os.environ.get("AD_DAILY_LIMIT", 5))
-AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
+AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "False").lower() == "true"
 
 app = Client(
     "bot_session", 

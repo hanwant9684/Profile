@@ -5,7 +5,7 @@ import io
 import aiofiles
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
+from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore, MEMORY_BUFFER_LIMIT
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
 
 async def progress_bar(current, total, message, type_msg):
@@ -401,7 +401,7 @@ async def download_handler(client, message):
                     elif media_msg.audio: file_size = media_msg.audio.file_size
                     elif media_msg.photo: file_size = media_msg.photo.file_size
 
-                    use_memory = False # Force disk download to avoid "Server busy" issues
+                    use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
 
                     # For public groups, we force disk download (is_group check)
                     # For public channels (user_client == client), we try copy_message first
