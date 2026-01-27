@@ -62,6 +62,7 @@ app = Client(
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
+    in_memory=True,  # Use in-memory storage to avoid SQLite database closed errors
     workers=8, # Increased workers for more concurrent operations
     max_concurrent_transmissions=MAX_CONCURRENT_DOWNLOADS + MAX_CONCURRENT_UPLOADS # Total concurrent streams
 )

@@ -483,7 +483,7 @@ async def download_handler(client, message):
                                     progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
                                 )
                                 
-                                if thumb_path and os.path.exists(thumb_path):
+                                if thumb_path and isinstance(thumb_path, str) and os.path.exists(thumb_path):
                                     try:
                                         os.remove(thumb_path)
                                     except:
@@ -502,7 +502,8 @@ async def download_handler(client, message):
                         
                         downloaded_count += 1
                         
-                        if not use_memory and os.path.exists(path):
+                        # Clean up file only if it's a file path, not BytesIO
+                        if not use_memory and path and isinstance(path, str) and os.path.exists(path):
                             try:
                                 os.remove(path)
                             except:
