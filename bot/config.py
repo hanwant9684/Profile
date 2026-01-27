@@ -1,7 +1,13 @@
 import os
 import asyncio
+import logging
 from pyrogram import Client
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger("pyrogram.session.session")
+logger.setLevel(logging.ERROR) # Suppress persistent timestamp outdated warnings
 
 load_dotenv()
 
@@ -23,12 +29,16 @@ MONGO_DB = os.environ.get("MONGO_DB") or os.environ.get("MONGODB")
 DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 3)) # Reduced for 1.5GB RAM
-MEMORY_BUFFER_LIMIT = 10 * 1024 * 1024  # Reduced to 10MB for RAM safety
-CHUNK_SIZE = 1024 * 1024 # 512KB optimized chunk size
+DOWNLOAD_WORKERS = int(os.environ.get("DOWNLOAD_WORKERS", 4))
+UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", 8))
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 2)) 
+MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 4))
+MEMORY_BUFFER_LIMIT = 10 * 1024 * 1024  
+CHUNK_SIZE = 1024 * 1024 
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+global_upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
 login_states = {}
 
 # Verification
@@ -53,6 +63,6 @@ app = Client(
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    workers=4, # Reduced workers for 1.5GB RAM
-    max_concurrent_transmissions=4 # Limit concurrent streams to save RAM
+    workers=8, # Increased workers for more concurrent operations
+    max_concurrent_transmissions=MAX_CONCURRENT_DOWNLOADS + MAX_CONCURRENT_UPLOADS # Total concurrent streams
 )

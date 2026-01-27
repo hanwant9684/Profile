@@ -415,60 +415,66 @@ async def download_handler(client, message):
                         caption = media_msg.caption if media_msg.caption else None
                         
                         try:
+                            from bot.config import global_upload_semaphore
+                            await global_upload_semaphore.acquire()
                             await status_msg.edit_text(f"📤 Uploading file {idx + 1}/{files_to_download}...")
                         except:
                             pass
                         
-                        if media_msg.photo:
-                            sent_msg = await client.send_photo(
-                                user_id,
-                                path,
-                                caption=caption,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
-                        elif media_msg.audio:
-                            sent_msg = await client.send_audio(
-                                user_id,
-                                path,
-                                caption=caption,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
-                        elif media_msg.video:
-                            thumb_path = None
-                            try:
-                                if media_msg.video.thumbs:
-                                    thumb_path = await user_client.download_media(media_msg.video.thumbs[0].file_id)
-                            except Exception as e:
-                                print(f"[DEBUG] Thumbnail download failed: {e}")
-                            
-                            sent_msg = await client.send_video(
-                                user_id,
-                                path,
-                                caption=caption,
-                                duration=media_msg.video.duration or 0,
-                                width=media_msg.video.width or 0,
-                                height=media_msg.video.height or 0,
-                                thumb=thumb_path,
-                                supports_streaming=True,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
-                            
-                            if thumb_path and os.path.exists(thumb_path):
+                        try:
+                            if media_msg.photo:
+                                sent_msg = await client.send_photo(
+                                    user_id,
+                                    path,
+                                    caption=caption,
+                                    progress=progress_bar if not use_memory else None,
+                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
+                                )
+                            elif media_msg.audio:
+                                sent_msg = await client.send_audio(
+                                    user_id,
+                                    path,
+                                    caption=caption,
+                                    progress=progress_bar if not use_memory else None,
+                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
+                                )
+                            elif media_msg.video:
+                                thumb_path = None
                                 try:
-                                    os.remove(thumb_path)
-                                except:
-                                    pass
-                        else:
-                            sent_msg = await client.send_document(
-                                user_id, 
-                                path, 
-                                caption=caption,
-                                progress=progress_bar if not use_memory else None,
-                                progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                            )
+                                    if media_msg.video.thumbs:
+                                        thumb_path = await user_client.download_media(media_msg.video.thumbs[0].file_id)
+                                except Exception as e:
+                                    print(f"[DEBUG] Thumbnail download failed: {e}")
+                                
+                                sent_msg = await client.send_video(
+                                    user_id,
+                                    path,
+                                    caption=caption,
+                                    duration=media_msg.video.duration or 0,
+                                    width=media_msg.video.width or 0,
+                                    height=media_msg.video.height or 0,
+                                    thumb=thumb_path,
+                                    supports_streaming=True,
+                                    progress=progress_bar if not use_memory else None,
+                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
+                                )
+                                
+                                if thumb_path and os.path.exists(thumb_path):
+                                    try:
+                                        os.remove(thumb_path)
+                                    except:
+                                        pass
+                            else:
+                                sent_msg = await client.send_document(
+                                    user_id, 
+                                    path, 
+                                    caption=caption,
+                                    progress=progress_bar if not use_memory else None,
+                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
+                                )
+                        finally:
+                            from bot.config import global_upload_semaphore
+                            global_upload_semaphore.release()
                         
                         downloaded_count += 1
                         
