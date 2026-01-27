@@ -42,6 +42,8 @@ if __name__ == "__main__":
         start_health_check()
         
     asyncio.get_event_loop().create_task(cleanup_expired_logins())
+    from bot.logger import cleanup_loop
+    asyncio.get_event_loop().create_task(cleanup_loop())
     print("Starting bot...")
     if app:
         app.run()
