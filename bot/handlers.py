@@ -401,7 +401,7 @@ async def download_handler(client, message):
                     elif media_msg.audio: file_size = media_msg.audio.file_size
                     elif media_msg.photo: file_size = media_msg.photo.file_size
 
-                    use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
+                    use_memory = False # Force disk download to avoid "Server busy" issues
 
                     # For public groups, we force disk download (is_group check)
                     # For public channels (user_client == client), we try copy_message first
