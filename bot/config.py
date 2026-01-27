@@ -1,13 +1,12 @@
 import os
 import asyncio
 import logging
+from bot.logger import setup_logger, cleanup_loop
 from pyrogram import Client
 from dotenv import load_dotenv
 
-# Configure logging
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger("pyrogram.session.session")
-logger.setLevel(logging.ERROR) # Suppress persistent timestamp outdated warnings
+# Initialize logging
+setup_logger()
 
 load_dotenv()
 

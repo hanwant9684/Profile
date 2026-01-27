@@ -408,7 +408,7 @@ async def download_handler(client, message):
                                     progress_callback=progress_bar,
                                     progress_args=(status_msg, f"📥 Downloading {idx + 1}/{files_to_download}")
                                 ),
-                                timeout=600
+                                timeout=1200
                             )
                     
                     if path and path != "COPIED":
