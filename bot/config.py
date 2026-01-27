@@ -30,9 +30,9 @@ DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 # Performance Settings
 DOWNLOAD_WORKERS = int(os.environ.get("DOWNLOAD_WORKERS", 4))
 UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", 8))
-MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 2)) 
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 4)) 
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 4))
-MEMORY_BUFFER_LIMIT = 10 * 1024 * 1024  
+MEMORY_BUFFER_LIMIT = 512 * 1024  
 CHUNK_SIZE = 1024 * 1024 
 active_downloads = set()
 cancel_flags = set()
