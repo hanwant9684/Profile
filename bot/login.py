@@ -224,7 +224,7 @@ async def batch_command(client, message):
     except Exception as e:
         await message.reply(f"❌ Batch error: {str(e)}")
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch"]) & ~filters.regex(r"https://t\.me/"))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "stats", "killall"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
@@ -314,8 +314,12 @@ async def cancel_downloads(client, message):
     
     if user_id in active_downloads:
         cancel_flags.add(user_id)
-        await message.reply("🛑 Download cancellation request sent. Please wait for the current process to stop.")
+        active_downloads.discard(user_id) # Force discard immediately as well
+        await message.reply("🛑 Download cancellation request sent. Your process has been removed from active list.")
     else:
+        # Just in case the flag was set but not in active_downloads
+        if user_id in cancel_flags:
+            cancel_flags.discard(user_id)
         await message.reply("No active downloads to cancel.")
 
 @app.on_message(filters.command("cancel_login") & filters.private)
@@ -338,6 +342,16 @@ async def logout(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
     
+    # Clear any active login session
+    if user_id in login_states:
+        state = login_states[user_id]
+        if "client" in state:
+            try:
+                await state["client"].disconnect()
+            except:
+                pass
+        del login_states[user_id]
+
     if user and user.get('phone_session_string'):
         await logout_user(user_id)
         await message.reply("✅ Logged out successfully! Your session has been cleared.")

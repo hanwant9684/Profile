@@ -15,19 +15,22 @@ async def stats(client, message):
         f"⚡ Active Downloads: `{len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}`"
     )
 
-@app.on_message(filters.command("kill") & filters.private)
-async def kill_process(client, message):
+@app.on_message(filters.command("killall") & filters.private)
+async def kill_all_processes(client, message):
     if str(message.from_user.id) != str(OWNER_ID): return
     
-    try:
-        target_id = int(message.text.split()[1])
-        if target_id in active_downloads:
-            active_downloads.discard(target_id)
-            await message.reply(f"✅ Killed process for user `{target_id}`.")
-        else:
-            await message.reply("⚠️ User does not have an active download.")
-    except:
-        await message.reply("Usage: `/kill <user_id>`")
+    from bot.config import cancel_flags
+    
+    if not active_downloads:
+        await message.reply("⚠️ No active downloads to kill.")
+        return
+        
+    count = len(active_downloads)
+    for uid in list(active_downloads):
+        cancel_flags.add(uid)
+    
+    active_downloads.clear()
+    await message.reply(f"✅ Killed all `{count}` active processes and sent cancellation signals.")
 
 @app.on_message(filters.command("setrole") & filters.private)
 async def setrole(client, message):
