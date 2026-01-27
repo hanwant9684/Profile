@@ -243,6 +243,7 @@ async def download_handler(client, message):
         private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
         
         is_private = False
+        is_group = False
         if private_match:
             chat_id = int("-100" + private_match.group(1))
             message_id = int(private_match.group(2))
@@ -250,19 +251,42 @@ async def download_handler(client, message):
         elif public_match:
             chat_id = public_match.group(1)
             message_id = int(public_match.group(2))
+            # Programmatically check if it's a channel or group
+            try:
+                # Use a small timeout for get_chat to avoid hanging
+                chat = await asyncio.wait_for(client.get_chat(chat_id), timeout=10)
+                # In Pyrogram/Hydrogram, ChatType.CHANNEL is for broadcast channels
+                # ChatType.GROUP and ChatType.SUPERGROUP are for groups
+                chat_type_str = str(chat.type).lower()
+                if "group" in chat_type_str or chat.type in ["group", "supergroup"]:
+                    is_group = True
+                    print(f"[DEBUG] Detected as GROUP via type: {chat.type} for {chat_id}")
+                else:
+                    # Double check via broadcast attribute if available
+                    if hasattr(chat, "broadcast") and chat.broadcast is False:
+                         is_group = True
+                         print(f"[DEBUG] Detected as GROUP via broadcast=False for {chat_id}")
+                    else:
+                         print(f"[DEBUG] Detected as CHANNEL via type: {chat.type} for {chat_id}")
+            except Exception as e:
+                print(f"Error checking chat type for {chat_id}: {e}")
+                # Fallback: assume channel unless proven otherwise, 
+                # but if it fails we might need to be cautious.
+                # If we can't determine, we'll try to use the bot client first (standard behavior)
 
         user = await get_user(user_id)
         
-        if is_private and (not user or not user.get('phone_session_string') or len(user.get('phone_session_string', '')) < 10):
-            await status_msg.edit_text("❌ Login is mandatory for private channel links. Use /login to connect your account.")
+        if (is_private or is_group) and (not user or not user.get('phone_session_string') or len(user.get('phone_session_string', '')) < 10):
+            msg_text = "❌ Login is mandatory for private channel links. Use /login to connect your account."
+            if is_group:
+                msg_text = "❌ Login is mandatory for public group links to download media. Use /login to connect your account."
+            await status_msg.edit_text(msg_text)
             active_downloads.discard(user_id)
             global_download_semaphore.release()
             return
 
-        # If it's a public link, we prefer using the main bot client (client)
-        # even if the user is logged in, as it's more stable for public links.
-        # User client is only strictly necessary for private links.
-        if is_private:
+        # If it's a private link or a public group, we MUST use the user client
+        if is_private or is_group:
             user_client = client
             session_str = user.get('phone_session_string') if user else None
             if session_str and len(session_str) > 10:
@@ -379,9 +403,12 @@ async def download_handler(client, message):
 
                     use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
 
-                    if user_client == client and isinstance(chat_id, (str, int)):
+                    # For public groups, we force disk download (is_group check)
+                    # For public channels (user_client == client), we try copy_message first
+                    # We also check if user_client is different from client (meaning it's a user session)
+                    if not is_group and user_client == client and isinstance(chat_id, (str, int)):
                         try:
-                            # Direct copy is fastest for public links
+                            # Direct copy is fastest for public links (channels)
                             sent = await client.copy_message(
                                 chat_id=user_id,
                                 from_chat_id=chat_id,
