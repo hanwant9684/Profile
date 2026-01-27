@@ -586,11 +586,11 @@ async def upgrade(client, message):
         "• All Premium Features\n"
         "• Priority Support\n\n"
         "💳 **Payment Details**\n"
-        "• **PayPal**:\n ╰{PAYPAL_LINK}\n"
-        "• **UPI**:\n ╰`{UPI_ID}`\n"
-        "• **Apple Pay**:\n ╰{APPLE_PAY_ID}\n"
-        "• **Crypto**:\n ╰`{CRYPTO_ADDRESS}`\n"
-        "• **Card**:\n ╰{CARD_PAYMENT_LINK}\n\n"
+        "• **PayPal**:\n {PAYPAL_LINK}\n"
+        "• **UPI**:\n `{UPI_ID}`\n"
+        "• **Apple Pay**:\n {APPLE_PAY_ID}\n"
+        "• **Crypto**:\n `{CRYPTO_ADDRESS}`\n"
+        "• **Card**:\n {CARD_PAYMENT_LINK}\n\n"
         f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
     )
     await message.reply(
