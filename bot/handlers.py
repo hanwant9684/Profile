@@ -241,10 +241,15 @@ async def download_handler(client, message):
         
         public_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
         private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
+        topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
         
         is_private = False
         is_group = False
-        if private_match:
+        if topic_match:
+            chat_id = int("-100" + topic_match.group(1))
+            message_id = int(topic_match.group(3))
+            is_private = True
+        elif private_match:
             chat_id = int("-100" + private_match.group(1))
             message_id = int(private_match.group(2))
             is_private = True
