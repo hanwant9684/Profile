@@ -282,22 +282,33 @@ async def download_handler(client, message):
             global_download_semaphore.release()
             return
 
-        # Handle user client session correctly
+        # Handle user client session correctly with retry logic
         if is_private or is_group:
             session_str = user.get('phone_session_string') if user else None
             if session_str and len(session_str) > 10:
-                 try:
-                     user_client = Client(
-                         f"user_{user_id}", 
-                         session_string=session_str, 
-                         in_memory=True, 
-                         api_id=API_ID, 
-                         api_hash=API_HASH
-                     )
-                     await user_client.start() # Hydrogram uses start()
-                 except Exception as e:
-                     print(f"User client connection error: {e}")
-                     user_client = None
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        user_client = Client(
+                            f"user_{user_id}_{int(time.time())}", 
+                            session_string=session_str, 
+                            in_memory=True, 
+                            api_id=API_ID, 
+                            api_hash=API_HASH,
+                            no_updates=True
+                        )
+                        await user_client.start()
+                        break
+                    except Exception as e:
+                        print(f"User client connection error (attempt {attempt + 1}/{max_retries}): {e}")
+                        if user_client:
+                            try:
+                                await user_client.stop()
+                            except:
+                                pass
+                        user_client = None
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
             
             if not user_client:
                 await status_msg.edit_text("❌ User session failed or not found. Please /login again.")

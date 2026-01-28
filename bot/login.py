@@ -199,15 +199,16 @@ async def batch_command(client, message):
                 # Use user client if private link, else main client
                 if "t.me/c/" in start_link and session_str:
                     temp_client = Client(
-                        f"peek_{user_id}",
+                        f"peek_{user_id}_{int(time.time())}",
                         session_string=session_str,
                         in_memory=True,
                         api_id=API_ID,
-                        api_hash=API_HASH
+                        api_hash=API_HASH,
+                        no_updates=True
                     )
-                    await temp_client.connect()
+                    await temp_client.start()
                     m = await temp_client.get_messages(chat_id, msg_id)
-                    await temp_client.disconnect()
+                    await temp_client.stop()
                 else:
                     m = await client.get_messages(chat_id, msg_id)
 
