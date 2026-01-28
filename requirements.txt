@@ -9,3 +9,14 @@ aiofiles
 aiohttp
 uvloop
 psutil
+aiofiles
+aiohttp
+dnspython
+flask
+kurigram
+motor
+psutil
+pymongo
+python-dotenv
+TgCrypto
+uvloop
