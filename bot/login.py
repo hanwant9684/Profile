@@ -54,6 +54,14 @@ async def start(client, message):
 async def accept_terms(client, callback_query):
     user_id = callback_query.from_user.id
     await update_user_terms(user_id, True)
+    
+    # Show RichAds after accepting terms
+    try:
+        from bot.ads import show_ad
+        await show_ad(client, user_id)
+    except Exception as e:
+        print(f"Error showing RichAds on T&C accept: {e}")
+        
     await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
 
 @app.on_message(filters.command("login") & filters.private)
