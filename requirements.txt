@@ -19,3 +19,11 @@ psutil
 python-dotenv
 TgCrypto
 uvloop
+aiofiles
+aiohttp
+dnspython
+flask
+kurigram
+python-dotenv
+TgCrypto
+uvloop
