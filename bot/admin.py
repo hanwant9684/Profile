@@ -44,7 +44,7 @@ async def setrole(client, message):
         if len(parts) < 3:
              raise ValueError("Not enough arguments")
         
-        target_id = parts[1]
+        target_id = int(parts[1]) if parts[1].strip("-").isdigit() else parts[1]
         new_role = parts[2]
         duration = parts[3] if len(parts) > 3 else None
 
@@ -57,6 +57,16 @@ async def setrole(client, message):
         resp = f"✅ User `{target_id}` role updated to **{new_role}**."
         if duration and new_role == 'premium':
             resp += f" (Expires in {duration} days)"
+            try:
+                await client.send_message(
+                    target_id,
+                    "🎉 **Congratulations!**\n\n"
+                    f"Your account has been upgraded to **Premium** for {duration} days.\n"
+                    "You now have access to all premium features! 🚀"
+                )
+                resp += "\n\n🔔 User has been notified."
+            except Exception as e:
+                resp += f"\n\n⚠️ Failed to notify user: {e}"
             
         await message.reply(resp)
     except ValueError:
@@ -145,25 +155,67 @@ async def broadcast(client, message):
         return
         
     if not message.reply_to_message:
-        await message.reply("Reply to a message to broadcast it.")
+        await message.reply(
+            "📣 **Broadcast Command Guide**\n\n"
+            "To broadcast a message or any media (photo, video, document, etc.):\n"
+            "1️⃣ Reply to the message/media you want to send.\n"
+            "2️⃣ Use `/broadcast` to send to **ALL** users.\n"
+            "3️⃣ Use `/broadcast <user_id>` to send to a **SPECIFIC** user.\n"
+            "4️⃣ Use `/broadcast <id1> <id2>` to send to **MULTIPLE** users.\n\n"
+            "💡 **Examples:**\n"
+            "• `/broadcast` (Reply to a photo to send it to everyone)\n"
+            "• `/broadcast 12345678` (Sends to only one user)\n"
+            "• `/broadcast 123 456 789` (Sends to three users)"
+        )
         return
         
+    parts = message.text.split()
+    target_ids = parts[1:] if len(parts) > 1 else []
+    
     msg = await message.reply("🚀 Starting broadcast...")
-    
-    users = await get_all_users()
-    
     count = 0
     blocked = 0
     
-    for row in users:
-        try:
-            await message.reply_to_message.copy(row.get('telegram_id'))
-            count += 1
+    if target_ids:
+        # Broadcast to specific users
+        for tid in target_ids:
+            try:
+                # Convert to int if it's a numeric ID to avoid BOT_METHOD_INVALID
+                target_key = int(tid) if str(tid).strip("-").isdigit() else tid
+                await message.reply_to_message.copy(target_key)
+                count += 1
+            except Exception:
+                blocked += 1
             await asyncio.sleep(0.05)
-        except Exception:
-            blocked += 1
+    else:
+        # Broadcast to all users
+        users = await get_all_users()
+        total = len(users)
+        
+        for index, row in enumerate(users):
+            try:
+                # Get the telegram_id and ensure it's an integer
+                tid = row.get('telegram_id')
+                if tid:
+                    target_key = int(tid) if str(tid).strip("-").isdigit() else tid
+                    await message.reply_to_message.copy(target_key)
+                    count += 1
+            except Exception as e:
+                blocked += 1
+                print(f"[ERROR] Broadcast failed for {row.get('telegram_id')}: {e}")
+            
+            # Periodically update the progress message for transparency
+            if (index + 1) % 50 == 0:
+                try:
+                    await msg.edit_text(f"🚀 Broadcasting...\nProgress: {index + 1}/{total}\nSent: {count}\nFailed: {blocked}")
+                except Exception:
+                    pass
+            
+            # Rate limiting: 20 messages per second (0.05s delay) 
+            # to stay within Telegram's broad limits for bots
+            await asyncio.sleep(0.05)
     
-    await msg.edit_text(f"✅ Broadcast complete.\nSent: {count}\nFailed/Blocked: {blocked}")
+    await msg.edit_text(f"✅ Broadcast complete.\nTotal: {total if not target_ids else len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
 
 @app.on_message(filters.command("premium_users") & filters.private, group=-1)
 async def list_premium_users(client, message):
