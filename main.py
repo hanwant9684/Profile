@@ -12,6 +12,7 @@ load_dotenv()
 
 from bot.config import app
 from bot.database import init_db
+from bot.cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
 import bot.transfer # Ensure transfer is available
 
 # Optimization for 1.5GB RAM VPS
@@ -31,6 +32,9 @@ import bot.admin
 import bot.info
 
 if __name__ == "__main__":
+    print("Attempting to restore database from cloud backup...")
+    asyncio.get_event_loop().run_until_complete(restore_latest_from_cloud())
+    
     print("Initializing database...")
     init_db()
     print("Starting cleanup task...")
@@ -44,6 +48,7 @@ if __name__ == "__main__":
     asyncio.get_event_loop().create_task(cleanup_expired_logins())
     from bot.logger import cleanup_loop
     asyncio.get_event_loop().create_task(cleanup_loop())
+    asyncio.get_event_loop().create_task(periodic_cloud_backup(interval_minutes=10))
     print("Starting bot...")
     if app:
         app.run()
