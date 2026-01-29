@@ -10,3 +10,12 @@ psutil
 aiofiles
 aiohttp
 dnspython
+aiofiles
+aiohttp
+dnspython
+flask
+kurigram
+psutil
+python-dotenv
+TgCrypto
+uvloop

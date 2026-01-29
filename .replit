@@ -1,4 +1,4 @@
-modules = ["python-3.11"]
+modules = ["python-3.12", "postgresql-16"]
 [nix]
 channel = "stable-25_05"
 packages = ["cacert", "libuv", "unzip"]
@@ -22,9 +22,9 @@ args = "Telegram Bot"
 name = "Telegram Bot"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
-
-[workflows.workflow.metadata]
-outputType = "console"
