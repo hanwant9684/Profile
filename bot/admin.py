@@ -174,13 +174,8 @@ async def list_premium_users(client, message):
         return
         
     try:
-        from bot.database import db
-        if db is None:
-            await message.reply("❌ Database not initialized.")
-            return
-
-        users_coll = db["users"]
-        premium_users = await users_coll.find({"role": "premium"}).to_list(length=None)
+        all_users = await get_all_users()
+        premium_users = [u for u in all_users if u.get("role") == "premium"]
         
         if not premium_users:
             await message.reply("No premium users found.")
@@ -195,8 +190,6 @@ async def list_premium_users(client, message):
             username_str = ""
             
             try:
-                # Direct fetch from Telegram API to ensure current info
-                # Cast to int for get_users if u_id is a numeric string
                 user_key = int(u_id) if str(u_id).strip("-").isdigit() else u_id
                 tg_user = await client.get_users(user_key)
                 
@@ -207,7 +200,6 @@ async def list_premium_users(client, message):
                 if tg_user.username:
                     username_str = f" (@{tg_user.username})"
             except Exception as e:
-                # Fallback to DB info if Telegram fetch fails
                 name = user.get("first_name") or "Unknown"
                 if user.get("last_name"):
                     name += f" {user['last_name']}"

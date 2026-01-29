@@ -24,7 +24,7 @@ UPI_ID = os.environ.get("UPI_ID", "Contact Owner")
 APPLE_PAY_ID = os.environ.get("APPLE_PAY_ID", "Contact Owner")
 CRYPTO_ADDRESS = os.environ.get("CRYPTO_ADDRESS", "Contact Owner")
 CARD_PAYMENT_LINK = os.environ.get("CARD_PAYMENT_LINK", "Contact Owner")
-MONGO_DB = os.environ.get("MONGO_DB") or os.environ.get("MONGODB")
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
 DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
@@ -45,7 +45,6 @@ missing_vars = []
 if not API_ID: missing_vars.append("API_ID")
 if not API_HASH: missing_vars.append("API_HASH")
 if not BOT_TOKEN: missing_vars.append("BOT_TOKEN")
-if not MONGO_DB: missing_vars.append("MONGO_DB")
 
 if missing_vars:
     print(f"CRITICAL WARNING: Missing environment variables: {', '.join(missing_vars)}")
