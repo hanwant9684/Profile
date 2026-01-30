@@ -243,6 +243,8 @@ async def download_handler(client, message):
         topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
         comment_match = re.search(r"t\.me/([^/]+)/(\d+)\?comment=(\d+)", link)
         private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
+        story_match = re.search(r"t\.me/([^/]+)/s/(\d+)", link)
+        private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", link)
         single_match = re.search(r"t\.me/([^/]+)/(\d+)\?single", link)
         private_single_match = re.search(r"t\.me/c/(\d+)/(\d+)\?single", link)
         thread_match = re.search(r"t\.me/([^/]+)/(\d+)\?thread=(\d+)", link)
@@ -250,7 +252,17 @@ async def download_handler(client, message):
         
         is_private = False
         is_group = False
-        if private_comment_match:
+        is_story = False
+        if private_story_match:
+            chat_id = int("-100" + private_story_match.group(1))
+            message_id = int(private_story_match.group(2))
+            is_private = True
+            is_story = True
+        elif story_match:
+            chat_id = story_match.group(1)
+            message_id = int(story_match.group(2))
+            is_story = True
+        elif private_comment_match:
             # We treat the comment as the target message
             chat_id = int("-100" + private_comment_match.group(1))
             message_id = int(private_comment_match.group(3))
@@ -315,7 +327,7 @@ async def download_handler(client, message):
             return
 
         # Handle user client session correctly with retry logic
-        if is_private or is_group:
+        if is_private or is_group or is_story:
             session_str = user.get('phone_session_string') if user else None
             if session_str and len(session_str) > 10:
                 max_retries = 3
@@ -354,7 +366,18 @@ async def download_handler(client, message):
         
         if chat_id and message_id:
             try:
-                msg = await user_client.get_messages(chat_id, message_id)
+                if is_story:
+                    # Bots cannot call get_stories directly (400 BOT_METHOD_INVALID)
+                    # We must use the user_client (logged in user session) to fetch stories
+                    if not user_client or user_client == client:
+                         await status_msg.edit_text("❌ Login is mandatory for downloading stories. Use /login to connect your account.")
+                         active_downloads.discard(user_id)
+                         global_download_semaphore.release()
+                         return
+                    msg = await user_client.get_stories(chat_id, message_id)
+                else:
+                    msg = await user_client.get_messages(chat_id, message_id)
+                
                 if not msg:
                     print(f"[DEBUG] get_messages returned None for chat_id={chat_id}, message_id={message_id}")
                     await status_msg.edit_text("❌ Could not find message. Link might be invalid or expired.")
@@ -365,7 +388,8 @@ async def download_handler(client, message):
                 messages_to_process = [msg]
                 is_media_group = False
                 
-                if msg.media_group_id:
+                # Story objects don't have media_group_id
+                if not is_story and msg.media_group_id:
                     is_media_group = True
                     try:
                         media_group = await user_client.get_media_group(chat_id, message_id)
@@ -436,10 +460,15 @@ async def download_handler(client, message):
                     sent_msg = None
                     file_size = 0
                     
-                    if media_msg.document: file_size = media_msg.document.file_size
-                    elif media_msg.video: file_size = media_msg.video.file_size
-                    elif media_msg.audio: file_size = media_msg.audio.file_size
-                    elif media_msg.photo: file_size = media_msg.photo.file_size
+                    if is_story:
+                        # Story objects in Pyrogram/Hydrogram have direct media attributes
+                        if msg.video: file_size = msg.video.file_size
+                        elif msg.photo: file_size = msg.photo.file_size
+                    else:
+                        if media_msg.document: file_size = media_msg.document.file_size
+                        elif media_msg.video: file_size = media_msg.video.file_size
+                        elif media_msg.audio: file_size = media_msg.audio.file_size
+                        elif media_msg.photo: file_size = media_msg.photo.file_size
 
                     use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
 
@@ -466,12 +495,22 @@ async def download_handler(client, message):
                             path = await user_client.download_media(media_msg, in_memory=True)
                         else:
                             from bot.transfer import download_media_fast
+                            # Get proper file extension from document or other media
+                            ext = ""
+                            if not is_story and media_msg.document:
+                                # Try to get extension from file_name
+                                if media_msg.document.file_name:
+                                    _, ext = os.path.splitext(media_msg.document.file_name)
+                            
+                            # Fallback to default if no extension found
+                            file_suffix = f"_{media_msg.id}{ext}"
+                            
                             # Optimized fast transfer for larger files
                             path = await asyncio.wait_for(
                                 download_media_fast(
                                     user_client,
                                     media_msg,
-                                    f"downloads/{user_id}_{media_msg.id}",
+                                    f"downloads/{user_id}{file_suffix}",
                                     progress_callback=progress_bar,
                                     progress_args=(status_msg, f"📥 Downloading {idx + 1}/{files_to_download}")
                                 ),
@@ -489,7 +528,34 @@ async def download_handler(client, message):
                             pass
                         
                         try:
-                            if media_msg.photo:
+                            if is_story:
+                                if msg.photo:
+                                    sent_msg = await client.send_photo(
+                                        user_id,
+                                        path,
+                                        caption=caption
+                                    )
+                                elif msg.video:
+                                    thumb_path = None
+                                    try:
+                                        if msg.video.thumbs:
+                                            thumb_path = await user_client.download_media(msg.video.thumbs[0].file_id)
+                                    except: pass
+                                    
+                                    sent_msg = await client.send_video(
+                                        user_id,
+                                        path,
+                                        caption=caption,
+                                        duration=msg.video.duration or 0,
+                                        width=msg.video.width or 0,
+                                        height=msg.video.height or 0,
+                                        thumb=thumb_path,
+                                        supports_streaming=True
+                                    )
+                                    if thumb_path and os.path.exists(thumb_path):
+                                        try: os.remove(thumb_path)
+                                        except: pass
+                            elif media_msg.photo:
                                 sent_msg = await client.send_photo(
                                     user_id,
                                     path,
