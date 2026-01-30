@@ -220,16 +220,15 @@ async def download_handler(client, message):
         await message.reply("⚠️ You already have a download in progress. Please wait.")
         return
 
-    if global_download_semaphore.locked():
-         await message.reply("⚠️ Server busy. Please try again in a few seconds.")
-         return
-
     active_downloads.add(user_id)
     status_msg = await message.reply("🔍 Checking link...")
     
     user_client = None
     path = None
     
+    if global_download_semaphore.locked():
+         await status_msg.edit_text("⚠️ Server busy. You are in the queue, please wait...")
+
     await global_download_semaphore.acquire()
     
     try:
@@ -242,10 +241,38 @@ async def download_handler(client, message):
         public_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
         private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
         topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
+        comment_match = re.search(r"t\.me/([^/]+)/(\d+)\?comment=(\d+)", link)
+        private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
+        single_match = re.search(r"t\.me/([^/]+)/(\d+)\?single", link)
+        private_single_match = re.search(r"t\.me/c/(\d+)/(\d+)\?single", link)
+        thread_match = re.search(r"t\.me/([^/]+)/(\d+)\?thread=(\d+)", link)
+        private_thread_match = re.search(r"t\.me/c/(\d+)/(\d+)\?thread=(\d+)", link)
         
         is_private = False
         is_group = False
-        if topic_match:
+        if private_comment_match:
+            # We treat the comment as the target message
+            chat_id = int("-100" + private_comment_match.group(1))
+            message_id = int(private_comment_match.group(3))
+            is_private = True
+        elif comment_match:
+            chat_id = comment_match.group(1)
+            message_id = int(comment_match.group(3))
+        elif private_thread_match:
+            chat_id = int("-100" + private_thread_match.group(1))
+            message_id = int(private_thread_match.group(2)) # Thread link usually points to main post or thread id
+            is_private = True
+        elif thread_match:
+            chat_id = thread_match.group(1)
+            message_id = int(thread_match.group(2))
+        elif private_single_match:
+            chat_id = int("-100" + private_single_match.group(1))
+            message_id = int(private_single_match.group(2))
+            is_private = True
+        elif single_match:
+            chat_id = single_match.group(1)
+            message_id = int(single_match.group(2))
+        elif topic_match:
             chat_id = int("-100" + topic_match.group(1))
             message_id = int(topic_match.group(3))
             is_private = True
