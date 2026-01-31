@@ -24,7 +24,8 @@ async def download_media_fast(client: Client, message, file_name, progress_callb
     # Logging to verify smart logic is working
     logging.info(f"Smart Download: File={file_name}, Size={file_size}, Workers={workers}, Chunk={chunk_size}")
     
-    # Using message.download with calculated parameters
+    # Standard Pyrogram/Kurigram .download() does not natively use multi-workers 
+    # to speed up a single file download. We need to use raw transmission for that.
     return await message.download(
         file_name, 
         progress=progress_callback, 

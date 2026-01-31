@@ -93,11 +93,12 @@ RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "351352")
 AD_DAILY_LIMIT = int(os.environ.get("AD_DAILY_LIMIT", 5))
 AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "False").lower() == "true"
 
+# Update client with higher max_concurrent_transmissions
 app = Client(
     "bot_session", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    in_memory=True,  # Use in-memory storage to avoid SQLite database closed errors
-    max_concurrent_transmissions=MAX_CONCURRENT_DOWNLOADS + MAX_CONCURRENT_UPLOADS # Total concurrent streams
+    in_memory=True,
+    max_concurrent_transmissions=20 # Increased for multi-worker support
 )
