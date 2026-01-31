@@ -50,6 +50,20 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
             progress=progress_callback,
             **kwargs
         )
+    
+    # If it's a photo, send it as a photo instead of a document to avoid PHOTO_EXT_INVALID
+    if file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        try:
+            return await client.send_photo(
+                chat_id,
+                file_path,
+                caption=caption,
+                progress=progress_callback,
+                **kwargs
+            )
+        except Exception as e:
+            logging.warning(f"Failed to send as photo, falling back to document: {e}")
+            # Fallback to document if send_photo fails
         
     return await client.send_document(
         chat_id, 
