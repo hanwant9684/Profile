@@ -181,8 +181,8 @@ async def batch_command(client, message):
                  mock_message.text = f"https://t.me/c/{start_match.group(1)}/{msg_id}"
             
             await download_handler(client, mock_message)
-            # Increased delay to 5 seconds to prevent floodwait from Telegram
-            await asyncio.sleep(5) 
+            # Increased delay to 10 seconds to prevent floodwait from Telegram
+            await asyncio.sleep(10) 
             
     except Exception as e:
         await message.reply(f"❌ Batch error: {str(e)}")
@@ -497,10 +497,20 @@ async def download_handler(client, message):
                             from bot.transfer import download_media_fast, upload_media_fast
                             # Get proper file extension from document or other media
                             ext = ""
-                            if not is_story and media_msg.document:
-                                # Try to get extension from file_name
-                                if media_msg.document.file_name:
-                                    _, ext = os.path.splitext(media_msg.document.file_name)
+                            if not is_story:
+                                if media_msg.document:
+                                    if media_msg.document.file_name:
+                                        _, ext = os.path.splitext(media_msg.document.file_name)
+                                elif media_msg.audio:
+                                    if media_msg.audio.file_name:
+                                        _, ext = os.path.splitext(media_msg.audio.file_name)
+                                    else:
+                                        ext = ".mp3"
+                                elif media_msg.video:
+                                    if media_msg.video.file_name:
+                                        _, ext = os.path.splitext(media_msg.video.file_name)
+                                    else:
+                                        ext = ".mp4"
                             
                             # Fallback to default if no extension found
                             file_suffix = f"_{media_msg.id}{ext}"

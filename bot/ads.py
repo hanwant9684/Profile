@@ -152,7 +152,8 @@ class RichAdsManager:
             await increment_ad_count(user_id)
             
         except Exception as e:
-            logger.error(f"RichAds: Error showing ad: {e}")
+            # Silently handle errors showing ads to prevent log clutter and disruptions
+            pass
 
 # Global instance and legacy compatibility
 richads_manager = RichAdsManager()
