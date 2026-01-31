@@ -65,6 +65,19 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
             logging.warning(f"Failed to send as photo, falling back to document: {e}")
             # Fallback to document if send_photo fails
         
+    # If it's a voice message (ogg), send it as a voice
+    if file_path.lower().endswith(".ogg"):
+        try:
+            return await client.send_voice(
+                chat_id,
+                file_path,
+                caption=caption,
+                progress=progress_callback,
+                **kwargs
+            )
+        except Exception as e:
+            logging.warning(f"Failed to send as voice, falling back to document: {e}")
+
     return await client.send_document(
         chat_id, 
         file_path, 
