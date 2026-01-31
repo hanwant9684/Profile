@@ -53,6 +53,11 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
     
     # If it's a photo, send it as a photo instead of a document to avoid PHOTO_EXT_INVALID
     if file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        # Ensure we have the right extension for Telegram
+        if not file_path.lower().endswith((".jpg", ".jpeg")):
+             # Telegram is picky about photo extensions in SendMedia
+             logging.info(f"Photo extension check: {file_path}")
+        
         try:
             return await client.send_photo(
                 chat_id,

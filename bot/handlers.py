@@ -506,6 +506,8 @@ async def download_handler(client, message):
                                         _, ext = os.path.splitext(media_msg.audio.file_name)
                                     if not ext:
                                         ext = ".mp3"
+                                elif media_msg.photo:
+                                    ext = ".jpg"
                                 elif media_msg.voice:
                                     ext = ".ogg"
                                 elif media_msg.video:
