@@ -37,6 +37,16 @@ if __name__ == "__main__":
     
     print("Initializing database...")
     init_db()
+
+    # Check for TgCrypto and debug crypto speed
+    try:
+        import tgcrypto
+        print(f"✅ TgCrypto is active. Fast transfers enabled.")
+    except ImportError:
+        print("❌ TgCrypto NOT FOUND. Bot will be slow.")
+    except Exception as e:
+        print(f"❌ TgCrypto Debug Error: {e}")
+
     print("Starting cleanup task...")
     from bot.login import cleanup_expired_logins
     from bot.web import start_health_check

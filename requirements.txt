@@ -1,11 +1,9 @@
 dnspython
 kurigram
-TgCrypto
+tgcrypto
 python-dotenv
 flask
 aiofiles
 aiohttp
 uvloop
 psutil
-aiofiles
-aiohttp
