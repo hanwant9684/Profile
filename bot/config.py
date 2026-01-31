@@ -28,12 +28,49 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
 DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-DOWNLOAD_WORKERS = int(os.environ.get("DOWNLOAD_WORKERS", 4))
-UPLOAD_WORKERS = int(os.environ.get("UPLOAD_WORKERS", 8))
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 10)) 
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 10))
-MEMORY_BUFFER_LIMIT = 512 * 1024  
-CHUNK_SIZE = 1024 * 1024 
+
+def get_smart_download_workers(file_size):
+    """
+    Lower worker count for downloads (optimized for server stability).
+    """
+    if file_size < 10 * 1024 * 1024:
+        return 1
+    elif file_size < 100 * 1024 * 1024:
+        return 2
+    else:
+        return 2
+
+def get_smart_upload_workers(file_size):
+    """
+    Higher worker count for uploads (optimized for speed).
+    """
+    if file_size < 10 * 1024 * 1024:
+        return 2
+    elif file_size < 100 * 1024 * 1024:
+        return 4
+    else:
+        return 10
+
+def get_smart_chunk_size(file_size):
+    """
+    Calculates the optimal chunk size based on file size.
+    Max allowed by Telegram is 512 KB.
+    """
+    if file_size < 10 * 1024 * 1024:
+        return 128 * 1024
+    else:
+        return 512 * 1024
+
+# Optimization for 1.5GB RAM VPS and faster execution
+try:
+    import uvloop
+    import asyncio
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
+
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -62,6 +99,5 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,  # Use in-memory storage to avoid SQLite database closed errors
-    workers=20, # Increased workers for more concurrent operations
     max_concurrent_transmissions=MAX_CONCURRENT_DOWNLOADS + MAX_CONCURRENT_UPLOADS # Total concurrent streams
 )

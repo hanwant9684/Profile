@@ -5,7 +5,7 @@ import io
 import aiofiles
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore, MEMORY_BUFFER_LIMIT
+from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
 
 async def progress_bar(current, total, message, type_msg):
@@ -181,7 +181,8 @@ async def batch_command(client, message):
                  mock_message.text = f"https://t.me/c/{start_match.group(1)}/{msg_id}"
             
             await download_handler(client, mock_message)
-            await asyncio.sleep(1) # Small delay to avoid flood
+            # Increased delay to 5 seconds to prevent floodwait from Telegram
+            await asyncio.sleep(5) 
             
     except Exception as e:
         await message.reply(f"❌ Batch error: {str(e)}")
@@ -462,18 +463,17 @@ async def download_handler(client, message):
                     
                     if is_story:
                         # Story objects in Pyrogram/Hydrogram have direct media attributes
-                        if msg.video: file_size = msg.video.file_size
-                        elif msg.photo: file_size = msg.photo.file_size
+                        if media_msg.video: file_size = media_msg.video.file_size
+                        elif media_msg.photo: file_size = media_msg.photo.file_size
                     else:
                         if media_msg.document: file_size = media_msg.document.file_size
                         elif media_msg.video: file_size = media_msg.video.file_size
                         elif media_msg.audio: file_size = media_msg.audio.file_size
                         elif media_msg.photo: file_size = media_msg.photo.file_size
 
-                    use_memory = file_size > 0 and file_size <= MEMORY_BUFFER_LIMIT
+                    # Force disk download for everything to save RAM on 1.5GB VPS
+                    use_memory = False
 
-                    # For public groups, we force disk download (is_group check)
-                    # For public channels (user_client == client), we try copy_message first
                     if not is_group and user_client == client and isinstance(chat_id, (str, int)):
                         try:
                             # Direct copy is fastest for public links (channels)
@@ -494,7 +494,7 @@ async def download_handler(client, message):
                             # Use default Pyrogram download for small files
                             path = await user_client.download_media(media_msg, in_memory=True)
                         else:
-                            from bot.transfer import download_media_fast
+                            from bot.transfer import download_media_fast, upload_media_fast
                             # Get proper file extension from document or other media
                             ext = ""
                             if not is_story and media_msg.document:
@@ -556,21 +556,28 @@ async def download_handler(client, message):
                                         try: os.remove(thumb_path)
                                         except: pass
                             elif media_msg.photo:
-                                sent_msg = await client.send_photo(
-                                    user_id,
-                                    path,
-                                    caption=caption,
-                                    progress=progress_bar if not use_memory else None,
-                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                                )
+                                if use_memory:
+                                    sent_msg = await client.send_photo(user_id, path, caption=caption)
+                                else:
+                                    # Photos can be uploaded via send_document for fast logic if needed, 
+                                    # but standard photo upload is usually fast enough. 
+                                    # For consistency, we'll keep standard for tiny files and use fast for big ones.
+                                    sent_msg = await client.send_photo(
+                                        user_id,
+                                        path,
+                                        caption=caption,
+                                        progress=progress_bar,
+                                        progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}")
+                                    )
                             elif media_msg.audio:
-                                sent_msg = await client.send_audio(
-                                    user_id,
-                                    path,
-                                    caption=caption,
-                                    progress=progress_bar if not use_memory else None,
-                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                                )
+                                if use_memory:
+                                    sent_msg = await client.send_audio(user_id, path, caption=caption)
+                                else:
+                                    loop = asyncio.get_event_loop()
+                                    sent_msg = await upload_media_fast(
+                                        client, user_id, path, caption=caption, 
+                                        progress_callback=lambda c, t: loop.create_task(progress_bar(c, t, status_msg, f"📤 Uploading {idx + 1}/{files_to_download}"))
+                                    )
                             elif media_msg.video:
                                 thumb_path = None
                                 try:
@@ -579,32 +586,31 @@ async def download_handler(client, message):
                                 except Exception as e:
                                     print(f"[DEBUG] Thumbnail download failed: {e}")
                                 
-                                sent_msg = await client.send_video(
-                                    user_id,
-                                    path,
+                                # Use fast upload even for videos, passing video-specific metadata
+                                loop = asyncio.get_event_loop()
+                                sent_msg = await upload_media_fast(
+                                    client, user_id, path, 
                                     caption=caption,
                                     duration=media_msg.video.duration or 0,
                                     width=media_msg.video.width or 0,
                                     height=media_msg.video.height or 0,
                                     thumb=thumb_path,
                                     supports_streaming=True,
-                                    progress=progress_bar if not use_memory else None,
-                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
+                                    progress_callback=lambda c, t: loop.create_task(progress_bar(c, t, status_msg, f"📤 Uploading {idx + 1}/{files_to_download}"))
                                 )
                                 
                                 if thumb_path and isinstance(thumb_path, str) and os.path.exists(thumb_path):
-                                    try:
-                                        os.remove(thumb_path)
-                                    except:
-                                        pass
+                                    try: os.remove(thumb_path)
+                                    except: pass
                             else:
-                                sent_msg = await client.send_document(
-                                    user_id, 
-                                    path, 
-                                    caption=caption,
-                                    progress=progress_bar if not use_memory else None,
-                                    progress_args=(status_msg, f"📤 Uploading {idx + 1}/{files_to_download}") if not use_memory else None
-                                )
+                                if use_memory:
+                                    sent_msg = await client.send_document(user_id, path, caption=caption)
+                                else:
+                                    loop = asyncio.get_event_loop()
+                                    sent_msg = await upload_media_fast(
+                                        client, user_id, path, caption=caption,
+                                        progress_callback=lambda c, t: loop.create_task(progress_bar(c, t, status_msg, f"📤 Uploading {idx + 1}/{files_to_download}"))
+                                    )
                         finally:
                             from bot.config import global_upload_semaphore
                             global_upload_semaphore.release()
