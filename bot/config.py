@@ -33,25 +33,25 @@ MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 10))
 
 def get_smart_download_workers(file_size):
     """
-    Lower worker count for downloads (optimized for server stability).
-    """
-    if file_size < 10 * 1024 * 1024:
-        return 1
-    elif file_size < 100 * 1024 * 1024:
-        return 2
-    else:
-        return 2
-
-def get_smart_upload_workers(file_size):
-    """
-    Higher worker count for uploads (optimized for speed).
+    Optimized for high speed download.
     """
     if file_size < 10 * 1024 * 1024:
         return 2
     elif file_size < 100 * 1024 * 1024:
         return 4
     else:
-        return 10
+        return 16
+
+def get_smart_upload_workers(file_size):
+    """
+    Optimized for high speed upload.
+    """
+    if file_size < 10 * 1024 * 1024:
+        return 4
+    elif file_size < 100 * 1024 * 1024:
+        return 8
+    else:
+        return 32
 
 def get_smart_chunk_size(file_size):
     """
@@ -100,5 +100,5 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
-    max_concurrent_transmissions=20 # Increased for multi-worker support
+    max_concurrent_transmissions=50 # Increased significantly for high-speed transfers
 )
