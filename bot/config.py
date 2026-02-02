@@ -64,13 +64,7 @@ def get_smart_chunk_size(file_size):
         return 512 * 1024
 
 # Optimization for 1.5GB RAM VPS and faster execution
-try:
-    import uvloop
-    import asyncio
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-except ImportError:
-    pass
-
+# Event loop is already initialized in main.py
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
