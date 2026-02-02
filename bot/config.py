@@ -94,5 +94,5 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
-    max_concurrent_transmissions=50 # Increased significantly for high-speed transfers
+    max_concurrent_transmissions=15 # Updated to 15 as requested
 )

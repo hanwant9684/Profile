@@ -230,6 +230,7 @@ async def download_handler(client, message):
     if global_download_semaphore.locked():
          await status_msg.edit_text("⚠️ Server busy. You are in the queue, please wait...")
 
+    client.max_concurrent_transmissions = 15
     await global_download_semaphore.acquire()
     
     try:
@@ -494,7 +495,7 @@ async def download_handler(client, message):
                             # Use default Pyrogram download for small files
                             path = await user_client.download_media(media_msg, in_memory=True)
                         else:
-                            from bot.transfer import download_media_fast, upload_media_fast
+                            from bot.transfer import download_media_fast, upload_media_streaming, upload_media_parallel
                             # Get proper file extension from document or other media
                             ext = ""
                             if not is_story:
@@ -588,7 +589,7 @@ async def download_handler(client, message):
                                     sent_msg = await client.send_audio(user_id, path, caption=caption)
                                 else:
                                     loop = asyncio.get_event_loop()
-                                    sent_msg = await upload_media_fast(
+                                    sent_msg = await upload_media_parallel(
                                         client, user_id, path, caption=caption, 
                                         progress_callback=lambda c, t: loop.create_task(progress_bar(c, t, status_msg, f"📤 Uploading {idx + 1}/{files_to_download}"))
                                     )
@@ -602,7 +603,7 @@ async def download_handler(client, message):
                                 
                                 # Use fast upload even for videos, passing video-specific metadata
                                 loop = asyncio.get_event_loop()
-                                sent_msg = await upload_media_fast(
+                                sent_msg = await upload_media_streaming(
                                     client, user_id, path, 
                                     caption=caption,
                                     duration=media_msg.video.duration or 0,
@@ -621,7 +622,7 @@ async def download_handler(client, message):
                                     sent_msg = await client.send_document(user_id, path, caption=caption)
                                 else:
                                     loop = asyncio.get_event_loop()
-                                    sent_msg = await upload_media_fast(
+                                    sent_msg = await upload_media_parallel(
                                         client, user_id, path, caption=caption,
                                         progress_callback=lambda c, t: loop.create_task(progress_bar(c, t, status_msg, f"📤 Uploading {idx + 1}/{files_to_download}"))
                                     )
