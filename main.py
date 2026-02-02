@@ -1,13 +1,21 @@
 import asyncio
 import logging
 import os
+import sys
+
+# Initialize uvloop and event loop immediately before any other imports
 try:
     import uvloop
-    uvloop.install()
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 except ImportError:
     pass
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 load_dotenv()
 
 from bot.config import app
