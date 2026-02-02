@@ -69,6 +69,18 @@ if __name__ == "__main__":
     asyncio.get_event_loop().create_task(periodic_cloud_backup(interval_minutes=10))
     print("Starting bot...")
     if app:
+        # Check DC while running
+        async def check_dc_later():
+            await asyncio.sleep(5)
+            try:
+                # get_me() is a safe call to check connection
+                me = await app.get_me()
+                print(f"✅ Bot is running on DC {me.dc_id}")
+            except Exception as e:
+                # Silently log DC check errors to avoid clutter
+                logging.debug(f"DC Check Error: {e}")
+
+        asyncio.get_event_loop().create_task(check_dc_later())
         app.run()
     else:
         print("Bot app not initialized due to missing config. Exiting.")

@@ -7,7 +7,6 @@ packages = ["cacert", "libuv", "unzip"]
 expertMode = true
 
 [workflows]
-runButton = "Project"
 
 [[workflows.workflow]]
 name = "Project"
