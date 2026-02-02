@@ -16,3 +16,12 @@ pyrotgfork
 python-dotenv
 tgcrypto
 uvloop
+aiofiles
+aiohttp
+dnspython
+flask
+psutil
+pyrotgfork
+python-dotenv
+tgcrypto
+uvloop
