@@ -96,9 +96,13 @@ async def cleanup_expired_logins():
                 state = login_states[user_id]
                 if "client" in state:
                     try:
-                        await state["client"].disconnect()
+                        # Ensure we stop the client properly to release threads
+                        await state["client"].stop()
                     except:
-                        pass
+                        try:
+                            await state["client"].disconnect()
+                        except:
+                            pass
                 del login_states[user_id]
                 try:
                     await app.send_message(user_id, "⚠️ Login session expired due to inactivity.")
@@ -212,7 +216,10 @@ async def batch_command(client, message):
                         in_memory=True,
                         api_id=API_ID,
                         api_hash=API_HASH,
-                        no_updates=True
+                        no_updates=True,
+                        sleep_threshold=0,
+                        max_concurrent_transmissions=1,
+                        workers=1
                     )
                     await temp_client.start()
                     m = await temp_client.get_messages(chat_id, msg_id)
@@ -246,7 +253,15 @@ async def handle_login_steps(client, message: Message):
         if step == "PHONE":
             state["timestamp"] = time.time()
             phone_number = message.text.strip()
-            temp_client = Client(f"session_{user_id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+            temp_client = Client(
+                f"session_{user_id}",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                in_memory=True,
+                sleep_threshold=0,
+                max_concurrent_transmissions=1,
+                workers=1
+            )
             await temp_client.connect()
             
             try:
