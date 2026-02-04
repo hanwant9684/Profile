@@ -28,8 +28,8 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
 DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 4)) 
-MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 3))
+MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 2)) 
+MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 2))
 
 def get_smart_chunk_size(file_size):
     """
@@ -59,7 +59,7 @@ def get_smart_upload_workers(file_size):
     """
     Scales workers for parallel uploads.
     """
-    return 3
+    return 2
 
 # Optimization for 1.5GB RAM VPS and faster execution
 # Event loop is already initialized in main.py

@@ -6,9 +6,10 @@ import asyncio
 import logging
 from pyrogram import Client, utils
 from pyrogram.raw import types, functions
+from pyrogram.types import Message
 from bot.config import get_smart_download_workers, get_smart_upload_workers, get_smart_chunk_size
 
-async def download_media_fast(client: Client, message, file_name, progress_callback=None, progress_args=()):
+async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
     """Fast media downloader using parallel chunk requests"""
     def get_file_size(m):
         if hasattr(m, "video") and m.video: return getattr(m.video, "file_size", 0)
@@ -24,7 +25,7 @@ async def download_media_fast(client: Client, message, file_name, progress_callb
     return await client.download_media(
         message,
         file_name=file_name or "downloads/",
-        progress=progress_callback,
+        progress=progress_callback if progress_callback else None,
         progress_args=progress_args
     )
 
@@ -32,13 +33,16 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
     """Fast media uploader using parallel chunk uploads"""
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
     
+    # Ensure caption is not None to avoid 'NoneType' has no attribute 'encode'
+    safe_caption = str(caption) if caption is not None else ""
+
     try:
         if "duration" in kwargs or file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
             return await client.send_video(
                 chat_id, 
                 file_path, 
-                caption=caption, 
-                progress=progress_callback,
+                caption=safe_caption, 
+                progress=progress_callback if progress_callback else None,
                 **kwargs
             )
         
@@ -47,8 +51,8 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
                 return await client.send_photo(
                     chat_id,
                     file_path,
-                    caption=caption,
-                    progress=progress_callback,
+                    caption=safe_caption,
+                    progress=progress_callback if progress_callback else None,
                     **kwargs
                 )
             except Exception:
@@ -59,8 +63,8 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
                 return await client.send_voice(
                     chat_id,
                     file_path,
-                    caption=caption,
-                    progress=progress_callback,
+                    caption=safe_caption,
+                    progress=progress_callback if progress_callback else None,
                     **kwargs
                 )
             except Exception:
@@ -69,8 +73,8 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
         return await client.send_document(
             chat_id, 
             file_path, 
-            caption=caption, 
-            progress=progress_callback,
+            caption=safe_caption, 
+            progress=progress_callback if progress_callback else None,
             **kwargs
         )
     except Exception:
@@ -83,6 +87,9 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
     """
     if not os.path.exists(file_path):
         return None
+    
+    # Ensure caption is not None
+    safe_caption = str(caption) if caption is not None else ""
 
     try:
         # Determine media type and use appropriate method
@@ -90,8 +97,8 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
             return await client.send_video(
                 chat_id,
                 file_path,
-                caption=caption,
-                progress=progress_callback,
+                caption=safe_caption,
+                progress=progress_callback if progress_callback else None,
                 **kwargs
             )
         
@@ -100,8 +107,8 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
                 return await client.send_photo(
                     chat_id,
                     file_path,
-                    caption=caption,
-                    progress=progress_callback,
+                    caption=safe_caption,
+                    progress=progress_callback if progress_callback else None,
                     **kwargs
                 )
             except Exception:
@@ -110,8 +117,8 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
         return await client.send_document(
             chat_id,
             file_path,
-            caption=caption,
-            progress=progress_callback,
+            caption=safe_caption,
+            progress=progress_callback if progress_callback else None,
             **kwargs
         )
     except Exception:
@@ -137,9 +144,21 @@ class FastUploader:
         self.total_parts = (self.file_size + self.chunk_size - 1) // self.chunk_size
         
     async def upload_part(self, part_num: int, data: bytes) -> bool:
-        max_retries = 3
+        from pyrogram.errors import FloodWait
+        max_retries = 5
         for attempt in range(max_retries):
             try:
+                # Ensure client is connected
+                if not self.client.is_connected:
+                    try:
+                        await self.client.connect()
+                    except Exception as e:
+                        logging.error(f"Failed to connect client: {e}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        return False
+                    
                 if self.is_big:
                     await self.client.invoke(
                         functions.upload.SaveBigFilePart(
@@ -158,15 +177,15 @@ class FastUploader:
                         )
                     )
                 return True
+            except FloodWait as e:
+                logging.warning(f"FloodWait: Waiting {e.value} seconds")
+                await asyncio.sleep(e.value)
             except (ConnectionResetError, OSError, Exception) as e:
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
+                    wait_time = 2 ** (attempt + 1)
                     logging.warning(f"Error uploading part {part_num} (attempt {attempt+1}): {e}. Retrying in {wait_time}s...")
                     await asyncio.sleep(wait_time)
-                    try:
-                        await self.client.reconnect()
-                    except Exception as re_err:
-                        logging.error(f"Reconnection failed: {re_err}")
+                    # Don't stop/start, just try to reconnect if needed on next iteration
                 else:
                     logging.error(f"Final failure uploading part {part_num} after {max_retries} attempts: {e}")
                     return False
@@ -224,10 +243,30 @@ async def upload_media_parallel(client: Client, chat_id, file_path, caption="", 
     input_file = await uploader.upload_file_parallel()
     
     # We use invoke with SendMedia to avoid re-uploading the file path
-    # Determine the media type
+    # Remove file_path, caption and other incompatible kwargs from kwargs as they are handled explicitly
+    kwargs.pop("file_path", None)
+    kwargs.pop("caption", None)
+    kwargs.pop("progress", None)
+    kwargs.pop("progress_args", None)
+    kwargs.pop("thumb", None)
+
     if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
+        # Get video dimensions if possible, or use defaults
+        width = kwargs.get("width", 1280)
+        height = kwargs.get("height", 720)
+        duration = kwargs.get("duration", 0)
+        
+        # Remove video-specific args from kwargs to avoid conflicts
+        kwargs.pop("width", None)
+        kwargs.pop("height", None)
+        kwargs.pop("duration", None)
+        kwargs.pop("supports_streaming", None)
+
         media = types.InputMediaUploadedVideo(
             file=input_file,
+            width=width,
+            height=height,
+            duration=duration,
             supports_streaming=True,
             **kwargs
         )
@@ -240,18 +279,15 @@ async def upload_media_parallel(client: Client, chat_id, file_path, caption="", 
         media = types.InputMediaUploadedDocument(
             file=input_file,
             mime_type="application/octet-stream",
+            attributes=[types.DocumentAttributeFilename(file_name=os.path.basename(file_path))],
             **kwargs
         )
-
-    # Remove file_path and caption from kwargs as they are handled explicitly
-    kwargs.pop("file_path", None)
-    kwargs.pop("caption", None)
 
     return await client.invoke(
         functions.messages.SendMedia(
             peer=await client.resolve_peer(chat_id),
             media=media,
-            message=caption,
+            message=str(caption) if caption is not None else "",
             random_id=client.rnd_id()
         )
     )

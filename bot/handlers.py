@@ -12,7 +12,7 @@ from bot.config import (
 )
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
 from bot.ads import show_ad
-from bot.transfer import download_media_fast, upload_media_streaming, upload_media_parallel
+from bot.transfer import download_media_fast, upload_media_streaming, upload_media_parallel, upload_media_fast
 
 async def progress_bar(current, total, message, type_msg):
     if total == 0:
@@ -303,12 +303,17 @@ async def download_handler(client, message, link_override=None):
                 await status_msg.edit_text(f"❌ Error: Invalid download path returned ({type(path)})")
                 return
 
+            # Safe caption retrieval
+            original_caption = msg.caption if msg and hasattr(msg, "caption") else ""
+            safe_caption = str(original_caption) if original_caption is not None else ""
+
             await status_msg.edit_text("📤 Uploading...")
-            await upload_media_parallel(
+            # Use standard upload method for better stability with Replit network
+            await upload_media_fast(
                 client,
                 user_id,
                 path,
-                caption=msg.caption,
+                caption=safe_caption,
                 progress_callback=progress_bar,
                 progress_args=(status_msg, "📤 Uploading")
             )
