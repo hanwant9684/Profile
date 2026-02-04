@@ -1,7 +1,7 @@
 modules = ["python-3.11"]
 [nix]
 channel = "stable-25_05"
-packages = ["unzip"]
+packages = ["cacert", "libuv", "unzip"]
 
 [agent]
 expertMode = true
@@ -16,15 +16,15 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Run Telegram Bot"
+args = "Run Bot"
 
 [[workflows.workflow]]
-name = "Run Telegram Bot"
+name = "Run Bot"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python3 main.py"
+args = "python main.py"
 
 [workflows.workflow.metadata]
 outputType = "console"

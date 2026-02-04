@@ -6,16 +6,18 @@ import resource
 from dotenv import load_dotenv
 
 # Initialize uvloop and event loop immediately before any other imports
+import asyncio
 try:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
 except ImportError:
     pass
+
+# Ensure an event loop exists for Pyrogram's sync initialization
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 load_dotenv()
 
