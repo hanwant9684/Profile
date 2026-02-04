@@ -3,8 +3,21 @@ import logging
 from pyrogram import Client
 from pyrogram.types import Message
 
+from bot.config import get_smart_download_workers
+
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
     """Fast media downloader using parallel chunk requests"""
+    # Get file size to determine worker count
+    file_size = 0
+    if message.document:
+        file_size = message.document.file_size
+    elif message.video:
+        file_size = message.video.file_size
+    elif message.audio:
+        file_size = message.audio.file_size
+    elif message.photo:
+        file_size = message.photo.file_size
+
     return await client.download_media(
         message,
         file_name=file_name or "downloads/",

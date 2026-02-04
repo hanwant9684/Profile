@@ -11,6 +11,46 @@ from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
     OWNER_ID, global_upload_semaphore, cancel_flags
 )
+
+# Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
+user_clients = {}
+
+async def get_user_client(user_id, session_str):
+    now = time.time()
+    if user_id in user_clients:
+        user_clients[user_id]["last_used"] = now
+        return user_clients[user_id]["client"]
+    
+    client = Client(
+        f"user_{user_id}",
+        session_string=session_str,
+        api_id=API_ID,
+        api_hash=API_HASH,
+        in_memory=True
+    )
+    await client.start()
+    user_clients[user_id] = {"client": client, "last_used": now}
+    
+    # Start cleanup task if not already running
+    asyncio.create_task(cleanup_user_clients())
+    return client
+
+async def cleanup_user_clients():
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        to_remove = []
+        for user_id, data in user_clients.items():
+            if now - data["last_used"] > 600: # 10 minutes
+                to_remove.append(user_id)
+        
+        for user_id in to_remove:
+            client = user_clients.pop(user_id)["client"]
+            try:
+                await client.stop()
+            except:
+                pass
+
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
 from bot.ads import show_ad
 from bot.transfer import download_media_fast, upload_media_fast
@@ -259,14 +299,7 @@ async def download_handler(client, message, link_override=None):
         if is_private or is_group or is_story:
             session_str = user.get('phone_session_string') if user else None
             if session_str:
-                user_client = Client(
-                    f"user_{user_id}",
-                    session_string=session_str,
-                    api_id=API_ID,
-                    api_hash=API_HASH,
-                    in_memory=True
-                )
-                await user_client.start()
+                user_client = await get_user_client(user_id, session_str)
         else:
             user_client = client
 
@@ -316,7 +349,24 @@ async def download_handler(client, message, link_override=None):
                 except Exception as e:
                     logging.debug(f"Thumb download error: {e}")
 
-            # 2. Fast Download main media
+            # 2. Extract Metadata & Fast Download main media
+            duration = 0
+            width = 0
+            height = 0
+            
+            if msg.video:
+                duration = msg.video.duration or 0
+                width = msg.video.width or 0
+                height = msg.video.height or 0
+            elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith("video/"):
+                # Some videos are sent as documents
+                if hasattr(msg.document, "duration"):
+                    duration = msg.document.duration or 0
+                if hasattr(msg.document, "width"):
+                    width = msg.document.width or 0
+                if hasattr(msg.document, "height"):
+                    height = msg.document.height or 0
+
             path = await download_media_fast(
                 user_client,
                 msg,
@@ -338,13 +388,16 @@ async def download_handler(client, message, link_override=None):
 
             await status_msg.edit_text("📤 Uploading...")
             
-            # 3. Smart Upload with thumbnail
+            # 3. Smart Upload with thumbnail and metadata
             await upload_media_fast(
                 client,
                 user_id,
                 path,
                 caption=safe_caption,
                 thumb=thumb_path,
+                duration=duration,
+                width=width,
+                height=height,
                 progress_callback=progress_bar,
                 progress_args=(status_msg, "📤 Uploading")
             )
@@ -370,15 +423,7 @@ async def download_handler(client, message, link_override=None):
                 pass
             active_downloads.discard(user_id)
             global_download_semaphore.release()
-            if 'user_client' in locals() and user_client and user_client != client:
-                try:
-                    await asyncio.sleep(1)
-                    await user_client.stop(block=False)
-                except:
-                    try:
-                        await user_client.disconnect()
-                    except:
-                        pass
+            # Session is now managed by get_user_client cache
     except Exception as e:
         await status_msg.edit_text(f"❌ Outer Error: {str(e)}")
     finally:
