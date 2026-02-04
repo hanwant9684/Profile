@@ -84,10 +84,6 @@ async def get_user(user_id) -> Optional[Dict]:
             user['is_banned'] = bool(user['is_banned'])
             user['is_agreed_terms'] = bool(user['is_agreed_terms'])
             
-            if OWNER_ID and str(user_id) == str(OWNER_ID):
-                if user.get("role") != "owner":
-                    await set_user_role(user_id, "owner")
-                    user["role"] = "owner"
             return user
         
         if OWNER_ID and str(user_id) == str(OWNER_ID):

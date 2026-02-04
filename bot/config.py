@@ -63,8 +63,10 @@ def get_smart_upload_workers(file_size):
         return 4
     elif file_size < 500 * 1024 * 1024:
         return 12  # Increased from 4
+    elif file_size < 1024 * 1024 * 1024:
+        return 20
     else:
-        return 20  # Maximize upload pipes
+        return 24  # Maximize upload pipes for > 1GB
 
 # Optimization for 1.5GB RAM VPS and faster execution
 # Event loop is already initialized in main.py

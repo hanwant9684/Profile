@@ -9,7 +9,7 @@ from pyrogram.raw import types, functions
 from bot.config import get_smart_download_workers, get_smart_upload_workers, get_smart_chunk_size
 
 async def download_media_fast(client: Client, message, file_name, progress_callback=None, progress_args=()):
-    """Fast media downloader using parallel chunk requests (Pattern from Pyrogram2)"""
+    """Fast media downloader using parallel chunk requests"""
     def get_file_size(m):
         if hasattr(m, "video") and m.video: return getattr(m.video, "file_size", 0)
         if hasattr(m, "document") and m.document: return getattr(m.document, "file_size", 0)
@@ -20,9 +20,7 @@ async def download_media_fast(client: Client, message, file_name, progress_callb
     file_size = get_file_size(message)
     workers = get_smart_download_workers(file_size)
     
-    # We use Kurigram's built-in download_media which already implements 
-    # the parallel downloading logic found in Pyrogram2-style forks.
-    client.max_concurrent_transmissions = workers
+    # Use workers if supported, otherwise rely on client's default
     return await client.download_media(
         message,
         file_name,
@@ -31,13 +29,8 @@ async def download_media_fast(client: Client, message, file_name, progress_callb
     )
 
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", progress_callback=None, **kwargs):
-    """Fast media uploader using parallel chunk uploads (Pattern from Pyrogram2)"""
+    """Fast media uploader using parallel chunk uploads"""
     file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-    workers = min(get_smart_upload_workers(file_size), 15)
-    
-    # We set the number of workers directly on the client for this transmission
-    # Pattern seen in Pyrogram2 for handling large files with multiple workers
-    client.max_concurrent_transmissions = workers
     
     try:
         if "duration" in kwargs or file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
@@ -59,7 +52,7 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
                     **kwargs
                 )
             except Exception:
-                pass
+                logging.exception("Photo Upload Error:")
             
         if file_path.lower().endswith(".ogg"):
             try:
@@ -71,7 +64,7 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
                     **kwargs
                 )
             except Exception:
-                pass
+                logging.exception("Voice Upload Error:")
 
         return await client.send_document(
             chat_id, 
@@ -80,22 +73,16 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
             progress=progress_callback,
             **kwargs
         )
-    finally:
-        # Reset to a safe default after transfer
-        client.max_concurrent_transmissions = 50
+    except Exception:
+        logging.exception("Transfer Error:")
+        raise
 
 async def upload_media_streaming(client: Client, chat_id, file_path, caption="", progress_callback=None, **kwargs):
     """
-    Efficiently uploads media using streaming by passing the file path directly to Pyrogram's send_* methods.
-    Pyrogram handles streaming internally when a file path is provided, preventing the entire file from 
-    loading into memory.
+    Efficiently uploads media using streaming.
     """
     if not os.path.exists(file_path):
         return None
-
-    file_size = os.path.getsize(file_path)
-    workers = min(get_smart_upload_workers(file_size), 15)
-    client.max_concurrent_transmissions = workers
 
     try:
         # Determine media type and use appropriate method
@@ -118,7 +105,7 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
                     **kwargs
                 )
             except Exception:
-                pass
+                logging.exception("Photo Stream Upload Error:")
 
         return await client.send_document(
             chat_id,
@@ -127,15 +114,24 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
             progress=progress_callback,
             **kwargs
         )
-    finally:
-        client.max_concurrent_transmissions = 50
+    except Exception:
+        logging.exception("Streaming Transfer Error:")
+        raise
 
 class FastUploader:
-    def __init__(self, client: Client, file_path: str, chunk_size: int = 512 * 1024):
+    def __init__(self, client: Client, file_path: str, chunk_size: int = None):
         self.client = client
         self.file_path = file_path
-        self.chunk_size = min(chunk_size, 512 * 1024)
         self.file_size = os.path.getsize(file_path)
+        
+        if chunk_size is None:
+            if self.file_size > 100 * 1024 * 1024:
+                self.chunk_size = 1024 * 1024 # 1MB for > 100MB
+            else:
+                self.chunk_size = 512 * 1024
+        else:
+            self.chunk_size = chunk_size
+
         self.file_id = self.client.rnd_id()
         self.is_big = self.file_size > 10 * 1024 * 1024
         self.total_parts = (self.file_size + self.chunk_size - 1) // self.chunk_size
@@ -161,16 +157,18 @@ class FastUploader:
                 )
             return True
         except Exception as e:
-            print(f"Error uploading part {part_num}: {e}")
+            logging.error(f"Error uploading part {part_num}: {e}")
             return False
     
-    async def upload_file_parallel(self, max_concurrent: int = 15) -> types.InputFile:
+    async def upload_file_parallel(self, max_concurrent: int = None) -> types.InputFile:
+        if max_concurrent is None:
+            max_concurrent = get_smart_upload_workers(self.file_size)
+
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def upload_with_semaphore(part_num: int, data: bytes):
             async with semaphore:
-                print(f"[DEBUG] Uploading chunk {part_num}/{self.total_parts} for {self.file_path}")
-                sys.stdout.flush()
+                logging.debug(f"Uploading chunk {part_num}/{self.total_parts} for {self.file_path}")
                 return await self.upload_part(part_num, data)
         
         tasks = []
@@ -183,7 +181,7 @@ class FastUploader:
                 tasks.append(upload_with_semaphore(part_num, chunk))
                 part_num += 1
         
-        print(f"[DEBUG] Starting parallel upload of {len(tasks)} tasks with concurrency {max_concurrent}")
+        logging.debug(f"Starting parallel upload of {len(tasks)} tasks with concurrency {max_concurrent}")
         results = await asyncio.gather(*tasks, return_exceptions=True)
         failed = [i for i, r in enumerate(results) if not r or isinstance(r, Exception)]
         if failed:
@@ -206,28 +204,43 @@ class FastUploader:
 
 async def upload_media_parallel(client: Client, chat_id, file_path, caption="", progress_callback=None, **kwargs):
     """
-    Advanced parallel chunk uploader using raw API calls.
+    Advanced parallel chunk uploader using raw API calls to avoid double upload.
     """
     if not os.path.exists(file_path):
         return None
         
     uploader = FastUploader(client, file_path)
-    input_file = await uploader.upload_file_parallel(max_concurrent=15)
+    input_file = await uploader.upload_file_parallel()
     
-    file_name = os.path.basename(file_path)
-    mime_type = "application/octet-stream"
-    if file_path.lower().endswith((".mp4", ".mkv")): mime_type = "video/mp4"
-    elif file_path.lower().endswith((".jpg", ".jpeg", ".png")): mime_type = "image/jpeg"
-    
-    # We still use the high-level send_document/video for final delivery to handle 
-    # thumbnails and other metadata correctly, but the file part is already cached 
-    # in Telegram's server via FastUploader.
-    # However, to be fully "manual" we use the input_file with send_media
-    
-    return await client.send_document(
-        chat_id,
-        file_path, # Pyrogram will recognize if it needs to re-upload or can use cache
-        caption=caption,
-        progress=progress_callback,
-        **kwargs
+    # We use invoke with SendMedia to avoid re-uploading the file path
+    # Determine the media type
+    if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
+        media = types.InputMediaUploadedVideo(
+            file=input_file,
+            supports_streaming=True,
+            **kwargs
+        )
+    elif file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        media = types.InputMediaUploadedPhoto(
+            file=input_file,
+            **kwargs
+        )
+    else:
+        media = types.InputMediaUploadedDocument(
+            file=input_file,
+            mime_type="application/octet-stream",
+            **kwargs
+        )
+
+    # Remove file_path and caption from kwargs as they are handled explicitly
+    kwargs.pop("file_path", None)
+    kwargs.pop("caption", None)
+
+    return await client.invoke(
+        functions.messages.SendMedia(
+            peer=await client.resolve_peer(chat_id),
+            media=media,
+            message=caption,
+            random_id=client.rnd_id()
+        )
     )

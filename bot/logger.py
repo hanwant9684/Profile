@@ -5,6 +5,8 @@ import gc
 import psutil
 import asyncio
 
+logger = logging.getLogger("bot")
+
 def setup_logger():
     log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     log_file = "bot_logs.txt"
