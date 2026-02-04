@@ -1,32 +1,15 @@
 import asyncio
+import uvloop
 import logging
 import os
 import sys
 import resource
 from dotenv import load_dotenv
 
-# Initialize uvloop and event loop immediately before any other imports
-import asyncio
-try:
-    import uvloop
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-except ImportError:
-    pass
-
-# Ensure an event loop exists for Pyrogram's sync initialization
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
+# Set event loop policy FIRST
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 load_dotenv()
-
-from bot.config import app
-from bot.database import init_db
-from bot.cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
-from bot.login import cleanup_expired_logins
-from bot.logger import cleanup_loop
-import bot.transfer # Ensure transfer is available
 
 # Optimization for 1.5GB RAM VPS
 try:
@@ -35,17 +18,25 @@ try:
 except Exception:
     pass
 
-logging.getLogger("pyrogram").setLevel(logging.WARNING)
+logging.getLogger("hydrogram").setLevel(logging.WARNING)
 
-# Import all modules to register handlers
-import bot.login
-import bot.handlers
-import bot.admin
-import bot.info
+async def main():
+    # Hydrogram Client and other imports inside the async main to ensure the loop is active
+    from bot.config import app
+    from bot.database import init_db
+    from bot.cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
+    from bot.login import cleanup_expired_logins
+    from bot.logger import cleanup_loop
+    import bot.transfer 
 
-if __name__ == "__main__":
+    # Import all modules to register handlers
+    import bot.login
+    import bot.handlers
+    import bot.admin
+    import bot.info
+
     print("Attempting to restore database from cloud backup...")
-    asyncio.get_event_loop().run_until_complete(restore_latest_from_cloud())
+    await restore_latest_from_cloud()
     
     print("Initializing database...")
     init_db()
@@ -62,12 +53,11 @@ if __name__ == "__main__":
     print("Starting cleanup tasks...")
     if os.environ.get("RUN_WEB_SERVER", "False").lower() == "true":
         print("Starting web server for health checks...")
-        start_health_check()
+        # start_health_check()
         
-    loop = asyncio.get_event_loop()
-    loop.create_task(cleanup_expired_logins())
-    loop.create_task(cleanup_loop())
-    loop.create_task(periodic_cloud_backup(interval_minutes=10))
+    asyncio.create_task(cleanup_expired_logins())
+    asyncio.create_task(cleanup_loop())
+    asyncio.create_task(periodic_cloud_backup(interval_minutes=10))
     
     print("Starting bot...")
     if app:
@@ -83,14 +73,17 @@ if __name__ == "__main__":
         async def main_bot():
             asyncio.create_task(check_dc_later())
             await app.start()
-            # This is to keep the event loop running while pyrogram's idle() handles signals
-            from pyrogram.methods.utilities.idle import idle
+            # This is to keep the event loop running while hydrogram's idle() handles signals
+            from hydrogram.methods.utilities.idle import idle
             await idle()
             await app.stop()
 
-        try:
-            loop.run_until_complete(main_bot())
-        except KeyboardInterrupt:
-            pass
+        await main_bot()
     else:
         print("Bot app not initialized due to missing config. Exiting.")
+
+if __name__ == "__main__":
+    try:
+        uvloop.run(main())
+    except KeyboardInterrupt:
+        pass

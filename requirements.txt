@@ -6,4 +6,4 @@ aiofiles
 aiohttp
 uvloop
 psutil
-pyrotgfork>=2.1.0
+hydrogram
