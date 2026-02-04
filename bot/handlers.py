@@ -4,6 +4,7 @@ import time
 import io
 import aiofiles
 import re
+import logging
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from bot.config import (
@@ -12,7 +13,7 @@ from bot.config import (
 )
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
 from bot.ads import show_ad
-from bot.transfer import download_media_fast, upload_media_streaming, upload_media_parallel, upload_media_fast
+from bot.transfer import download_media_fast, upload_media_fast
 
 async def progress_bar(current, total, message, type_msg):
     if total == 0:
@@ -256,7 +257,7 @@ async def download_handler(client, message, link_override=None):
 
     try:
         if is_private or is_group or is_story:
-            session_str = user.get('phone_session_string')
+            session_str = user.get('phone_session_string') if user else None
             if session_str:
                 user_client = Client(
                     f"user_{user_id}",
@@ -283,7 +284,39 @@ async def download_handler(client, message, link_override=None):
             await status_msg.edit_text("❌ No media found in link.")
             return
 
+        # Direct extraction for public channels (no login/is_private/is_group check)
+        # If it's a public channel (not is_private and not is_group and not is_story), we just forward/copy
+        if not is_private and not is_group and not is_story:
+            try:
+                await status_msg.edit_text("🚀 Extracting directly...")
+                if msg.media_group_id:
+                    # Handle media group (album)
+                    media_group = await user_client.get_media_group(chat_id, message_id)
+                    await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
+                else:
+                    await msg.copy(chat_id=user_id)
+                await status_msg.delete()
+                return
+            except Exception as e:
+                logging.error(f"Direct extraction failed: {e}")
+                # Fallback to download/upload if direct copy fails
+                await status_msg.edit_text("⚠️ Direct extraction failed, falling back to download/upload...")
+
         try:
+            # 1. Extract Original Thumbnail
+            thumb_path = None
+            if hasattr(msg, "video") and msg.video and msg.video.thumbs:
+                try:
+                    thumb_path = await user_client.download_media(msg.video.thumbs[-1])
+                except Exception as e:
+                    logging.debug(f"Thumb download error: {e}")
+            elif hasattr(msg, "document") and msg.document and msg.document.thumbs:
+                try:
+                    thumb_path = await user_client.download_media(msg.document.thumbs[-1])
+                except Exception as e:
+                    logging.debug(f"Thumb download error: {e}")
+
+            # 2. Fast Download main media
             path = await download_media_fast(
                 user_client,
                 msg,
@@ -294,11 +327,7 @@ async def download_handler(client, message, link_override=None):
             if path is None:
                 await status_msg.edit_text("❌ Download failed: Media might be restricted or unavailable.")
                 return
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Download error: {str(e)}")
-            return
 
-        if path:
             if not isinstance(path, (str, bytes, os.PathLike)):
                 await status_msg.edit_text(f"❌ Error: Invalid download path returned ({type(path)})")
                 return
@@ -308,34 +337,57 @@ async def download_handler(client, message, link_override=None):
             safe_caption = str(original_caption) if original_caption is not None else ""
 
             await status_msg.edit_text("📤 Uploading...")
-            # Use standard upload method for better stability with Replit network
+            
+            # 3. Smart Upload with thumbnail
             await upload_media_fast(
                 client,
                 user_id,
                 path,
                 caption=safe_caption,
+                thumb=thumb_path,
                 progress_callback=progress_bar,
                 progress_args=(status_msg, "📤 Uploading")
             )
-            if os.path.exists(path):
+            
+            # 4. Strict Cleanup
+            if path and os.path.exists(path):
                 os.remove(path)
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
+            
             await status_msg.delete()
 
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Error: {str(e)}")
+        finally:
+            # Emergency cleanup
+            try:
+                if 'path' in locals() and path and os.path.exists(path):
+                    os.remove(path)
+                if 'thumb_path' in locals() and thumb_path and os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+            except:
+                pass
+            active_downloads.discard(user_id)
+            global_download_semaphore.release()
+            if 'user_client' in locals() and user_client and user_client != client:
+                try:
+                    await asyncio.sleep(1)
+                    await user_client.stop(block=False)
+                except:
+                    try:
+                        await user_client.disconnect()
+                    except:
+                        pass
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Outer Error: {str(e)}")
     finally:
         active_downloads.discard(user_id)
-        global_download_semaphore.release()
-        if user_client and user_client != client:
+        if 'global_download_semaphore' in locals():
             try:
-                # Give a small delay for any pending database updates in storage
-                await asyncio.sleep(1)
-                await user_client.stop(block=False)
-            except:
-                try:
-                    await user_client.disconnect()
-                except:
-                    pass
+                global_download_semaphore.release()
+            except RuntimeError:
+                pass
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))
 async def upgrade_prompt_callback(client, callback_query):
