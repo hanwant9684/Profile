@@ -23,7 +23,7 @@ async def download_media_fast(client: Client, message, file_name, progress_callb
     # Use workers if supported, otherwise rely on client's default
     return await client.download_media(
         message,
-        file_name,
+        file_name=file_name or "downloads/",
         progress=progress_callback,
         progress_args=progress_args
     )
@@ -137,28 +137,39 @@ class FastUploader:
         self.total_parts = (self.file_size + self.chunk_size - 1) // self.chunk_size
         
     async def upload_part(self, part_num: int, data: bytes) -> bool:
-        try:
-            if self.is_big:
-                await self.client.invoke(
-                    functions.upload.SaveBigFilePart(
-                        file_id=self.file_id,
-                        file_part=part_num,
-                        file_total_parts=self.total_parts,
-                        bytes=data
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if self.is_big:
+                    await self.client.invoke(
+                        functions.upload.SaveBigFilePart(
+                            file_id=self.file_id,
+                            file_part=part_num,
+                            file_total_parts=self.total_parts,
+                            bytes=data
+                        )
                     )
-                )
-            else:
-                await self.client.invoke(
-                    functions.upload.SaveFilePart(
-                        file_id=self.file_id,
-                        file_part=part_num,
-                        bytes=data
+                else:
+                    await self.client.invoke(
+                        functions.upload.SaveFilePart(
+                            file_id=self.file_id,
+                            file_part=part_num,
+                            bytes=data
+                        )
                     )
-                )
-            return True
-        except Exception as e:
-            logging.error(f"Error uploading part {part_num}: {e}")
-            return False
+                return True
+            except (ConnectionResetError, OSError, Exception) as e:
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    logging.warning(f"Error uploading part {part_num} (attempt {attempt+1}): {e}. Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    try:
+                        await self.client.reconnect()
+                    except Exception as re_err:
+                        logging.error(f"Reconnection failed: {re_err}")
+                else:
+                    logging.error(f"Final failure uploading part {part_num} after {max_retries} attempts: {e}")
+                    return False
     
     async def upload_file_parallel(self, max_concurrent: int = None) -> types.InputFile:
         if max_concurrent is None:
