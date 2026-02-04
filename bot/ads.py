@@ -2,7 +2,7 @@ import aiohttp
 import logging
 import html
 from typing import Optional, Dict, Any, List
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.config import RICHADS_PUBLISHER_ID, RICHADS_WIDGET_ID, AD_DAILY_LIMIT, AD_FOR_PREMIUM
 from bot.database import get_user, increment_ad_count, get_ad_count_today
 

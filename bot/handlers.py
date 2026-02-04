@@ -5,8 +5,8 @@ import io
 import aiofiles
 import re
 import logging
-from pyrogram import filters, Client
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from hydrogram import filters, Client
+from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
     OWNER_ID, global_upload_semaphore, cancel_flags
@@ -200,17 +200,18 @@ async def batch_handler(client, message):
         
     await message.reply(f"🚀 Starting batch download of {count} messages...")
     
+    processed_albums = set()
     for msg_id in range(start_id, end_id + 1):
         if "t.me/c/" in start_link:
             link = f"https://t.me/c/{start_match.group(1)}/{msg_id}"
         else:
             link = f"https://t.me/{start_match.group(1)}/{msg_id}"
         
-        await download_handler(client, message, link_override=link)
+        await download_handler(client, message, link_override=link, processed_albums=processed_albums)
         await asyncio.sleep(10)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
-async def download_handler(client, message, link_override=None):
+async def download_handler(client, message, link_override=None, processed_albums=None):
     user_id = message.from_user.id
     link = link_override or message.text.strip()
     
@@ -317,116 +318,133 @@ async def download_handler(client, message, link_override=None):
             await status_msg.edit_text("❌ No media found in link.")
             return
 
-        # Direct extraction for public channels (no login/is_private/is_group check)
-        # If it's a public channel (not is_private and not is_group and not is_story), we just forward/copy
+        # Album deduplication check
+        if processed_albums is not None and msg.media_group_id:
+            if msg.media_group_id in processed_albums:
+                await status_msg.delete()
+                return msg.id
+            processed_albums.add(msg.media_group_id)
+
+        # Quota check for albums
+        remaining_quota, is_premium = await get_remaining_quota(user_id)
+        processed_count = 0
+        if msg.media_group_id:
+            album_messages = await user_client.get_media_group(chat_id, message_id)
+            album_size = len(album_messages)
+            if remaining_quota < album_size:
+                await status_msg.edit_text(f"❌ Not enough quota for album. Needed: {album_size}, Available: {remaining_quota}")
+                return
+            target_messages = album_messages
+        else:
+            if remaining_quota < 1:
+                await status_msg.edit_text(f"❌ Not enough quota. Available: {remaining_quota}")
+                return
+            target_messages = [msg]
+
+        # Direct extraction for public channels
         if not is_private and not is_group and not is_story:
             try:
                 await status_msg.edit_text("🚀 Extracting directly...")
                 if msg.media_group_id:
-                    # Handle media group (album)
-                    media_group = await user_client.get_media_group(chat_id, message_id)
                     await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
+                    processed_count = len(target_messages)
                 else:
                     await msg.copy(chat_id=user_id)
+                    processed_count = 1
+                await increment_quota(user_id, processed_count)
                 await status_msg.delete()
-                return
+                return msg.id if processed_albums is not None else None
             except Exception as e:
                 logging.error(f"Direct extraction failed: {e}")
-                # Fallback to download/upload if direct copy fails
                 await status_msg.edit_text("⚠️ Direct extraction failed, falling back to download/upload...")
 
-        try:
-            # 1. Extract Original Thumbnail
-            thumb_path = None
-            if hasattr(msg, "video") and msg.video and msg.video.thumbs:
-                try:
-                    thumb_path = await user_client.download_media(msg.video.thumbs[-1])
-                except Exception as e:
-                    logging.debug(f"Thumb download error: {e}")
-            elif hasattr(msg, "document") and msg.document and msg.document.thumbs:
-                try:
-                    thumb_path = await user_client.download_media(msg.document.thumbs[-1])
-                except Exception as e:
-                    logging.debug(f"Thumb download error: {e}")
-
-            # 2. Extract Metadata & Fast Download main media
-            duration = 0
-            width = 0
-            height = 0
-            
-            if msg.video:
-                duration = msg.video.duration or 0
-                width = msg.video.width or 0
-                height = msg.video.height or 0
-            elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith("video/"):
-                # Some videos are sent as documents
-                if hasattr(msg.document, "duration"):
-                    duration = msg.document.duration or 0
-                if hasattr(msg.document, "width"):
-                    width = msg.document.width or 0
-                if hasattr(msg.document, "height"):
-                    height = msg.document.height or 0
-
-            path = await download_media_fast(
-                user_client,
-                msg,
-                None,
-                progress_callback=progress_bar,
-                progress_args=(status_msg, "📥 Downloading")
-            )
-            if path is None:
-                await status_msg.edit_text("❌ Download failed: Media might be restricted or unavailable.")
-                return
-
-            if not isinstance(path, (str, bytes, os.PathLike)):
-                await status_msg.edit_text(f"❌ Error: Invalid download path returned ({type(path)})")
-                return
-
-            # Safe caption retrieval
-            original_caption = msg.caption if msg and hasattr(msg, "caption") else ""
-            safe_caption = str(original_caption) if original_caption is not None else ""
-
-            await status_msg.edit_text("📤 Uploading...")
-            
-            # 3. Smart Upload with thumbnail and metadata
-            await upload_media_fast(
-                client,
-                user_id,
-                path,
-                caption=safe_caption,
-                thumb=thumb_path,
-                duration=duration,
-                width=width,
-                height=height,
-                progress_callback=progress_bar,
-                progress_args=(status_msg, "📤 Uploading")
-            )
-            
-            # 4. Strict Cleanup
-            if path and os.path.exists(path):
-                os.remove(path)
-            if thumb_path and os.path.exists(thumb_path):
-                os.remove(thumb_path)
-            
-            await status_msg.delete()
-
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Error: {str(e)}")
-        finally:
-            # Emergency cleanup
+        for current_msg in target_messages:
             try:
-                if 'path' in locals() and path and os.path.exists(path):
+                # 1. Extract Original Thumbnail
+                thumb_path = None
+                if hasattr(current_msg, "video") and current_msg.video and current_msg.video.thumbs:
+                    try:
+                        thumb_path = await user_client.download_media(current_msg.video.thumbs[-1])
+                    except Exception as e:
+                        logging.debug(f"Thumb download error: {e}")
+                elif hasattr(current_msg, "document") and current_msg.document and current_msg.document.thumbs:
+                    try:
+                        thumb_path = await user_client.download_media(current_msg.document.thumbs[-1])
+                    except Exception as e:
+                        logging.debug(f"Thumb download error: {e}")
+
+                # 2. Extract Metadata & Fast Download main media
+                duration = 0
+                width = 0
+                height = 0
+                
+                if current_msg.video:
+                    duration = current_msg.video.duration or 0
+                    width = current_msg.video.width or 0
+                    height = current_msg.video.height or 0
+                elif current_msg.document and current_msg.document.mime_type and current_msg.document.mime_type.startswith("video/"):
+                    if hasattr(current_msg.document, "duration"):
+                        duration = current_msg.document.duration or 0
+                    if hasattr(current_msg.document, "width"):
+                        width = current_msg.document.width or 0
+                    if hasattr(current_msg.document, "height"):
+                        height = current_msg.document.height or 0
+
+                path = await download_media_fast(
+                    user_client,
+                    current_msg,
+                    None,
+                    progress_callback=progress_bar,
+                    progress_args=(status_msg, "📥 Downloading")
+                )
+                if path is None:
+                    continue
+
+                # Safe caption retrieval
+                original_caption = current_msg.caption if current_msg and hasattr(current_msg, "caption") else ""
+                safe_caption = str(original_caption) if original_caption is not None else ""
+
+                await status_msg.edit_text("📤 Uploading...")
+                
+                # 3. Smart Upload with thumbnail and metadata
+                await upload_media_fast(
+                    client,
+                    user_id,
+                    path,
+                    caption=safe_caption,
+                    thumb=thumb_path,
+                    duration=duration,
+                    width=width,
+                    height=height,
+                    progress_callback=progress_bar,
+                    progress_args=(status_msg, "📤 Uploading")
+                )
+                
+                processed_count += 1
+                
+                # 4. Strict Cleanup
+                if path and os.path.exists(path):
                     os.remove(path)
-                if 'thumb_path' in locals() and thumb_path and os.path.exists(thumb_path):
+                if thumb_path and os.path.exists(thumb_path):
                     os.remove(thumb_path)
-            except:
-                pass
-            active_downloads.discard(user_id)
-            global_download_semaphore.release()
-            # Session is now managed by get_user_client cache
+            except Exception as e:
+                logging.error(f"Processing item error: {e}")
+
+        await increment_quota(user_id, processed_count)
+        await status_msg.delete()
+
     except Exception as e:
-        await status_msg.edit_text(f"❌ Outer Error: {str(e)}")
+        if 'status_msg' in locals():
+            await status_msg.edit_text(f"❌ Error: {str(e)}")
     finally:
+        # Emergency cleanup
+        try:
+            if 'path' in locals() and path and os.path.exists(path):
+                os.remove(path)
+            if 'thumb_path' in locals() and thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
+        except:
+            pass
         active_downloads.discard(user_id)
         if 'global_download_semaphore' in locals():
             try:

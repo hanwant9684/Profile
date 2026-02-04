@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from bot.logger import setup_logger, cleanup_loop
-from pyrogram import Client
+from hydrogram import Client
 from dotenv import load_dotenv
 
 # Initialize logging

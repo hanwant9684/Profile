@@ -25,8 +25,8 @@ def setup_logger():
     )
 
     # Suppress specific noisy logs
-    logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)
-    logging.getLogger("pyrogram.connection.connection").setLevel(logging.ERROR)
+    logging.getLogger("hydrogram.session.session").setLevel(logging.ERROR)
+    logging.getLogger("hydrogram.connection.connection").setLevel(logging.ERROR)
 
 async def cleanup_loop():
     """Periodic RAM and garbage collection cleanup"""
