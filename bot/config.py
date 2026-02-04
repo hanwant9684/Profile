@@ -36,22 +36,22 @@ def get_smart_download_workers(file_size):
     Optimized for high speed download.
     """
     if file_size < 10 * 1024 * 1024:
-        return 2
+        return 1
     elif file_size < 100 * 1024 * 1024:
-        return 4
+        return 2
     else:
-        return 16
+        return 2
 
 def get_smart_upload_workers(file_size):
     """
     Optimized for high speed upload.
     """
     if file_size < 10 * 1024 * 1024:
-        return 4
+        return 2
     elif file_size < 100 * 1024 * 1024:
-        return 8
+        return 4
     else:
-        return 32
+        return 8
 
 def get_smart_chunk_size(file_size):
     """
