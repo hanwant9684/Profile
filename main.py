@@ -2,29 +2,32 @@ import asyncio
 import logging
 import os
 import sys
+import resource
+from dotenv import load_dotenv
 
 # Initialize uvloop and event loop immediately before any other imports
 try:
     import uvloop
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 except ImportError:
     pass
 
-from dotenv import load_dotenv
 load_dotenv()
 
 from bot.config import app
 from bot.database import init_db
 from bot.cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
+from bot.login import cleanup_expired_logins
+from bot.web import start_health_check
+from bot.logger import cleanup_loop
 import bot.transfer # Ensure transfer is available
 
 # Optimization for 1.5GB RAM VPS
-import resource
 try:
     # Set soft memory limit to 1.3GB to leave room for system
     resource.setrlimit(resource.RLIMIT_AS, (1300 * 1024 * 1024, -1))
@@ -55,32 +58,38 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ TgCrypto Debug Error: {e}")
 
-    print("Starting cleanup task...")
-    from bot.login import cleanup_expired_logins
-    from bot.web import start_health_check
-    
+    print("Starting cleanup tasks...")
     if os.environ.get("RUN_WEB_SERVER", "False").lower() == "true":
         print("Starting web server for health checks...")
         start_health_check()
         
-    asyncio.get_event_loop().create_task(cleanup_expired_logins())
-    from bot.logger import cleanup_loop
-    asyncio.get_event_loop().create_task(cleanup_loop())
-    asyncio.get_event_loop().create_task(periodic_cloud_backup(interval_minutes=10))
+    loop = asyncio.get_event_loop()
+    loop.create_task(cleanup_expired_logins())
+    loop.create_task(cleanup_loop())
+    loop.create_task(periodic_cloud_backup(interval_minutes=10))
+    
     print("Starting bot...")
     if app:
         # Check DC while running
         async def check_dc_later():
             await asyncio.sleep(5)
             try:
-                # get_me() is a safe call to check connection
                 me = await app.get_me()
                 print(f"✅ Bot is running on DC {me.dc_id}")
             except Exception as e:
-                # Silently log DC check errors to avoid clutter
                 logging.debug(f"DC Check Error: {e}")
 
-        asyncio.get_event_loop().create_task(check_dc_later())
-        app.run()
+        async def main_bot():
+            asyncio.create_task(check_dc_later())
+            await app.start()
+            # This is to keep the event loop running while pyrogram's idle() handles signals
+            from pyrogram.methods.utilities.idle import idle
+            await idle()
+            await app.stop()
+
+        try:
+            loop.run_until_complete(main_bot())
+        except KeyboardInterrupt:
+            pass
     else:
         print("Bot app not initialized due to missing config. Exiting.")
