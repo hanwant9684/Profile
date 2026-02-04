@@ -23,7 +23,6 @@ from bot.config import app
 from bot.database import init_db
 from bot.cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
 from bot.login import cleanup_expired_logins
-from bot.web import start_health_check
 from bot.logger import cleanup_loop
 import bot.transfer # Ensure transfer is available
 
