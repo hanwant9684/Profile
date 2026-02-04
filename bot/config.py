@@ -31,37 +31,40 @@ DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get("MAX_CONCURRENT_DOWNLOADS", 10)) 
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 10))
 
+def get_smart_chunk_size(file_size):
+    """
+    Calculates the optimal chunk size.
+    For files over 100MB, we use 1024KB (1MB) which is supported 
+    by modern Pyrogram-forks for maximum throughput.
+    """
+    if file_size < 10 * 1024 * 1024:      # < 10MB
+        return 128 * 1024                # 128KB
+    elif file_size < 100 * 1024 * 1024:  # 10-100MB
+        return 512 * 1024                # 512KB
+    else:                                # > 100MB
+        return 1024 * 1024               # 1024KB (1MB)
+
 def get_smart_download_workers(file_size):
     """
-    Optimized for high speed download.
+    Scales workers based on size. More workers = faster parallel downloading.
     """
     if file_size < 10 * 1024 * 1024:
-        return 1
-    elif file_size < 100 * 1024 * 1024:
-        return 2
+        return 4   # Increased from 1
+    elif file_size < 500 * 1024 * 1024:
+        return 8   # Increased from 2
     else:
-        return 2
+        return 16  # High concurrency for large files
 
 def get_smart_upload_workers(file_size):
     """
-    Optimized for high speed upload.
+    Uploads are usually slower than downloads; we use more workers here.
     """
     if file_size < 10 * 1024 * 1024:
-        return 2
-    elif file_size < 100 * 1024 * 1024:
         return 4
+    elif file_size < 500 * 1024 * 1024:
+        return 12  # Increased from 4
     else:
-        return 8
-
-def get_smart_chunk_size(file_size):
-    """
-    Calculates the optimal chunk size based on file size.
-    Max allowed by Telegram is 512 KB.
-    """
-    if file_size < 10 * 1024 * 1024:
-        return 128 * 1024
-    else:
-        return 512 * 1024
+        return 20  # Maximize upload pipes
 
 # Optimization for 1.5GB RAM VPS and faster execution
 # Event loop is already initialized in main.py
@@ -94,5 +97,5 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
-    max_concurrent_transmissions=15 # Updated to 15 as requested
+    max_concurrent_transmissions=50 # Updated to 50 as requested
 )

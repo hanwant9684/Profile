@@ -5,8 +5,13 @@ import io
 import aiofiles
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from bot.config import app, API_ID, API_HASH, active_downloads, global_download_semaphore
+from bot.config import (
+    app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
+    OWNER_ID, global_upload_semaphore, cancel_flags
+)
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
+from bot.ads import show_ad
+from bot.transfer import download_media_fast, upload_media_streaming, upload_media_parallel
 
 async def progress_bar(current, total, message, type_msg):
     if total == 0:
@@ -90,8 +95,6 @@ async def progress_bar(current, total, message, type_msg):
             pass
 
 async def verify_force_sub(client, user_id):
-    from bot.config import OWNER_ID
-    
     # Check database setting for force sub channel
     setting = await get_setting("force_sub_channel")
     if not setting or not setting.get('value'):
@@ -212,7 +215,6 @@ async def download_handler(client, message):
 
     # Show RichAds for free users
     try:
-        from bot.ads import show_ad
         await show_ad(client, user_id)
     except Exception as e:
         print(f"Error showing RichAds: {e}")
@@ -417,7 +419,6 @@ async def download_handler(client, message):
                 
                 downloaded_count = 0
                 for idx, media_msg in enumerate(messages_to_process[:files_to_download]):
-                    from bot.config import cancel_flags
                     if user_id in cancel_flags:
                         await status_msg.edit_text("❌ Download cancelled by user.")
                         cancel_flags.discard(user_id)
@@ -495,7 +496,6 @@ async def download_handler(client, message):
                             # Use default Pyrogram download for small files
                             path = await user_client.download_media(media_msg, in_memory=True)
                         else:
-                            from bot.transfer import download_media_fast, upload_media_streaming, upload_media_parallel
                             # Get proper file extension from document or other media
                             ext = ""
                             if not is_story:
@@ -536,7 +536,6 @@ async def download_handler(client, message):
                         caption = media_msg.caption if media_msg.caption else None
                         
                         try:
-                            from bot.config import global_upload_semaphore
                             await global_upload_semaphore.acquire()
                             await status_msg.edit_text(f"📤 Uploading file {idx + 1}/{files_to_download}...")
                         except:
@@ -627,7 +626,6 @@ async def download_handler(client, message):
                                         progress_callback=lambda c, t: loop.create_task(progress_bar(c, t, status_msg, f"📤 Uploading {idx + 1}/{files_to_download}"))
                                     )
                         finally:
-                            from bot.config import global_upload_semaphore
                             global_upload_semaphore.release()
                         
                         downloaded_count += 1

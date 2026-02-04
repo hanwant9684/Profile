@@ -22,6 +22,7 @@ async def download_media_fast(client: Client, message, file_name, progress_callb
     
     # We use Kurigram's built-in download_media which already implements 
     # the parallel downloading logic found in Pyrogram2-style forks.
+    client.max_concurrent_transmissions = workers
     return await client.download_media(
         message,
         file_name,
@@ -36,7 +37,7 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", prog
     
     # We set the number of workers directly on the client for this transmission
     # Pattern seen in Pyrogram2 for handling large files with multiple workers
-    client.max_concurrent_transmissions = 15
+    client.max_concurrent_transmissions = workers
     
     try:
         if "duration" in kwargs or file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
@@ -94,7 +95,7 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
 
     file_size = os.path.getsize(file_path)
     workers = min(get_smart_upload_workers(file_size), 15)
-    client.max_concurrent_transmissions = 15
+    client.max_concurrent_transmissions = workers
 
     try:
         # Determine media type and use appropriate method
@@ -127,7 +128,7 @@ async def upload_media_streaming(client: Client, chat_id, file_path, caption="",
             **kwargs
         )
     finally:
-        client.max_concurrent_transmissions = 15
+        client.max_concurrent_transmissions = 50
 
 class FastUploader:
     def __init__(self, client: Client, file_path: str, chunk_size: int = 512 * 1024):
