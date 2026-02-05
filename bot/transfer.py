@@ -16,7 +16,7 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
     elif message.audio:
         file_size = message.audio.file_size
     elif message.photo:
-        file_size = message.photo.file_size
+        file_size = message.photo.file_size if hasattr(message.photo, "file_size") else message.photo.sizes[-1].file_size
 
     return await client.download_media(
         message,
