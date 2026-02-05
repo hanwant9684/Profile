@@ -513,8 +513,24 @@ async def upgrade(client, message):
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
-        "🔸 30 days - **$2**\n\n"
-        f"🚀 Contact @{OWNER_USERNAME} to upgrade."
+        "•———————————————•\n"
+        "🔸 **7** days - **$1**\n"
+        "🔸 **14** days - **$1.5**\n"
+        "🔸 **30** days - **$2**\n"
+        "•———————————————•\n"
+        "• Unlimited Downloads\n"
+        "• Batch Download upto (50)\n"
+        "• Fast Speed\n\n"
+        "🔥 **Lifetime** - $25\n"
+        "• All Premium Features\n"
+        "• Priority Support\n\n"
+        "💳 **Payment Details**\n"
+        f"🇮🇳 **UPI**:\n ╰`{UPI_ID}`\n"
+        f"🪙 **Crypto(Binance)**:\n ╰`{CRYPTO_ADDRESS}`\n"
+        f"💲 **PayPal**:\n ╰{PAYPAL_LINK}\n"
+        f"🍎 **Apple Pay**:\n ╰{APPLE_PAY_ID}\n"
+        f"💳 **Card**:\n ╰{CARD_PAYMENT_LINK}\n\n"
+        f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
     )
     await message.reply(
         text,
