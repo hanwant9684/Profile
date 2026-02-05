@@ -421,20 +421,19 @@ async def download_handler(client, message, link_override=None, processed_albums
                         return msg.id
                     processed_albums.add(msg.media_group_id)
 
-                remaining_quota, is_premium = await get_remaining_quota(user_id)
-                processed_count = 0
+                can_download, quota_status = await check_and_update_quota(user_id)
+
+                if not can_download:
+                    await status_msg.edit_text(f"❌ {quota_status}")
+                    return None
                 if msg.media_group_id:
-                    album_messages = await user_client.get_media_group(chat_id, message_id)
-                    album_size = len(album_messages)
-                    if remaining_quota < album_size:
-                        await status_msg.edit_text(f"❌ Not enough quota for album. Needed: {album_size}, Available: {remaining_quota}")
-                        return None
-                    target_messages = album_messages
+                    target_messages = await user_client.get_media_group(chat_id, message_id)
                 else:
-                    if remaining_quota < 1:
-                        await status_msg.edit_text(f"❌ Not enough quota. Available: {remaining_quota}")
-                        return None
                     target_messages = [msg]
+
+                user_data = await get_user(user_id)
+                if user_data.get("role") == "free":
+                    await increment_quota(user_id, len(target_messages))
 
                 if not is_private and not is_group and not is_story:
                     try:
@@ -451,7 +450,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                             await send_to_dump(client, user_id, link, msg)
                             
                             processed_count = 1
-                        await increment_quota(user_id, processed_count)
                         await status_msg.delete()
                         return msg 
                     except Exception as e:
