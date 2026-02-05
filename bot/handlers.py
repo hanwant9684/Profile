@@ -12,6 +12,30 @@ from bot.config import (
     OWNER_ID, global_upload_semaphore, cancel_flags
 )
 
+# Dump channel 
+async def send_to_dump(client, user_id, link, msg):
+    """Simplified helper to send copies to the dump channel"""
+    if not DUMP_CHANNEL_ID:
+        return
+    
+    # 1. Create the Header
+    header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
+    
+    # 2. Merge with original caption and respect Telegram's 1024 limit
+    original_caption = msg.caption or ""
+    full_caption = (header + original_caption)[:1020] 
+
+    try:
+        if msg.media_group_id:
+            # For albums, copy the group then send the info text
+            await client.copy_media_group(DUMP_CHANNEL_ID, msg.chat.id, msg.id)
+            await client.send_message(DUMP_CHANNEL_ID, header + "☝️ Album above")
+        else:
+            # For single files, copy with the new merged caption
+            await msg.copy(DUMP_CHANNEL_ID, caption=full_caption)
+    except Exception as e:
+        logging.error(f"Dump failed: {e}")
+        
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
 _cleanup_task_started = False
@@ -381,9 +405,15 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await status_msg.edit_text("🚀 Extracting directly...")
                         if msg.media_group_id:
                             await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
+                            #Dumo Copy
+                            await send_to_dump(client, user_id, link, msg)
+                            
                             processed_count = len(target_messages)
                         else:
                             await msg.copy(chat_id=user_id)
+                            #Dump Copy
+                            await send_to_dump(client, user_id, link, msg)
+                            
                             processed_count = 1
                         await increment_quota(user_id, processed_count)
                         await status_msg.delete()
@@ -452,7 +482,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         await status_msg.edit_text("📤 Uploading...")
 
-                        await upload_media_fast(
+                        sent_msg = await upload_media_fast(
                             client,
                             user_id,
                             path,
@@ -464,6 +494,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                             progress_callback=progress_bar,
                             progress_args=(status_msg, "📤 Uploading")
                         )
+                        if sent_msg:
+                            await send_to_dump(client, user_id, link, sent_msg)
 
                         processed_count += 1
                     except Exception as e:
