@@ -552,7 +552,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
-                await increment_quota(user_id, processed_count)
                 await status_msg.delete()
                 return msg 
             finally:
