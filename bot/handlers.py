@@ -9,30 +9,39 @@ from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
-    OWNER_ID, global_upload_semaphore, cancel_flags, DUMP_CHANNEL_ID
+    OWNER_ID, global_upload_semaphore, cancel_flags
 )
 
 # Dump channel 
 async def send_to_dump(client, user_id, link, msg):
-    """Simplified helper to send copies to the dump channel"""
-    if not DUMP_CHANNEL_ID:
+    """Fetches dump channel from database and sends a copy"""
+    # 1. Fetch the setting from the database
+    setting = await get_setting("dump_channel_id")
+    dump_id = setting.get('value') if setting else None
+
+    if not dump_id:
+        logging.warning("Dump channel not set in database.")
         return
-    
-    # 1. Create the Header
-    header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
-    
-    # 2. Merge with original caption and respect Telegram's 1024 limit
-    original_caption = msg.caption or ""
-    full_caption = (header + original_caption)[:1020] 
 
     try:
+        # Ensure the ID is an integer for Telegram
+        dump_id = int(dump_id)
+        
+        # 2. Create the Header
+        header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
+        original_caption = msg.caption or ""
+        full_caption = (header + original_caption)[:1020]
+
         if msg.media_group_id:
-            # For albums, copy the group then send the info text
-            await client.copy_media_group(DUMP_CHANNEL_ID, msg.chat.id, msg.id)
-            await client.send_message(DUMP_CHANNEL_ID, header + "☝️ Album above")
+            # For albums
+            await client.copy_media_group(dump_id, msg.chat.id, msg.id)
+            await client.send_message(dump_id, header + "⚠️ Album above)")
         else:
-            # For single files, copy with the new merged caption
-            await msg.copy(DUMP_CHANNEL_ID, caption=full_caption)
+            # For single files
+            await msg.copy(dump_id, caption=full_caption)
+            
+    except ValueError:
+        logging.error(f"Invalid Dump ID format in database: {dump_id}")
     except Exception as e:
         logging.error(f"Dump failed: {e}")
         
