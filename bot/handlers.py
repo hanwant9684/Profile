@@ -568,9 +568,9 @@ async def upgrade(client, message):
         "💳 **Payment Details**\n"
         f"🇮🇳 **UPI**:\n ╰`{UPI_ID}`\n"
         f"🪙 **Crypto(Binance)**:\n ╰`{CRYPTO_ADDRESS}`\n"
-        f"💲 **PayPal**:\n ╰{PAYPAL_LINK}\n"
-        f"🍎 **Apple Pay**:\n ╰{APPLE_PAY_ID}\n"
-        f"💳 **Card**:\n ╰{CARD_PAYMENT_LINK}\n\n"
+        f"💲 **PayPal**:\n ╰**[📌Click Here for PayPal]({PAYPAL_LINK})**\n"
+        f"🍎 **Apple Pay**:\n ╰**[📌Click Here]({APPLE_PAY_ID})**\n"
+        f"💳 **Card**:\n ╰**[📌Click Here]({CARD_PAYMENT_LINK})**\n\n"
         f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
     )
     await message.reply(
