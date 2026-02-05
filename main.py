@@ -18,10 +18,10 @@ try:
 except Exception:
     pass
 
-logging.getLogger("hydrogram").setLevel(logging.WARNING)
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 async def main():
-    # Hydrogram Client and other imports inside the async main to ensure the loop is active
+    # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
     from bot.database import init_db
     from bot.cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
@@ -77,8 +77,8 @@ async def main():
         async def main_bot():
             asyncio.create_task(check_dc_later())
             await app.start()
-            # This is to keep the event loop running while hydrogram's idle() handles signals
-            from hydrogram.methods.utilities.idle import idle
+            # This is to keep the event loop running while pyrogram's idle() handles signals
+            from pyrogram.methods.utilities.idle import idle
             await idle()
             await app.stop()
 
