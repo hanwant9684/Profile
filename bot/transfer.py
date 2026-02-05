@@ -28,7 +28,8 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
     """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""
     safe_caption = str(caption) if caption is not None else ""
-    
+
+    file_path_lower = file_path.lower()
     # Base arguments for all upload methods
     upload_kwargs = {
         "caption": safe_caption,
