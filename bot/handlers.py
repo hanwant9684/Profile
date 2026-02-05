@@ -59,6 +59,12 @@ from bot.ads import show_ad
 from bot.transfer import download_media_fast, upload_media_fast
 
 async def progress_bar(current, total, message, type_msg):
+    user_id = message.chat.id
+    if user_id in cancel_flags:
+        # DO NOT discard here, just raise. 
+        # The handler will discard it when it catches StopProcess.
+        raise Exception("StopProcess")
+
     if total == 0:
         return
     
@@ -78,9 +84,15 @@ async def progress_bar(current, total, message, type_msg):
     data = progress_bar.data[msg_id]
     percentage = current * 100 / total
     
-    if current != total and (now - data["last_edit"]) < 2:
+    # Simple timer and percentage threshold
+    time_diff = now - data["last_edit"]
+    last_percentage = data.get("last_percentage", 0)
+    percentage_diff = percentage - last_percentage
+    
+    if current != total and time_diff < 2 and percentage_diff < 5:
         return
     
+    data["last_percentage"] = percentage
     elapsed_time = now - data["start_time"]
     if elapsed_time > 0:
         speed = current / elapsed_time
@@ -410,18 +422,26 @@ async def download_handler(client, message, link_override=None, processed_albums
                             if hasattr(current_msg.document, "height"):
                                 height = current_msg.document.height or 0
 
-                        path = await download_media_fast(
-                            user_client,
-                            current_msg,
-                            None,
-                            progress_callback=progress_bar,
-                            progress_args=(status_msg, "📥 Downloading")
-                        )
-                        if path is None:
+                        try:
+                            path = await download_media_fast(
+                                user_client,
+                                current_msg,
+                                None,
+                                progress_callback=progress_bar,
+                                progress_args=(status_msg, "📥 Downloading")
+                            )
+                        except Exception as e:
+                            if str(e) == "StopProcess":
+                                raise e
+                            logging.error(f"Download crash: {e}")
+                            path = None
+
+                        if not path or not os.path.exists(path):
+                            logging.error(f"Download failed or file missing: {path}")
                             continue
 
-                        original_caption = current_msg.caption if current_msg and hasattr(current_msg, "caption") else ""
-                        safe_caption = str(original_caption) if original_caption is not None else ""
+                        if user_id in cancel_flags:
+                            raise Exception("StopProcess")
 
                         await status_msg.edit_text("📤 Uploading...")
                         
@@ -439,6 +459,20 @@ async def download_handler(client, message, link_override=None, processed_albums
                         )
                         
                         processed_count += 1
+                    except Exception as e:
+                        if str(e) == "StopProcess":
+                            cancel_flags.discard(user_id)
+                            if path and os.path.exists(path):
+                                os.remove(path)
+                            if thumb_path and os.path.exists(thumb_path):
+                                os.remove(thumb_path)
+                            try:
+                                await status_msg.edit_text("🛑 Process cancelled.")
+                            except Exception:
+                                pass
+                            return None
+                        logging.error(f"Download/Upload error: {e}")
+                        continue
                     finally:
                         if path and os.path.exists(path):
                             os.remove(path)

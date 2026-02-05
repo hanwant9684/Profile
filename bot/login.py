@@ -245,8 +245,8 @@ async def cancel_downloads(client, message):
     
     if user_id in active_downloads:
         cancel_flags.add(user_id)
-        active_downloads.discard(user_id) # Force discard immediately as well
-        await message.reply("🛑 Download cancellation request sent. Your process has been removed from active list.")
+        # We don't discard from active_downloads here, the handler will do it after cleaning up
+        await message.reply("🛑 Download cancellation request sent.")
     else:
         # Just in case the flag was set but not in active_downloads
         if user_id in cancel_flags:
