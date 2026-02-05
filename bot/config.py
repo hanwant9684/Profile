@@ -48,12 +48,12 @@ def get_smart_chunk_size(file_size):
 
 def get_smart_download_workers(file_size):
     if file_size < 100 * 1024 * 1024:
-        return 
+        return 1
     else:
-        return 16
+        return 2
 
 def get_smart_upload_workers(file_size):
-    return 16
+    return 2
 
 active_downloads = set()
 cancel_flags = set()
