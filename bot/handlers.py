@@ -398,6 +398,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                 await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
                 return None
             active_downloads.add(user_id)
+
+            processed_count = 0
+            
             try:
                 if is_private or is_group or is_story:
                     session_str = user.get('phone_session_string') if user else None
