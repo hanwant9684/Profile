@@ -308,32 +308,36 @@ async def download_handler(client, message, link_override=None, processed_albums
         is_story = True
     elif private_comment_match:
         temp_channel_id = int("-100" + private_comment_match.group(1))
-        message_id = int(private_comment_match.group(3))
+        comment_id = int(private_comment_match.group(3))
         is_private = True
         is_group = True
         try:
             chat_info = await client.get_chat(temp_channel_id)
             if chat_info.linked_chat:
                 chat_id = chat_info.linked_chat.id # Now targets the correct Private Group
+                message_id = comment_id
             else:
                 chat_id = temp_channel_id
+                message_id = comment_id
         except Exception:
             chat_id = temp_channel_id
+            message_id = comment_id
     elif comment_match:
         temp_channel = comment_match.group(1)
-        msg_id_in_group = int(comment_match.group(3))
+        comment_id = int(comment_match.group(3))
+        is_private = True
+        is_group = True
         try:
             chat_info = await client.get_chat(temp_channel)
             if chat_info.linked_chat:
                 chat_id = chat_info.linked_chat.id # Use the GROUP ID instead
-                message_id = msg_id_in_group
-                is_group = True # This forces the bot to use the /login method
+                message_id = comment_id
             else:
                 chat_id = temp_channel
-                message_id = msg_id_in_group
+                message_id = comment_id
         except Exception:
             chat_id = temp_channel
-            message_id = msg_id_in_group
+            message_id = comment_id
     elif private_thread_match:
         chat_id = int("-100" + private_thread_match.group(1))
         message_id = int(private_thread_match.group(2))
