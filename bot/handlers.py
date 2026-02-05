@@ -6,7 +6,7 @@ import aiofiles
 import re
 import logging
 from pyrogram import filters, Client
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
     OWNER_ID, global_upload_semaphore, cancel_flags, DUMP_CHANNEL_ID
@@ -566,7 +566,7 @@ async def upgrade(client, message):
     )
     await message.reply(
         text,
-        link_preview_options=pyrogram.types.LinkPreviewOptions(is_disabled=True),
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url=f"https://t.me/{OWNER_USERNAME}")],
             [InlineKeyboardButton("Support Chat", url=SUPPORT_CHAT_LINK)]
