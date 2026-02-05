@@ -210,6 +210,10 @@ async def check_and_update_quota(user_id):
 
 async def increment_quota(user_id, count=1):
     try:
+        user = await get_user(user_id)
+        if not user or user.get("role") != 'free':
+            return
+            
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute('UPDATE users SET downloads_today = downloads_today + ? WHERE telegram_id = ?',
                            (count, str(user_id)))
