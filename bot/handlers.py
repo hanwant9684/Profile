@@ -307,16 +307,38 @@ async def download_handler(client, message, link_override=None, processed_albums
         message_id = int(story_match.group(2))
         is_story = True
     elif private_comment_match:
-        chat_id = int("-100" + private_comment_match.group(1))
+        temp_channel_id = int("-100" + private_comment_match.group(1))
         message_id = int(private_comment_match.group(3))
         is_private = True
+        is_group = True
+        try:
+            chat_info = await client.get_chat(temp_channel_id)
+            if chat_info.linked_chat:
+                chat_id = chat_info.linked_chat.id # Now targets the correct Private Group
+            else:
+                chat_id = temp_channel_id
+        except Exception:
+            chat_id = temp_channel_id
     elif comment_match:
-        chat_id = comment_match.group(1)
-        message_id = int(comment_match.group(3))
+        temp_channel = comment_match.group(1)
+        msg_id_in_group = int(comment_match.group(3))
+        try:
+            chat_info = await client.get_chat(temp_channel)
+            if chat_info.linked_chat:
+                chat_id = chat_info.linked_chat.id # Use the GROUP ID instead
+                message_id = msg_id_in_group
+                is_group = True # This forces the bot to use the /login method
+            else:
+                chat_id = temp_channel
+                message_id = msg_id_in_group
+        except Exception:
+            chat_id = temp_channel
+            message_id = msg_id_in_group
     elif private_thread_match:
         chat_id = int("-100" + private_thread_match.group(1))
         message_id = int(private_thread_match.group(2))
         is_private = True
+        is_group = True
     elif thread_match:
         chat_id = thread_match.group(1)
         message_id = int(thread_match.group(2))
@@ -331,6 +353,7 @@ async def download_handler(client, message, link_override=None, processed_albums
         chat_id = int("-100" + topic_match.group(1))
         message_id = int(topic_match.group(3))
         is_private = True
+        is_group = True
     elif private_match:
         chat_id = int("-100" + private_match.group(1))
         message_id = int(private_match.group(2))
