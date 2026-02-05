@@ -3,7 +3,7 @@ import asyncio
 import logging
 import aiohttp
 from bot.logger import setup_logger, cleanup_loop
-from hydrogram import Client
+from pyrogram import Client
 from dotenv import load_dotenv
 
 # Initialize logging
@@ -47,12 +47,10 @@ def get_smart_chunk_size(file_size):
         return 1024 * 1024               # 1024KB (1MB)
 
 def get_smart_download_workers(file_size):
-    if file_size < 10 * 1024 * 1024:
+    if file_size < 100 * 1024 * 1024:
         return 
-    elif file_size < 500 * 1024 * 1024:
-        return 2
     else:
-        return 4
+        return 16
 
 def get_smart_upload_workers(file_size):
     return 16
@@ -96,6 +94,6 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
-    max_concurrent_transmissions=20,
-    workers=20
+    max_concurrent_transmissions=100,
+    workers=100
 )

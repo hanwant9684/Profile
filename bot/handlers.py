@@ -5,8 +5,8 @@ import io
 import aiofiles
 import re
 import logging
-from hydrogram import filters, Client
-from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram import filters, Client
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
     OWNER_ID, global_upload_semaphore, cancel_flags
@@ -22,7 +22,7 @@ async def get_user_client(user_id, session_str):
     if user_id in user_clients:
         user_clients[user_id]["last_used"] = now
         return user_clients[user_id]["client"]
-    
+
     client = Client(
         f"user_{user_id}",
         session_string=session_str,
@@ -32,7 +32,7 @@ async def get_user_client(user_id, session_str):
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
-    
+
     if not _cleanup_task_started:
         asyncio.create_task(cleanup_user_clients())
         _cleanup_task_started = True
@@ -46,7 +46,7 @@ async def cleanup_user_clients():
         for user_id, data in user_clients.items():
             if now - data["last_used"] > 600: # 10 minutes
                 to_remove.append(user_id)
-        
+
         for user_id in to_remove:
             client = user_clients.pop(user_id)["client"]
             try:
@@ -59,6 +59,9 @@ from bot.ads import show_ad
 from bot.transfer import download_media_fast, upload_media_fast
 
 async def progress_bar(current, total, message, type_msg):
+    if not hasattr(progress_bar, "data"):
+        progress_bar.data = {}
+
     user_id = message.chat.id
     if user_id in cancel_flags:
         # DO NOT discard here, just raise. 
@@ -67,11 +70,9 @@ async def progress_bar(current, total, message, type_msg):
 
     if total == 0:
         return
-    
+
     now = time.time()
-    if not hasattr(progress_bar, "data"):
-        setattr(progress_bar, "data", {})
-    
+
     msg_id = message.id
     if msg_id not in progress_bar.data:
         progress_bar.data[msg_id] = {
@@ -80,25 +81,25 @@ async def progress_bar(current, total, message, type_msg):
             "start_time": now,
             "last_edit": 0
         }
-    
+
     data = progress_bar.data[msg_id]
     percentage = current * 100 / total
-    
+
     # Simple timer and percentage threshold
     time_diff = now - data["last_edit"]
+    if time_diff < 2:
+        return
+
     last_percentage = data.get("last_percentage", 0)
     percentage_diff = percentage - last_percentage
-    
-    if current != total and time_diff < 2 and percentage_diff < 5:
-        return
-    
+
     data["last_percentage"] = percentage
     elapsed_time = now - data["start_time"]
     if elapsed_time > 0:
         speed = current / elapsed_time
     else:
         speed = 0
-        
+
     if speed > 0:
         remaining_bytes = total - current
         eta = remaining_bytes / speed
@@ -122,10 +123,10 @@ async def progress_bar(current, total, message, type_msg):
 
     speed_str = format_size(speed) + "/s"
     eta_str = format_time(eta)
-    
+
     completed = int(percentage / 10)
     bar = "█" * completed + "░" * (10 - completed)
-    
+
     text = (
         f"**{type_msg}**\n"
         f"[{bar}] {percentage:.1f}%\n"
@@ -151,11 +152,11 @@ async def verify_force_sub(client, user_id):
     setting = await get_setting("force_sub_channel")
     if not setting or not setting.get('value'):
         return True, None
-        
+
     channel = setting['value']
     if not channel.startswith("@") and not channel.startswith("-100"):
         channel = f"@{channel}"
-        
+
     try:
         member = await client.get_chat_member(channel, user_id)
         if member.status in ["left", "kicked"]:
@@ -194,27 +195,27 @@ async def batch_handler(client, message):
 
     start_link = parts[1]
     end_link = parts[2]
-    
+
     start_match = re.search(r"t\.me/([^/]+)/(\d+)", start_link) or re.search(r"t\.me/c/(\d+)/(\d+)", start_link)
     end_match = re.search(r"t\.me/([^/]+)/(\d+)", end_link) or re.search(r"t\.me/c/(\d+)/(\d+)", end_link)
-    
+
     if not start_match or not end_match:
         await message.reply("❌ Invalid links provided.")
         return
-        
+
     start_id = int(start_match.group(2))
     end_id = int(end_match.group(2))
-    
+
     if start_id > end_id:
         start_id, end_id = end_id, start_id
-        
+
     count = end_id - start_id + 1
     if count > 50:
         await message.reply("⚠️ You can only batch up to 50 messages at a time.")
         return
-        
+
     await message.reply(f"🚀 Starting batch download of {count} messages...")
-    
+
     processed_albums = set()
     for msg_id in range(start_id, end_id + 1):
         if user_id in cancel_flags:
@@ -226,7 +227,7 @@ async def batch_handler(client, message):
             link = f"https://t.me/c/{start_match.group(1)}/{msg_id}"
         else:
             link = f"https://t.me/{start_match.group(1)}/{msg_id}"
-        
+
         try:
             result = await download_handler(client, message, link_override=link, processed_albums=processed_albums)
             if result and not isinstance(result, int):
@@ -243,10 +244,10 @@ async def batch_handler(client, message):
 async def download_handler(client, message, link_override=None, processed_albums=None):
     user_id = message.from_user.id
     link = link_override or message.text.strip()
-    
+
     chat_id = None
     message_id = None
-    
+
     public_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
     topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
@@ -319,7 +320,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
     status_msg = await message.reply("⏳ Processing...")
     user = await get_user(user_id)
-    
+
     if (is_private or is_group) and (not user or not user.get('phone_session_string')):
         await status_msg.edit_text("❌ Login is required for private links. Use /login.")
         return
@@ -349,7 +350,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                 except Exception as e:
                     await status_msg.edit_text(f"❌ Error fetching message: {str(e)}")
                     return None
-                
+
                 if not msg or not msg.media:
                     await status_msg.edit_text("❌ No media found in link.")
                     return None
@@ -394,6 +395,12 @@ async def download_handler(client, message, link_override=None, processed_albums
                 for current_msg in target_messages:
                     path = None
                     thumb_path = None
+                    safe_caption = ""
+                    if current_msg.caption:
+                        safe_caption = current_msg.caption
+                    elif current_msg.text:
+                        safe_caption = current_msg.text
+
                     try:
                         if hasattr(current_msg, "video") and current_msg.video and current_msg.video.thumbs:
                             try:
@@ -409,7 +416,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         duration = 0
                         width = 0
                         height = 0
-                        
+
                         if current_msg.video:
                             duration = current_msg.video.duration or 0
                             width = current_msg.video.width or 0
@@ -444,7 +451,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                             raise Exception("StopProcess")
 
                         await status_msg.edit_text("📤 Uploading...")
-                        
+
                         await upload_media_fast(
                             client,
                             user_id,
@@ -457,7 +464,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                             progress_callback=progress_bar,
                             progress_args=(status_msg, "📤 Uploading")
                         )
-                        
+
                         processed_count += 1
                     except Exception as e:
                         if str(e) == "StopProcess":
@@ -478,7 +485,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                             os.remove(path)
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
-                
+
                 await increment_quota(user_id, processed_count)
                 await status_msg.delete()
                 return msg 
