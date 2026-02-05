@@ -8,3 +8,6 @@ uvloop
 psutil
 hydrogram
 aiosqlite
+python-telegram-bot
+pyyaml
+sqlalchemy
