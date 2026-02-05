@@ -35,8 +35,8 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
 DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-MAX_CONCURRENT_DOWNLOADS = 4
-MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 2))
+MAX_CONCURRENT_DOWNLOADS = 5
+MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 5))
 
 def get_smart_chunk_size(file_size):
     if file_size < 10 * 1024 * 1024:      # < 10MB
@@ -48,14 +48,14 @@ def get_smart_chunk_size(file_size):
 
 def get_smart_download_workers(file_size):
     if file_size < 10 * 1024 * 1024:
-        return 4
+        return 
     elif file_size < 500 * 1024 * 1024:
-        return 8
+        return 2
     else:
-        return 16
+        return 4
 
 def get_smart_upload_workers(file_size):
-    return 2
+    return 16
 
 active_downloads = set()
 cancel_flags = set()
@@ -96,6 +96,6 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
-    max_concurrent_transmissions=12,
-    workers=16
+    max_concurrent_transmissions=20,
+    workers=20
 )
