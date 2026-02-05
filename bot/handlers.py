@@ -509,7 +509,7 @@ async def upgrade_prompt_callback(client, callback_query):
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
-    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK
+    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
