@@ -278,6 +278,11 @@ async def download_handler(client, message, link_override=None, processed_albums
     user_id = message.from_user.id
     link = link_override or message.text.strip()
 
+    user = await get_user(user_id)
+    if user and user.get("role") == "banned":
+        await message.reply("❌ **You are banned from using this bot.**")
+        return
+
     chat_id = None
     message_id = None
 
