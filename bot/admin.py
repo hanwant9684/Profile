@@ -5,7 +5,7 @@ from bot.database import set_user_role, ban_user, update_setting, get_setting, g
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
-    if str(message.from_user.id) != str(OWNER_ID): return
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID): return
     
     total_users = await get_user_count()
     
@@ -17,7 +17,7 @@ async def stats(client, message):
 
 @app.on_message(filters.command("killall") & filters.private)
 async def kill_all_processes(client, message):
-    if str(message.from_user.id) != str(OWNER_ID): return
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID): return
     
     from bot.config import cancel_flags
     
@@ -34,8 +34,7 @@ async def kill_all_processes(client, message):
 
 @app.on_message(filters.command("setrole") & filters.private)
 async def setrole(client, message):
-    user_id = str(message.from_user.id)
-    if user_id != str(OWNER_ID):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         await message.reply("⛔ Authorized personnel only.")
         return
         
@@ -76,60 +75,55 @@ async def setrole(client, message):
 
 @app.on_message(filters.command("ban") & filters.private)
 async def ban(client, message):
-    user_id = str(message.from_user.id)
-    if user_id != str(OWNER_ID):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         return
         
     try:
         target_id = message.text.split()[1]
         await ban_user(target_id, True)
         await message.reply(f"🚫 User `{target_id}` has been **BANNED**.")
-    except:
+    except Exception:
         await message.reply("Usage: `/ban <user_id>`")
 
 @app.on_message(filters.command("unban") & filters.private)
 async def unban(client, message):
-    user_id = str(message.from_user.id)
-    if user_id != str(OWNER_ID):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         return
         
     try:
         target_id = message.text.split()[1]
         await ban_user(target_id, False)
         await message.reply(f"✅ User `{target_id}` has been **UNBANNED**.")
-    except:
+    except Exception:
         await message.reply("Usage: `/unban <user_id>`")
 
 @app.on_message(filters.command("set_force_sub") & filters.private)
 async def set_force_sub(client, message):
-    user_id = str(message.from_user.id)
-    if user_id != str(OWNER_ID):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         return
     
     try:
         channel = message.text.split()[1]
         await update_setting("force_sub_channel", channel)
         await message.reply(f"✅ Force Sub channel set to: {channel}")
-    except:
+    except Exception:
         await message.reply("Usage: `/set_force_sub @channel`")
 
 @app.on_message(filters.command("set_dump") & filters.private)
 async def set_dump(client, message):
-    user_id = str(message.from_user.id)
-    if user_id != str(OWNER_ID):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         return
     
     try:
         channel_id = message.text.split()[1]
         await update_setting("dump_channel_id", channel_id)
         await message.reply(f"✅ Dump channel ID set to: `{channel_id}`")
-    except:
+    except Exception:
         await message.reply("Usage: `/set_dump <channel_id>`")
 
 @app.on_message(filters.command("settings") & filters.private)
 async def view_settings(client, message):
-    user_id = str(message.from_user.id)
-    if user_id != str(OWNER_ID):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         return
         
     fs = await get_setting("force_sub_channel")
@@ -150,8 +144,7 @@ async def view_settings(client, message):
 
 @app.on_message(filters.command("broadcast") & filters.private)
 async def broadcast(client, message):
-    user_id = str(message.from_user.id)
-    if user_id != str(OWNER_ID):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         return
         
     if not message.reply_to_message:
@@ -220,9 +213,8 @@ async def broadcast(client, message):
 @app.on_message(filters.command("premium_users") & filters.private, group=-1)
 async def list_premium_users(client, message):
     user_id = message.from_user.id
-    from bot.config import OWNER_ID
     
-    if str(user_id) != str(OWNER_ID):
+    if OWNER_ID is None or int(user_id) != int(OWNER_ID):
         return
         
     try:

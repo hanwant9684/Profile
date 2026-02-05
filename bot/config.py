@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import aiohttp
 from bot.logger import setup_logger, cleanup_loop
 from hydrogram import Client
 from dotenv import load_dotenv
@@ -10,13 +11,19 @@ setup_logger()
 
 load_dotenv()
 
-# API Credentials
+# API Credentials - cast to correct types and handle missing
 API_ID = os.environ.get("API_ID")
-API_HASH = os.environ.get("API_HASH")
+if API_ID:
+    try:
+        API_ID = int(API_ID)
+    except ValueError:
+        API_ID = None
+API_HASH = str(os.environ.get("API_HASH", ""))
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 # Bot Configuration
-OWNER_ID = os.environ.get("OWNER_ID")
+OWNER_ID_RAW = os.environ.get("OWNER_ID")
+OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW and OWNER_ID_RAW.isdigit() else None
 OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "OwnerUsername")
 SUPPORT_CHAT_LINK = os.environ.get("SUPPORT_CHAT_LINK", "https://t.me/Wolfy004chatbot")
 PAYPAL_LINK = os.environ.get("PAYPAL_LINK", "Contact Owner")
@@ -32,11 +39,6 @@ MAX_CONCURRENT_DOWNLOADS = 4
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 2))
 
 def get_smart_chunk_size(file_size):
-    """
-    Calculates the optimal chunk size.
-    For files over 100MB, we use 1024KB (1MB) which is supported 
-    by modern Pyrogram-forks for maximum throughput.
-    """
     if file_size < 10 * 1024 * 1024:      # < 10MB
         return 128 * 1024                # 128KB
     elif file_size < 100 * 1024 * 1024:  # 10-100MB
@@ -45,39 +47,41 @@ def get_smart_chunk_size(file_size):
         return 1024 * 1024               # 1024KB (1MB)
 
 def get_smart_download_workers(file_size):
-    """
-    Scales workers based on size. More workers = faster parallel downloading.
-    """
     if file_size < 10 * 1024 * 1024:
-        return 4   # Increased from 1
+        return 4
     elif file_size < 500 * 1024 * 1024:
-        return 8   # Increased from 2
+        return 8
     else:
-        return 16  # High concurrency for large files
+        return 16
 
 def get_smart_upload_workers(file_size):
-    """
-    Scales workers for parallel uploads.
-    """
     return 2
 
-# Optimization for 1.5GB RAM VPS and faster execution
-# Event loop is already initialized in main.py
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 global_upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
 login_states = {}
 
-# Verification
+# Global aiohttp session
+shared_session = None
+
+async def get_shared_session():
+    global shared_session
+    if shared_session is None or shared_session.closed:
+        shared_session = aiohttp.ClientSession()
+    return shared_session
+
+# Verification and immediate exit if missing
 missing_vars = []
 if not API_ID: missing_vars.append("API_ID")
 if not API_HASH: missing_vars.append("API_HASH")
 if not BOT_TOKEN: missing_vars.append("BOT_TOKEN")
 
 if missing_vars:
-    print(f"CRITICAL WARNING: Missing environment variables: {', '.join(missing_vars)}")
-    # If missing critical variables, we won't try to start the app object to avoid crash
+    import sys
+    print(f"CRITICAL ERROR: Missing environment variables: {', '.join(missing_vars)}")
+    sys.exit(1)
 
 # RichAds Configuration
 RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "792361")

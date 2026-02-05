@@ -68,45 +68,47 @@ def _restore_from_temp(backup_path):
 async def cleanup_old_github_backups_async(token, repo, keep_count=2):
     """Delete old backups from GitHub, keeping only the newest ones"""
     try:
+        from bot.config import get_shared_session
         list_url = f"https://api.github.com/repos/{repo}/contents/backups"
         headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json"
         }
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(list_url) as response:
-                if response.status != 200:
-                    return
-                backups = await response.json()
-
-            if not backups or len(backups) <= keep_count:
+        session = await get_shared_session()
+        async with session.get(list_url, headers=headers) as response:
+            if response.status != 200:
                 return
+            backups = await response.json()
 
-            sorted_backups = sorted(backups, key=lambda x: x['name'], reverse=True)
-            backups_to_delete = sorted_backups[keep_count:]
+        if not backups or len(backups) <= keep_count:
+            return
 
-            for backup in backups_to_delete:
-                try:
-                    delete_url = f"https://api.github.com/repos/{repo}/contents/{backup['path']}"
-                    async with session.get(delete_url) as resp:
-                        file_data = await resp.json()
+        sorted_backups = sorted(backups, key=lambda x: x['name'], reverse=True)
+        backups_to_delete = sorted_backups[keep_count:]
 
-                    data = {
-                        "message": f"Cleanup: Remove old backup {backup['name']}",
-                        "sha": file_data['sha']
-                    }
-                    async with session.delete(delete_url, json=data) as response:
-                        if response.status == 200:
-                            logger.info(f"Deleted old backup: {backup['name']}")
-                except Exception as e:
-                    logger.warning(f"Failed to delete {backup['name']}: {e}")
+        for backup in backups_to_delete:
+            try:
+                delete_url = f"https://api.github.com/repos/{repo}/contents/{backup['path']}"
+                async with session.get(delete_url, headers=headers) as resp:
+                    file_data = await resp.json()
+
+                data = {
+                    "message": f"Cleanup: Remove old backup {backup['name']}",
+                    "sha": file_data['sha']
+                }
+                async with session.delete(delete_url, json=data, headers=headers) as response:
+                    if response.status == 200:
+                        logger.info(f"Deleted old backup: {backup['name']}")
+            except Exception as e:
+                logger.warning(f"Failed to delete {backup['name']}: {e}")
     except Exception as e:
         logger.warning(f"Cleanup failed: {e}")
 
 async def backup_to_github_async():
     """Upload database backup to GitHub repository"""
     try:
+        from bot.config import get_shared_session
         token = os.getenv("GITHUB_TOKEN")
         repo = os.getenv("GITHUB_BACKUP_REPO")
 
@@ -131,15 +133,15 @@ async def backup_to_github_async():
         data = {"message": f"Automated backup - {timestamp}", "content": content}
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.put(url, json=data) as response:
-                if response.status == 201:
-                    logger.info(f"Uploaded to GitHub: {file_path}")
-                    await cleanup_old_github_backups_async(token, repo, keep_count=2)
-                    return True
-                else:
-                    logger.error(f"GitHub upload failed: {response.status}")
-                    return False
+        session = await get_shared_session()
+        async with session.put(url, json=data, headers=headers) as response:
+            if response.status == 201:
+                logger.info(f"Uploaded to GitHub: {file_path}")
+                await cleanup_old_github_backups_async(token, repo, keep_count=2)
+                return True
+            else:
+                logger.error(f"GitHub upload failed: {response.status}")
+                return False
     except Exception as e:
         logger.error(f"GitHub backup failed: {e}")
         return False
@@ -147,17 +149,10 @@ async def backup_to_github_async():
 def backup_to_github():
     """Synchronous wrapper for backup (if needed for threads)"""
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    if loop.is_running():
-        # If the loop is already running, we can't use run_until_complete.
-        # This shouldn't happen in the thread worker, but for safety:
-        asyncio.create_task(backup_to_github_async())
-        return True
-    return loop.run_until_complete(backup_to_github_async())
+        return asyncio.run(backup_to_github_async())
+    except Exception as e:
+        logger.error(f"Backup wrapper error: {e}")
+        return False
 
 def trigger_backup_on_session(user_id):
     """Trigger backup when new user session is created (non-blocking, thread-safe)"""
@@ -224,6 +219,7 @@ def trigger_backup_on_critical_change(operation_name, user_id=None):
 
 async def restore_from_github_async(backup_name=None):
     try:
+        from bot.config import get_shared_session
         token = os.getenv("GITHUB_TOKEN")
         repo = os.getenv("GITHUB_BACKUP_REPO")
         if not token or not repo:
@@ -231,22 +227,22 @@ async def restore_from_github_async(backup_name=None):
             return False
 
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            if not backup_name:
-                list_url = f"https://api.github.com/repos/{repo}/contents/backups"
-                async with session.get(list_url) as response:
-                    if response.status != 200: return False
-                    backups = await response.json()
-                if not backups: return False
-                latest = sorted(backups, key=lambda x: x['name'], reverse=True)[0]
-                backup_name = latest['name']
-                download_url = latest['download_url']
-            else:
-                download_url = f"https://raw.githubusercontent.com/{repo}/main/backups/{backup_name}"
-
-            async with session.get(download_url) as response:
+        session = await get_shared_session()
+        if not backup_name:
+            list_url = f"https://api.github.com/repos/{repo}/contents/backups"
+            async with session.get(list_url, headers=headers) as response:
                 if response.status != 200: return False
-                backup_content = await response.read()
+                backups = await response.json()
+            if not backups: return False
+            latest = sorted(backups, key=lambda x: x['name'], reverse=True)[0]
+            backup_name = latest['name']
+            download_url = latest['download_url']
+        else:
+            download_url = f"https://raw.githubusercontent.com/{repo}/main/backups/{backup_name}"
+
+        async with session.get(download_url, headers=headers) as response:
+            if response.status != 200: return False
+            backup_content = await response.read()
 
         temp_path = "temp_restore.db"
         try:
@@ -261,11 +257,10 @@ async def restore_from_github_async(backup_name=None):
 
 def restore_from_github(backup_name=None):
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(restore_from_github_async(backup_name))
+        return asyncio.run(restore_from_github_async(backup_name))
+    except Exception as e:
+        logger.error(f"Restore wrapper error: {e}")
+        return False
 
 async def periodic_cloud_backup(interval_minutes=10):
     backup_service = os.getenv("CLOUD_BACKUP_SERVICE", "").lower()

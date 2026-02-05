@@ -14,8 +14,10 @@ from bot.config import (
 
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
+_cleanup_task_started = False
 
 async def get_user_client(user_id, session_str):
+    global _cleanup_task_started
     now = time.time()
     if user_id in user_clients:
         user_clients[user_id]["last_used"] = now
@@ -31,8 +33,9 @@ async def get_user_client(user_id, session_str):
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
     
-    # Start cleanup task if not already running
-    asyncio.create_task(cleanup_user_clients())
+    if not _cleanup_task_started:
+        asyncio.create_task(cleanup_user_clients())
+        _cleanup_task_started = True
     return client
 
 async def cleanup_user_clients():
@@ -48,7 +51,7 @@ async def cleanup_user_clients():
             client = user_clients.pop(user_id)["client"]
             try:
                 await client.stop()
-            except:
+            except Exception:
                 pass
 
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
@@ -123,7 +126,7 @@ async def progress_bar(current, total, message, type_msg):
         progress_bar.data.pop(msg_id, None)
         try:
             await message.edit_text(f"**{type_msg} Completed!**\n📦 **Total Size:** `{format_size(total)}`")
-        except:
+        except Exception:
             pass
     else:
         data["last_edit"] = now
@@ -146,7 +149,7 @@ async def verify_force_sub(client, user_id):
         if member.status in ["left", "kicked"]:
              return False, channel
         return True, None
-    except Exception as e:
+    except Exception:
         return False, channel
 
 @app.on_message(filters.command("help") & filters.private)
@@ -202,7 +205,6 @@ async def batch_handler(client, message):
     
     processed_albums = set()
     for msg_id in range(start_id, end_id + 1):
-        # 2. Add a Cancellation Check
         if user_id in cancel_flags:
             cancel_flags.discard(user_id)
             await message.reply("🛑 Batch cancelled by user.")
@@ -213,16 +215,13 @@ async def batch_handler(client, message):
         else:
             link = f"https://t.me/{start_match.group(1)}/{msg_id}"
         
-        # 1. Add Exception Handling to the Batch Loop
         try:
-            # 5. Fix the Return Value Bug (tracking result)
             result = await download_handler(client, message, link_override=link, processed_albums=processed_albums)
-            
-            if result and not isinstance(result, int): # If it's a real processed message
+            if result and not isinstance(result, int):
                  await asyncio.sleep(4)
-            elif result: # It was an album skip
-                 pass # No sleep for skipped album parts
-            else: # Error or no media
+            elif result:
+                 pass
+            else:
                  await asyncio.sleep(2)
         except Exception as e:
             logging.error(f"Batch loop error for link {link}: {e}")
@@ -294,7 +293,6 @@ async def download_handler(client, message, link_override=None, processed_albums
         chat_id = public_match.group(1)
         message_id = int(public_match.group(2))
         try:
-            # Check if chat_id is numeric or username
             if chat_id.isdigit() or (chat_id.startswith("-") and chat_id[1:].isdigit()):
                 chat_id = int(chat_id)
             chat = await asyncio.wait_for(client.get_chat(chat_id), timeout=5)
@@ -305,7 +303,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                  is_group = True
         except Exception as e:
             logging.debug(f"Chat check error for {chat_id}: {e}")
-            # Fallback: assume it might be a group if we can't fetch it
             pass
 
     status_msg = await message.reply("⏳ Processing...")
@@ -319,6 +316,9 @@ async def download_handler(client, message, link_override=None, processed_albums
 
     try:
         async with global_download_semaphore:
+            if user_id in active_downloads:
+                await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
+                return None
             active_downloads.add(user_id)
             try:
                 if is_private or is_group or is_story:
@@ -450,13 +450,15 @@ async def download_handler(client, message, link_override=None, processed_albums
                 return msg 
             finally:
                 active_downloads.discard(user_id)
+                if hasattr(progress_bar, "data"):
+                    progress_bar.data.pop(status_msg.id, None)
 
     except Exception as e:
         logging.error(f"Download handler error: {e}")
         if 'status_msg' in locals():
             try:
                 await status_msg.edit_text(f"❌ Error: {str(e)}")
-            except:
+            except Exception:
                 pass
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))

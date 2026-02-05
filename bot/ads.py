@@ -1,10 +1,10 @@
-import aiohttp
 import logging
 import html
 from typing import Optional, Dict, Any, List
 from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from bot.config import RICHADS_PUBLISHER_ID, RICHADS_WIDGET_ID, AD_DAILY_LIMIT, AD_FOR_PREMIUM
+from bot.config import RICHADS_PUBLISHER_ID, RICHADS_WIDGET_ID, AD_DAILY_LIMIT, AD_FOR_PREMIUM, get_shared_session
 from bot.database import get_user, increment_ad_count, get_ad_count_today
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +38,18 @@ class RichAdsManager:
             payload["telegram_id"] = str(telegram_id)
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(RICHADS_API_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status == 200:
-                        ads = await response.json()
-                        if ads and len(ads) > 0:
-                            logger.info(f"RichAds: Ad received for user {telegram_id}")
-                            return ads
-                        logger.info(f"RichAds: No ads available for user {telegram_id}")
-                        return None
-                    else:
-                        logger.warning(f"RichAds: API Error {response.status} for user {telegram_id}")
-                        return None
+            session = await get_shared_session()
+            async with session.post(RICHADS_API_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    ads = await response.json()
+                    if ads and len(ads) > 0:
+                        logger.info(f"RichAds: Ad received for user {telegram_id}")
+                        return ads
+                    logger.info(f"RichAds: No ads available for user {telegram_id}")
+                    return None
+                else:
+                    logger.warning(f"RichAds: API Error {response.status} for user {telegram_id}")
+                    return None
         except Exception as e:
             logger.error(f"RichAds: Fetch error for user {telegram_id}: {e}")
             return None
@@ -59,10 +59,10 @@ class RichAdsManager:
         if not notification_url:
             return
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(html.unescape(notification_url), timeout=5) as response:
-                    if response.status == 200:
-                        logger.debug("RichAds: Impression tracked")
+            session = await get_shared_session()
+            async with session.get(html.unescape(notification_url), timeout=5) as response:
+                if response.status == 200:
+                    logger.debug("RichAds: Impression tracked")
         except Exception as e:
             logger.debug(f"RichAds: Impression error: {e}")
 

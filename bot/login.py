@@ -81,6 +81,11 @@ async def login_start(client, message):
         await message.reply("You are already logged in! Contact support if you need to re-login.")
         return
 
+    # Check for login state limit to prevent resource exhaustion
+    if len(login_states) >= 10:
+        await message.reply("⚠️ Too many active login attempts. Please try again in a few minutes.")
+        return
+
     login_states[user_id] = {"step": "PHONE", "timestamp": time.time()}
     await message.reply(
         "To download from restricted channels, you need to log in.\n\n"
@@ -144,8 +149,11 @@ async def handle_login_steps(client, message: Message):
             except Exception as e:
                 await message.reply(f"Error sending code: {str(e)}\nPlease try /login again.")
                 if "client" in state:
-                    await state["client"].disconnect()
-                del login_states[user_id]
+                    try:
+                        await state["client"].disconnect()
+                    except Exception:
+                        pass
+                login_states.pop(user_id, None)
                 return
             state["phone"] = phone_number
             state["phone_code_hash"] = sent_code.phone_code_hash
@@ -170,14 +178,20 @@ async def handle_login_steps(client, message: Message):
             except Exception as e:
                 logger.error(f"Login code check error: {e}")
                 await message.reply(f"Login failed: {e}")
-                await temp_client.disconnect()
-                del login_states[user_id]
+                try:
+                    await temp_client.disconnect()
+                except Exception:
+                    pass
+                login_states.pop(user_id, None)
                 return
 
             session_string = await temp_client.export_session_string()
             await save_session_string(user_id, session_string)
-            await temp_client.disconnect()
-            del login_states[user_id]
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+            login_states.pop(user_id, None)
             await message.reply("✅ Login Successful!")
 
         elif step == "PASSWORD":
@@ -189,28 +203,40 @@ async def handle_login_steps(client, message: Message):
                 await temp_client.check_password(password)
             except PasswordHashInvalid:
                 await message.reply("❌ Invalid password. Please try /login again.")
-                await temp_client.disconnect()
-                del login_states[user_id]
+                try:
+                    await temp_client.disconnect()
+                except Exception:
+                    pass
+                login_states.pop(user_id, None)
                 return
             except Exception as e:
                 logger.error(f"Login password check error: {e}")
                 await message.reply(f"Login failed: {e}")
-                await temp_client.disconnect()
-                del login_states[user_id]
+                try:
+                    await temp_client.disconnect()
+                except Exception:
+                    pass
+                login_states.pop(user_id, None)
                 return
 
             session_string = await temp_client.export_session_string()
             await save_session_string(user_id, session_string)
-            await temp_client.disconnect()
-            del login_states[user_id]
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+            login_states.pop(user_id, None)
             await message.reply("✅ Login Successful!")
 
     except Exception as e:
         logger.error(f"handle_login_steps error: {e}")
         await message.reply("Error. Login cancelled.")
         if "client" in state:
-            await state["client"].disconnect()
-        del login_states[user_id]
+            try:
+                await state["client"].disconnect()
+            except Exception:
+                pass
+        login_states.pop(user_id, None)
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_downloads(client, message):
