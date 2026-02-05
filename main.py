@@ -39,7 +39,11 @@ async def main():
     await restore_latest_from_cloud()
     
     print("Initializing database...")
-    init_db()
+    await init_db()
+
+    # Ensure shared session is initialized
+    from bot.config import get_shared_session
+    await get_shared_session()
 
     # Check for TgCrypto and debug crypto speed
     try:
@@ -81,6 +85,12 @@ async def main():
         await main_bot()
     else:
         print("Bot app not initialized due to missing config. Exiting.")
+    
+    # Cleanup global session
+    from bot.config import shared_session
+    if shared_session and not shared_session.closed:
+        await shared_session.close()
+        print("Global aiohttp session closed.")
 
 if __name__ == "__main__":
     try:
