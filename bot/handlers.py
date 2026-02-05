@@ -566,6 +566,7 @@ async def upgrade(client, message):
     )
     await message.reply(
         text,
+        disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url=f"https://t.me/{OWNER_USERNAME}")],
             [InlineKeyboardButton("Support Chat", url=SUPPORT_CHAT_LINK)]
