@@ -1,7 +1,7 @@
 modules = ["python-3.11"]
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "libuv", "unzip"]
+packages = ["unzip"]
 
 [agent]
 expertMode = true
@@ -16,10 +16,10 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Telegram Bot"
+args = "Run Bot"
 
 [[workflows.workflow]]
-name = "Telegram Bot"
+name = "Run Bot"
 author = "agent"
 
 [[workflows.workflow.tasks]]
