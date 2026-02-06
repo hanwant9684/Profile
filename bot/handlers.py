@@ -398,7 +398,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                 return None
             active_downloads.add(user_id)
                     await global_download_semaphore.acquire()
-                    processed_count
+                    processed_count = 0
             try:
                 if is_private or is_group or is_story:
                     session_str = user.get('phone_session_string') if user else None
