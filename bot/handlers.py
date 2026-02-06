@@ -401,7 +401,7 @@ async def download_handler(client, message, link_override=None, processed_albums
             
         await global_download_semaphore.acquire()
 
-            processed_count = 0
+        processed_count = 0
             
             try:
                 if is_private or is_group or is_story:
