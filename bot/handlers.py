@@ -277,7 +277,11 @@ async def batch_handler(client, message):
 async def download_handler(client, message, link_override=None, processed_albums=None):
     user_id = message.from_user.id
     link = link_override or message.text.strip()
-
+    user = await get_user(user_id)
+    if user and user.get("role") == "banned":
+            await message.reply("❌ **You are banned from using this bot.**")	
+            return	
+    	
     chat_id = None
     message_id = None
 
@@ -393,6 +397,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                 await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
                 return None
             active_downloads.add(user_id)
+                    await global_download_semaphore.acquire()
+                    processed_count
             try:
                 if is_private or is_group or is_story:
                     session_str = user.get('phone_session_string') if user else None
@@ -552,7 +558,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
-                await increment_quota(user_id, processed_count)
                 await status_msg.delete()
                 return msg 
             finally:
