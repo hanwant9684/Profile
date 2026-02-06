@@ -394,7 +394,6 @@ async def download_handler(client, message, link_override=None, processed_albums
 
     try:
         async with global_download_semaphore:
-            active_downloads_lock = asyncio.Lock()
             if user_id in active_downloads:
                 await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
                 return None
