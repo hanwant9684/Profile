@@ -278,11 +278,6 @@ async def download_handler(client, message, link_override=None, processed_albums
     user_id = message.from_user.id
     link = link_override or message.text.strip()
 
-    user = await get_user(user_id)
-    if user and user.get("role") == "banned":
-        await message.reply("❌ **You are banned from using this bot.**")
-        return
-
     chat_id = None
     message_id = None
 
@@ -393,16 +388,11 @@ async def download_handler(client, message, link_override=None, processed_albums
     user_client = None
 
     try:
-        async with active_downloads_lock:
+        async with global_download_semaphore:
             if user_id in active_downloads:
                 await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
                 return None
             active_downloads.add(user_id)
-            
-        await global_download_semaphore.acquire()
-
-        processed_count = 0
-            
             try:
                 if is_private or is_group or is_story:
                     session_str = user.get('phone_session_string') if user else None
@@ -562,23 +552,21 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
+                await increment_quota(user_id, processed_count)
                 await status_msg.delete()
                 return msg 
             finally:
-                global_download_semaphore.release()
-                async with active_downloads_lock:
-                    active_downloads.discard(user_id)
-    finally:
-        try:
-            if hasattr(progress_bar, "data"):
-                progress_bar.data.pop(status_msg.id, None)
-        except Exception as e:
-            logging.error(f"Download handler error: {e}")
-            if 'status_msg' in locals():
-                try:
-                    await status_msg.edit_text(f"❌ Error: {str(e)}")
-                except Exception:
-                    pass
+                active_downloads.discard(user_id)
+                if hasattr(progress_bar, "data"):
+                    progress_bar.data.pop(status_msg.id, None)
+
+    except Exception as e:
+        logging.error(f"Download handler error: {e}")
+        if 'status_msg' in locals():
+            try:
+                await status_msg.edit_text(f"❌ Error: {str(e)}")
+            except Exception:
+                pass
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))
 async def upgrade_prompt_callback(client, callback_query):
