@@ -280,15 +280,24 @@ async def logout(client, message):
     
     # Clear any active login session
     if user_id in login_states:
-        state = login_states[user_id]
-        if "client" in state:
+        state = login_states.pop(user_id, None)
+        if state and "client" in state:
             try:
                 await state["client"].disconnect()
             except:
                 pass
-        del login_states[user_id]
 
     if user and user.get('phone_session_string'):
+        try:
+            from pyrogram import Client
+            from bot.config import API_ID, API_HASH
+            temp_client = Client(f"logout_{user_id}", session_string=user.get('phone_session_string'), api_id=API_ID, api_hash=API_HASH, in_memory=True)
+            await temp_client.start()
+            await temp_client.log_out()
+
+        except Exception:
+            pass
+            
         await logout_user(user_id)
         await message.reply("✅ Logged out successfully! Your session has been cleared.")
     else:
