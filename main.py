@@ -30,7 +30,8 @@ async def main():
                     os.unlink(file_path)
                 elif os.path.isdir(file_path):
                     shutil.rmtree(file_path)
-                    except Exception: pass
+            except Exception:
+                pass
 
     # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
