@@ -566,9 +566,9 @@ async def download_handler(client, message, link_override=None, processed_albums
             finally:
                 async with active_downloads_lock:
                     active_downloads.discard(user_id)
-            finally:  
-                if hasattr(progress_bar, "data"):
-                      progress_bar.data.pop(status_msg.id, None)
+    finally:
+        if hasattr(progress_bar, "data"):
+            progress_bar.data.pop(status_msg.id, None)
 
     except Exception as e:
         logging.error(f"Download handler error: {e}")
