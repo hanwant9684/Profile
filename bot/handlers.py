@@ -277,11 +277,12 @@ async def batch_handler(client, message):
 async def download_handler(client, message, link_override=None, processed_albums=None):
     user_id = message.from_user.id
     link = link_override or message.text.strip()
+
     user = await get_user(user_id)
     if user and user.get("role") == "banned":
-            await message.reply("❌ **You are banned from using this bot.**")	
-            return	
-    	
+        await message.reply("❌ **You are banned from using this bot.**")
+        return
+
     chat_id = None
     message_id = None
 
@@ -393,11 +394,12 @@ async def download_handler(client, message, link_override=None, processed_albums
 
     try:
         async with global_download_semaphore:
+            active_downloads_lock = asyncio.Lock()
             if user_id in active_downloads:
                 await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
                 return None
             active_downloads.add(user_id)
-            await global_download_semaphore.acquire()
+
             processed_count = 0
             
             try:
@@ -562,17 +564,18 @@ async def download_handler(client, message, link_override=None, processed_albums
                 await status_msg.delete()
                 return msg 
             finally:
-                active_downloads.discard(user_id)
-                if hasattr(progress_bar, "data"):
-                    progress_bar.data.pop(status_msg.id, None)
-
-    except Exception as e:
-        logging.error(f"Download handler error: {e}")
-        if 'status_msg' in locals():
-            try:
-                await status_msg.edit_text(f"❌ Error: {str(e)}")
-            except Exception:
-                pass
+                async with active_downloads_lock:
+                    active_downloads.discard(user_id)
+    finally:
+        if hasattr(progress_bar, "data"):
+            progress_bar.data.pop(status_msg.id, None)
+        except Exception as e:
+            logging.error(f"Download handler error: {e}")
+            if 'status_msg' in locals():
+                try:
+                    await status_msg.edit_text(f"❌ Error: {str(e)}")
+                except Exception:
+                    pass
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))
 async def upgrade_prompt_callback(client, callback_query):
