@@ -140,9 +140,9 @@ async def handle_login_steps(client, message: Message):
                     api_id=int(API_ID) if API_ID else 0,
                     api_hash=str(API_HASH) if API_HASH else "",
                     in_memory=True,
-                    sleep_threshold=0,
-                    max_concurrent_transmissions=1,
-                    workers=1
+                    sleep_threshold=60,
+                    max_concurrent_transmissions=5,
+                    workers=5
                 )
                 await state["client"].connect()
                 sent_code = await state["client"].send_code(phone_number)
