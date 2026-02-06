@@ -524,4 +524,91 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await status_msg.edit_text("📤 Uploading...")
 
                         sent_msg = await upload_media_fast(
-             
+                            client,
+                            user_id,
+                            path,
+                            caption=safe_caption,
+                            thumb=thumb_path,
+                            duration=duration,
+                            width=width,
+                            height=height,
+                            progress_callback=progress_bar,
+                            progress_args=(status_msg, "📤 Uploading")
+                        )
+                        if sent_msg:
+                            await send_to_dump(client, user_id, link, sent_msg)
+
+                        processed_count += 1
+                    except Exception as e:
+                        if str(e) == "StopProcess":
+                            cancel_flags.discard(user_id)
+                            if path and os.path.exists(path):
+                                os.remove(path)
+                            if thumb_path and os.path.exists(thumb_path):
+                                os.remove(thumb_path)
+                            try:
+                                await status_msg.edit_text("🛑 Process cancelled.")
+                            except Exception:
+                                pass
+                            return None
+                        logging.error(f"Download/Upload error: {e}")
+                        continue
+                    finally:
+                        if path and os.path.exists(path):
+                            os.remove(path)
+                        if thumb_path and os.path.exists(thumb_path):
+                            os.remove(thumb_path)
+
+                await status_msg.delete()
+                return msg 
+            finally:
+                active_downloads.discard(user_id)
+                if hasattr(progress_bar, "data"):
+                    progress_bar.data.pop(status_msg.id, None)
+
+    except Exception as e:
+        logging.error(f"Download handler error: {e}")
+        if 'status_msg' in locals():
+            try:
+                await status_msg.edit_text(f"❌ Error: {str(e)}")
+            except Exception:
+                pass
+
+@app.on_callback_query(filters.regex("upgrade_prompt"))
+async def upgrade_prompt_callback(client, callback_query):
+    await upgrade(client, callback_query.message)
+    await callback_query.answer()
+
+@app.on_message(filters.command("upgrade") & filters.private)
+async def upgrade(client, message):
+    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
+    text = (
+        "💎 **Premium Plans**\n\n"
+        "⚡ **Standard**\n"
+        "•———————————————•\n"
+        "🔸 **7** days - **$1**\n"
+        "🔸 **14** days - **$1.5**\n"
+        "🔸 **30** days - **$2**\n"
+        "•———————————————•\n"
+        "• Unlimited Downloads\n"
+        "• Batch Download upto (50)\n"
+        "• Fast Speed\n\n"
+        "🔥 **Lifetime** - $25\n"
+        "• All Premium Features\n"
+        "• Priority Support\n\n"
+        "💳 **Payment Details**\n"
+        f"🪙 **Crypto(Binance)**: `{CRYPTO_ADDRESS}`\n\n"
+        f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
+        f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
+        f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
+        f"💳 **Card**: **[Click Here for Card]({CARD_PAYMENT_LINK})**\n\n"
+        f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
+    )
+    await message.reply(
+        text,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Owner", url=f"https://t.me/{OWNER_USERNAME}")],
+            [InlineKeyboardButton("Support Chat", url=SUPPORT_CHAT_LINK)]
+        ])
+    )
