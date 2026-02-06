@@ -133,7 +133,12 @@ async def handle_login_steps(client, message: Message):
     try:
         if step == "PHONE":
             state["timestamp"] = time.time()
-            phone_number = message.text.strip()
+            phone_number = message.text.strip().replace(" ", "")
+
+            if not phone_number.startswith("+") or not phone_number[1:].isdigit():
+                await message.reply("❌ **Invalid Format.** Please send in international format (e.g., +1234567890).")
+                return
+                
             try:
                 state["client"] = Client(
                     f"session_{user_id}",
