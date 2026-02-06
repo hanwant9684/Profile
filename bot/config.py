@@ -56,6 +56,7 @@ def get_smart_upload_workers(file_size):
     return 2
 
 active_downloads = set()
+download_lock = asyncio.Lock()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 global_upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
