@@ -1,5 +1,5 @@
 import asyncio
-import uvloop
+# import uvloop for oserror 
 import logging
 import os
 import sys
@@ -7,7 +7,7 @@ import resource
 from dotenv import load_dotenv
 
 # Set event loop policy FIRST
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+# asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 load_dotenv()
 
@@ -94,6 +94,7 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        uvloop.run(main())
+        # uvloop.run(main()) changed to below line (added new line beloe)
+        asyncio.run(main())
     except KeyboardInterrupt:
         pass
