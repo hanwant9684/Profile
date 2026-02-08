@@ -11,10 +11,10 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 load_dotenv()
 
-# Optimization for 1.5GB RAM VPS
+# Optimization for 2.9GB RAM VPS
 try:
-    # Set soft memory limit to 1.3GB to leave room for system
-    resource.setrlimit(resource.RLIMIT_AS, (1300 * 1024 * 1024, -1))
+    # Set soft memory limit to 2.9GB to leave room for system
+    resource.setrlimit(resource.RLIMIT_AS, (2900 * 1024 * 1024, -1))
 except Exception:
     pass
 
