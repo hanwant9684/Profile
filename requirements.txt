@@ -9,3 +9,7 @@ psutil
 aiofiles
 pyyaml
 flask
+aiofiles
+aiohttp
+aiosqlite
+certifi
