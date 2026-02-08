@@ -229,8 +229,8 @@ async def batch_handler(client, message):
     start_link = parts[1]
     end_link = parts[2]
 
-    start_match = re.search(r"t\.me/([^/]+)/(\d+)", start_link) or re.search(r"t\.me/c/(\d+)/(\d+)", start_link)
-    end_match = re.search(r"t\.me/([^/]+)/(\d+)", end_link) or re.search(r"t\.me/c/(\d+)/(\d+)", end_link)
+    start_match = re.search(r"t\.me/c/(\d+)/(\d+)", start_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", start_link)
+    end_match = re.search(r"t\.me/c/(\d+)/(\d+)", end_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
 
     if not start_match or not end_match:
         await message.reply("❌ Invalid links provided.")
@@ -286,8 +286,8 @@ async def download_handler(client, message, link_override=None, processed_albums
     chat_id = None
     message_id = None
 
-    public_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
+    public_match = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", link)
     topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
     comment_match = re.search(r"t\.me/([^/]+)/(\d+)\?comment=(\d+)", link)
     private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
