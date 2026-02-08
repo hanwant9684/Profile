@@ -16,7 +16,7 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
     elif message.audio:
         file_size = message.audio.file_size
     elif message.photo:
-        file_size = message.photo.file_size if hasattr(message.photo, "file_size") else message.photo.sizes[-1].file_size
+        file_size = message.photo.file_size
 
     return await client.download_media(
         message,
@@ -28,44 +28,33 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
     """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""
     safe_caption = str(caption) if caption is not None else ""
-
-    file_path_lower = file_path.lower()
+    
     # Base arguments for all upload methods
     upload_kwargs = {
         "caption": safe_caption,
         "progress": progress_callback,
         "progress_args": progress_args,
+        "thumb": thumb
     }
+    # Merge additional kwargs (like duration, width, height)
+    upload_kwargs.update(kwargs)
 
     try:
         if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
-            upload_kwargs.update(kwargs)
-            upload_kwargs["thumb"] = thumb
-            if file_path_lower.endswith(".gif"):
-                return await client.send_animation(chat_id, file_path, **upload_kwargs)
             return await client.send_video(
                 chat_id,
                 file_path,
                 supports_streaming=True,
                 **upload_kwargs
             )
-        #Audio
-        elif file_path_lower.endswith((".mp3", ".m4a", ".ogg", ".wav")):
-            upload_kwargs["duration"] = kwargs.get("duration", 0)
-            if file_path_lower.endswith((".ogg", ".wav")): # Voice formats
-                return await client.send_voice(chat_id, file_path, **upload_kwargs)
-            #Normal Audio
-            upload_kwargs["thumb"] = thumb
-            return await client.send_audio(chat_id, file_path, **upload_kwargs)
-        #Images
-        elif file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        
+        if file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
             return await client.send_photo(
                 chat_id,
                 file_path,
                 **upload_kwargs
             )
-         #Documents   
-        upload_kwargs["thumb"] = thumb    
+            
         return await client.send_document(
             chat_id,
             file_path,
