@@ -1,14 +1,12 @@
 import os
 import logging
-import asyncio
 from pyrogram import Client
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait
 
 from bot.config import get_smart_download_workers
 
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
-    """Fast media downloader with FloodWait handling"""
+    """Fast media downloader using parallel chunk requests"""
     # Get file size to determine worker count
     file_size = 0
     if message.document:
@@ -18,25 +16,14 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
     elif message.audio:
         file_size = message.audio.file_size
     elif message.photo:
-        file_size = message.photo.sizes[-1].file_size
+        file_size = message.photo.file_size if hasattr(message.photo, "file_size") else message.photo.sizes[-1].file_size
 
-    retries = 5
-    for i in range(retries):
-        try:
-            return await client.download_media(
-                message,
-                file_name=file_name or "downloads/",
-                progress=progress_callback if progress_callback else None,
-                progress_args=progress_args
-            )
-        except FloodWait as e:
-            logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
-            await asyncio.sleep(e.value)
-        except Exception as e:
-            if i == retries - 1:
-                raise e
-            logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
-            await asyncio.sleep(2 * (i + 1))
+    return await client.download_media(
+        message,
+        file_name=file_name or "downloads/",
+        progress=progress_callback if progress_callback else None,
+        progress_args=progress_args
+    )
 
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
     """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""

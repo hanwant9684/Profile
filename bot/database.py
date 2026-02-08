@@ -20,9 +20,6 @@ async def init_db():
     
     try:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA synchronous=NORMAL")
-            
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id TEXT PRIMARY KEY,
