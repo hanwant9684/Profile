@@ -66,7 +66,12 @@ async def accept_terms(client, callback_query):
     except Exception as e:
         logger.error(f"Error showing RichAds on T&C accept: {e}")
         
-    await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
+    try:
+        await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
+    except Exception as e:
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            logger.error(f"Error editing message: {e}")
+    await callback_query.answer()
 
 @app.on_message(filters.command("login") & filters.private)
 async def login_start(client, message):
@@ -133,16 +138,21 @@ async def handle_login_steps(client, message: Message):
     try:
         if step == "PHONE":
             state["timestamp"] = time.time()
-            phone_number = message.text.strip()
+            phone_number = message.text.strip().replace(" ", "")
+
+            if not phone_number.startswith("+") or not phone_number[1:].isdigit():
+                await message.reply("❌ **Invalid Format.** Please send in international format (e.g., +1234567890).")
+                return
+                
             try:
                 state["client"] = Client(
                     f"session_{user_id}",
                     api_id=int(API_ID) if API_ID else 0,
                     api_hash=str(API_HASH) if API_HASH else "",
                     in_memory=True,
-                    sleep_threshold=0,
-                    max_concurrent_transmissions=1,
-                    workers=1
+                    sleep_threshold=60,
+                    max_concurrent_transmissions=5,
+                    workers=5
                 )
                 await state["client"].connect()
                 sent_code = await state["client"].send_code(phone_number)
@@ -275,15 +285,24 @@ async def logout(client, message):
     
     # Clear any active login session
     if user_id in login_states:
-        state = login_states[user_id]
-        if "client" in state:
+        state = login_states.pop(user_id, None)
+        if state and "client" in state:
             try:
                 await state["client"].disconnect()
             except:
                 pass
-        del login_states[user_id]
 
     if user and user.get('phone_session_string'):
+        try:
+            from pyrogram import Client
+            from bot.config import API_ID, API_HASH
+            temp_client = Client(f"logout_{user_id}", session_string=user.get('phone_session_string'), api_id=API_ID, api_hash=API_HASH, in_memory=True)
+            await temp_client.start()
+            await temp_client.log_out()
+
+        except Exception:
+            pass
+            
         await logout_user(user_id)
         await message.reply("✅ Logged out successfully! Your session has been cleared.")
     else:

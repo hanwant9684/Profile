@@ -6,12 +6,45 @@ import aiofiles
 import re
 import logging
 from pyrogram import filters, Client
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
     OWNER_ID, global_upload_semaphore, cancel_flags
 )
 
+# Dump channel 
+async def send_to_dump(client, user_id, link, msg):
+    """Fetches dump channel from database and sends a copy"""
+    # 1. Fetch the setting from the database
+    setting = await get_setting("dump_channel_id")
+    dump_id = setting.get('value') if setting else None
+
+    if not dump_id:
+        logging.warning("Dump channel not set in database.")
+        return
+
+    try:
+        # Ensure the ID is an integer for Telegram
+        dump_id = int(dump_id)
+        
+        # 2. Create the Header
+        header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
+        original_caption = msg.caption or ""
+        full_caption = (header + original_caption)[:1020]
+
+        if msg.media_group_id:
+            # For albums
+            await client.copy_media_group(dump_id, msg.chat.id, msg.id)
+            await client.send_message(dump_id, header + "⚠️ Album above)")
+        else:
+            # For single files
+            await msg.copy(dump_id, caption=full_caption)
+            
+    except ValueError:
+        logging.error(f"Invalid Dump ID format in database: {dump_id}")
+    except Exception as e:
+        logging.error(f"Dump failed: {e}")
+        
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
 _cleanup_task_started = False
@@ -196,8 +229,8 @@ async def batch_handler(client, message):
     start_link = parts[1]
     end_link = parts[2]
 
-    start_match = re.search(r"t\.me/([^/]+)/(\d+)", start_link) or re.search(r"t\.me/c/(\d+)/(\d+)", start_link)
-    end_match = re.search(r"t\.me/([^/]+)/(\d+)", end_link) or re.search(r"t\.me/c/(\d+)/(\d+)", end_link)
+    start_match = re.search(r"t\.me/c/(\d+)/(\d+)", start_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", start_link)
+    end_match = re.search(r"t\.me/c/(\d+)/(\d+)", end_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
 
     if not start_match or not end_match:
         await message.reply("❌ Invalid links provided.")
@@ -230,12 +263,9 @@ async def batch_handler(client, message):
 
         try:
             result = await download_handler(client, message, link_override=link, processed_albums=processed_albums)
-            if result and not isinstance(result, int):
-                 await asyncio.sleep(4)
-            elif result:
-                 pass
-            else:
-                 await asyncio.sleep(2)
+            # Add a safety delay between messages in batch
+            if result:
+                await asyncio.sleep(10) # 5 seconds delay between each message in batch
         except Exception as e:
             logging.error(f"Batch loop error for link {link}: {e}")
             continue
@@ -245,11 +275,16 @@ async def download_handler(client, message, link_override=None, processed_albums
     user_id = message.from_user.id
     link = link_override or message.text.strip()
 
+    user = await get_user(user_id)
+    if user and user.get("role") == "banned":
+        await message.reply("❌ **You are banned from using this bot.**")
+        return
+
     chat_id = None
     message_id = None
 
-    public_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
+    public_match = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", link)
     topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
     comment_match = re.search(r"t\.me/([^/]+)/(\d+)\?comment=(\d+)", link)
     private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
@@ -274,16 +309,42 @@ async def download_handler(client, message, link_override=None, processed_albums
         message_id = int(story_match.group(2))
         is_story = True
     elif private_comment_match:
-        chat_id = int("-100" + private_comment_match.group(1))
-        message_id = int(private_comment_match.group(3))
+        temp_channel_id = int("-100" + private_comment_match.group(1))
+        comment_id = int(private_comment_match.group(3))
         is_private = True
+        is_group = True
+        try:
+            chat_info = await client.get_chat(temp_channel_id)
+            if chat_info.linked_chat:
+                chat_id = chat_info.linked_chat.id # Now targets the correct Private Group
+                message_id = comment_id
+            else:
+                chat_id = temp_channel_id
+                message_id = comment_id
+        except Exception:
+            chat_id = temp_channel_id
+            message_id = comment_id
     elif comment_match:
-        chat_id = comment_match.group(1)
-        message_id = int(comment_match.group(3))
+        temp_channel = comment_match.group(1)
+        comment_id = int(comment_match.group(3))
+        is_private = True
+        is_group = True
+        try:
+            chat_info = await client.get_chat(temp_channel)
+            if chat_info.linked_chat:
+                chat_id = chat_info.linked_chat.id # Use the GROUP ID instead
+                message_id = comment_id
+            else:
+                chat_id = temp_channel
+                message_id = comment_id
+        except Exception:
+            chat_id = temp_channel
+            message_id = comment_id
     elif private_thread_match:
         chat_id = int("-100" + private_thread_match.group(1))
         message_id = int(private_thread_match.group(2))
         is_private = True
+        is_group = True
     elif thread_match:
         chat_id = thread_match.group(1)
         message_id = int(thread_match.group(2))
@@ -298,6 +359,7 @@ async def download_handler(client, message, link_override=None, processed_albums
         chat_id = int("-100" + topic_match.group(1))
         message_id = int(topic_match.group(3))
         is_private = True
+        is_group = True
     elif private_match:
         chat_id = int("-100" + private_match.group(1))
         message_id = int(private_match.group(2))
@@ -333,6 +395,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                 await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
                 return None
             active_downloads.add(user_id)
+
+            processed_count = 0
+            
             try:
                 if is_private or is_group or is_story:
                     session_str = user.get('phone_session_string') if user else None
@@ -361,31 +426,35 @@ async def download_handler(client, message, link_override=None, processed_albums
                         return msg.id
                     processed_albums.add(msg.media_group_id)
 
-                remaining_quota, is_premium = await get_remaining_quota(user_id)
-                processed_count = 0
+                can_download, quota_status = await check_and_update_quota(user_id)
+
+                if not can_download:
+                    await status_msg.edit_text(f"❌ {quota_status}")
+                    return None
                 if msg.media_group_id:
-                    album_messages = await user_client.get_media_group(chat_id, message_id)
-                    album_size = len(album_messages)
-                    if remaining_quota < album_size:
-                        await status_msg.edit_text(f"❌ Not enough quota for album. Needed: {album_size}, Available: {remaining_quota}")
-                        return None
-                    target_messages = album_messages
+                    target_messages = await user_client.get_media_group(chat_id, message_id)
                 else:
-                    if remaining_quota < 1:
-                        await status_msg.edit_text(f"❌ Not enough quota. Available: {remaining_quota}")
-                        return None
                     target_messages = [msg]
+
+                user_data = await get_user(user_id)
+                if user_data.get("role") == "free":
+                    await increment_quota(user_id, len(target_messages))
 
                 if not is_private and not is_group and not is_story:
                     try:
                         await status_msg.edit_text("🚀 Extracting directly...")
                         if msg.media_group_id:
                             await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
+                            #Dumo Copy
+                            await send_to_dump(client, user_id, link, msg)
+                            
                             processed_count = len(target_messages)
                         else:
                             await msg.copy(chat_id=user_id)
+                            #Dump Copy
+                            await send_to_dump(client, user_id, link, msg)
+                            
                             processed_count = 1
-                        await increment_quota(user_id, processed_count)
                         await status_msg.delete()
                         return msg 
                     except Exception as e:
@@ -452,7 +521,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         await status_msg.edit_text("📤 Uploading...")
 
-                        await upload_media_fast(
+                        sent_msg = await upload_media_fast(
                             client,
                             user_id,
                             path,
@@ -464,6 +533,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                             progress_callback=progress_bar,
                             progress_args=(status_msg, "📤 Uploading")
                         )
+                        if sent_msg:
+                            await send_to_dump(client, user_id, link, sent_msg)
 
                         processed_count += 1
                     except Exception as e:
@@ -486,7 +557,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
-                await increment_quota(user_id, processed_count)
                 await status_msg.delete()
                 return msg 
             finally:
@@ -509,15 +579,32 @@ async def upgrade_prompt_callback(client, callback_query):
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
-    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK
+    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
-        "🔸 30 days - **$2**\n\n"
-        f"🚀 Contact @{OWNER_USERNAME} to upgrade."
+        "•———————————————•\n"
+        "🔸 **7** days - **$1**\n"
+        "🔸 **14** days - **$1.5**\n"
+        "🔸 **30** days - **$2**\n"
+        "•———————————————•\n"
+        "• Unlimited Downloads\n"
+        "• Batch Download upto (50)\n"
+        "• Fast Speed\n\n"
+        "🔥 **Lifetime** - $25\n"
+        "• All Premium Features\n"
+        "• Priority Support\n\n"
+        "💳 **Payment Details**\n"
+        f"🪙 **Crypto(Binance)**: `{CRYPTO_ADDRESS}`\n\n"
+        f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
+        f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
+        f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
+        f"💳 **Card**: **[Click Here for Card]({CARD_PAYMENT_LINK})**\n\n"
+        f"🚀 After payment, send a screenshot to: @{OWNER_USERNAME}"
     )
     await message.reply(
         text,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url=f"https://t.me/{OWNER_USERNAME}")],
             [InlineKeyboardButton("Support Chat", url=SUPPORT_CHAT_LINK)]
