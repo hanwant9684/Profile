@@ -1,5 +1,5 @@
 import asyncio
-import uvloop 
+import uvloop
 import logging
 import os
 import sys
@@ -11,28 +11,16 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 load_dotenv()
 
-# Optimization for 2.9GB RAM VPS
+# Optimization for 1.5GB RAM VPS
 try:
-    # Set soft memory limit to 2.9GB to leave room for system
-    resource.setrlimit(resource.RLIMIT_AS, (2900 * 1024 * 1024, -1))
+    # Set soft memory limit to 1.3GB to leave room for system
+    resource.setrlimit(resource.RLIMIT_AS, (1300 * 1024 * 1024, -1))
 except Exception:
     pass
 
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 async def main():
-    if os.path.exists("downloads"):
-        import shutil
-        for filename in os.listdir("downloads"):
-            file_path = os.path.join("downloads", filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception:
-                pass
-
     # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
     from bot.database import init_db
@@ -106,7 +94,6 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        uvloop.run(main()) #changed to below line (added new line beloe)
-        #asyncio.run(main())
+        uvloop.run(main())
     except KeyboardInterrupt:
         pass
