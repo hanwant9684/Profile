@@ -35,8 +35,8 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
 DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-MAX_CONCURRENT_DOWNLOADS = 5
-MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 5))
+MAX_CONCURRENT_DOWNLOADS = 10
+MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 10))
 
 def get_smart_chunk_size(file_size):
     if file_size < 10 * 1024 * 1024:      # < 10MB
@@ -50,10 +50,10 @@ def get_smart_download_workers(file_size):
     if file_size < 100 * 1024 * 1024:
         return 1
     else:
-        return 2
+        return 4
 
 def get_smart_upload_workers(file_size):
-    return 2
+    return 4
 
 active_downloads = set()
 cancel_flags = set()
@@ -84,7 +84,7 @@ if missing_vars:
 # RichAds Configuration
 RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "989337")
 RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "381546")
-AD_DAILY_LIMIT = int(os.environ.get("AD_DAILY_LIMIT", 5))
+AD_DAILY_LIMIT = int(os.environ.get("AD_DAILY_LIMIT", 500))
 AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "False").lower() == "true"
 
 # Update client with higher max_concurrent_transmissions
@@ -94,7 +94,7 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
-    sleep_threshold=60,
-    max_concurrent_transmissions=20,
-    workers=20
+    sleep_threshold=120,
+    max_concurrent_transmissions=50,
+    workers=50
 )
