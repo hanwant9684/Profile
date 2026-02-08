@@ -263,12 +263,9 @@ async def batch_handler(client, message):
 
         try:
             result = await download_handler(client, message, link_override=link, processed_albums=processed_albums)
-            if result and not isinstance(result, int):
-                 await asyncio.sleep(4)
-            elif result:
-                 pass
-            else:
-                 await asyncio.sleep(2)
+            # Add a safety delay between messages in batch
+            if result:
+                await asyncio.sleep(10) # 5 seconds delay between each message in batch
         except Exception as e:
             logging.error(f"Batch loop error for link {link}: {e}")
             continue

@@ -66,7 +66,12 @@ async def accept_terms(client, callback_query):
     except Exception as e:
         logger.error(f"Error showing RichAds on T&C accept: {e}")
         
-    await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
+    try:
+        await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
+    except Exception as e:
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            logger.error(f"Error editing message: {e}")
+    await callback_query.answer()
 
 @app.on_message(filters.command("login") & filters.private)
 async def login_start(client, message):
