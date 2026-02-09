@@ -66,8 +66,7 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=60,
         takeout=True,
-        no_updates=True,
-        storage=pyrogram.storage.SQLiteStorage(f"user_{user_id}", check_same_thread=False) if not getattr(Client, "in_memory", False) else None
+        no_updates=True
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
