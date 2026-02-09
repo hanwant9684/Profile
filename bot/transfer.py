@@ -3,7 +3,7 @@ import logging
 import asyncio
 from pyrogram import Client
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, FloodPremiumWait
 
 from bot.config import get_smart_download_workers
 
@@ -29,7 +29,7 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
                 progress=progress_callback if progress_callback else None,
                 progress_args=progress_args
             )
-        except FloodWait as e:
+        except (FloodWait, FloodPremiumWait) as e:
             logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
             await asyncio.sleep(e.value)
         except Exception as e:
@@ -49,6 +49,10 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         "progress": progress_callback,
         "progress_args": progress_args,
     }
+
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logging.error(f"Upload failed: File {file_path} is empty or does not exist.")
+        return None
 
     try:
         if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):

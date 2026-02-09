@@ -5,8 +5,10 @@ import io
 import aiofiles
 import re
 import logging
+import pyrogram
 from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
+from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
     OWNER_ID, global_upload_semaphore, cancel_flags
@@ -61,7 +63,11 @@ async def get_user_client(user_id, session_str):
         session_string=session_str,
         api_id=API_ID,
         api_hash=API_HASH,
-        in_memory=True
+        in_memory=True,
+        sleep_threshold=60,
+        takeout=True,
+        no_updates=True,
+        storage=pyrogram.storage.SQLiteStorage(f"user_{user_id}", check_same_thread=False) if not getattr(Client, "in_memory", False) else None
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -260,12 +266,16 @@ async def batch_handler(client, message):
             link = f"https://t.me/c/{start_match.group(1)}/{msg_id}"
         else:
             link = f"https://t.me/{start_match.group(1)}/{msg_id}"
+        
+        # Random delay between messages in batch to further reduce FloodWait risk
+        import random
+        await asyncio.sleep(random.uniform(2, 5))
 
         try:
             result = await download_handler(client, message, link_override=link, processed_albums=processed_albums)
-            # Add a safety delay between messages in batch
+            # Add a safety delay between messages in batch to avoid FloodWait
             if result:
-                await asyncio.sleep(10) # 5 seconds delay between each message in batch
+                await asyncio.sleep(3) 
         except Exception as e:
             logging.error(f"Batch loop error for link {link}: {e}")
             continue
@@ -412,6 +422,15 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                 try:
                     msg = await user_client.get_messages(chat_id, message_id)
+                except AuthKeyUnregistered:
+                    from bot.database import update_user
+                    await update_user(user_id, {"phone_session_string": None})
+                    await status_msg.edit_text("❌ Your session has expired. Please /login again.")
+                    return None
+                except (FloodWait, FloodPremiumWait) as e:
+                    logging.warning(f"FloodWait on get_messages: {e.value}s")
+                    await asyncio.sleep(e.value)
+                    msg = await user_client.get_messages(chat_id, message_id)
                 except Exception as e:
                     await status_msg.edit_text(f"❌ Error fetching message: {str(e)}")
                     return None
@@ -499,6 +518,16 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 height = current_msg.document.height or 0
 
                         try:
+                            path = await download_media_fast(
+                                user_client,
+                                current_msg,
+                                None,
+                                progress_callback=progress_bar,
+                                progress_args=(status_msg, "📥 Downloading")
+                            )
+                        except (FloodWait, FloodPremiumWait) as e:
+                            logging.warning(f"FloodWait on download: {e.value}s")
+                            await asyncio.sleep(e.value)
                             path = await download_media_fast(
                                 user_client,
                                 current_msg,
