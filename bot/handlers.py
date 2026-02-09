@@ -294,6 +294,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
     public_match = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", link)
+    public_topic_match = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)/(\d+)", link)
     topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
     comment_match = re.search(r"t\.me/([^/]+)/(\d+)\?comment=(\d+)", link)
     private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
@@ -370,6 +371,10 @@ async def download_handler(client, message, link_override=None, processed_albums
         chat_id = int("-100" + topic_match.group(1))
         message_id = int(topic_match.group(3))
         is_private = True
+        is_group = True
+    elif public_topic_match:
+        chat_id = public_topic_match.group(1)
+        message_id = int(public_topic_match.group(3))
         is_group = True
     elif private_match:
         chat_id = int("-100" + private_match.group(1))
