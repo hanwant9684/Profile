@@ -95,7 +95,7 @@ app = Client(
     bot_token=BOT_TOKEN,
     in_memory=True,
     sleep_threshold=60,
-    no_updates=True,
+    no_updates=False,
     max_concurrent_transmissions=50,
     workers=50
 )
