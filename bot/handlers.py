@@ -317,6 +317,8 @@ async def download_handler(client, message, link_override=None, processed_albums
         chat_id = story_match.group(1)
         message_id = int(story_match.group(2))
         is_story = True
+        is_private = True
+        is_group = True
     elif private_comment_match:
         temp_channel_id = int("-100" + private_comment_match.group(1))
         comment_id = int(private_comment_match.group(3))
