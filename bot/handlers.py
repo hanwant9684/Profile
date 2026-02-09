@@ -422,7 +422,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                     return None 
 
                 try:
-                    msg = await user_client.get_messages(chat_id, message_id)
+                    if is_story:
+                        msg = await user_client.get_stories(chat_id, message_id)
+                    else:
+                        msg = await user_client.get_messages(chat_id, message_id)
                 except AuthKeyUnregistered:
                     from bot.database import update_user
                     await update_user(user_id, {"phone_session_string": None})
@@ -436,22 +439,23 @@ async def download_handler(client, message, link_override=None, processed_albums
                     await status_msg.edit_text(f"❌ Error fetching message: {str(e)}")
                     return None
 
-                if not msg or not msg.media:
-                    await status_msg.edit_text("❌ No media found in link.")
+                if not msg or (not getattr(msg, "media", None) and not getattr(msg, "text", None) and type(msg).__name__ != "Story"):
+                    await status_msg.edit_text("❌ No content found in link.")
                     return None
 
-                if processed_albums is not None and msg.media_group_id:
-                    if msg.media_group_id in processed_albums:
+                media_group_id = getattr(msg, "media_group_id", None)
+                if processed_albums is not None and media_group_id:
+                    if media_group_id in processed_albums:
                         await status_msg.delete()
                         return msg.id
-                    processed_albums.add(msg.media_group_id)
+                    processed_albums.add(media_group_id)
 
                 can_download, quota_status = await check_and_update_quota(user_id)
 
                 if not can_download:
                     await status_msg.edit_text(f"❌ {quota_status}")
                     return None
-                if msg.media_group_id:
+                if not is_story and getattr(msg, "media_group_id", None):
                     target_messages = await user_client.get_media_group(chat_id, message_id)
                 else:
                     target_messages = [msg]
@@ -463,7 +467,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                 if not is_private and not is_group and not is_story:
                     try:
                         await status_msg.edit_text("🚀 Extracting directly...")
-                        if msg.media_group_id:
+                        media_group_id = getattr(msg, "media_group_id", None)
+                        if media_group_id:
                             await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
                             #Dumo Copy
                             await send_to_dump(client, user_id, link, msg)
@@ -487,16 +492,26 @@ async def download_handler(client, message, link_override=None, processed_albums
                     safe_caption = ""
                     if current_msg.caption:
                         safe_caption = current_msg.caption
-                    elif current_msg.text:
+                    elif hasattr(current_msg, "text") and current_msg.text:
                         safe_caption = current_msg.text
 
+                    if not getattr(current_msg, "media", None) and type(current_msg).__name__ != "Story":
+                        try:
+                            await client.send_message(user_id, safe_caption)
+                            await send_to_dump(client, user_id, link, current_msg)
+                            processed_count += 1
+                            continue
+                        except Exception as e:
+                            logging.error(f"Error sending text-only message: {e}")
+                            continue
+
                     try:
-                        if hasattr(current_msg, "video") and current_msg.video and current_msg.video.thumbs:
+                        if hasattr(current_msg, "video") and current_msg.video and getattr(current_msg.video, "thumbs", None):
                             try:
                                 thumb_path = await user_client.download_media(current_msg.video.thumbs[-1])
                             except Exception as e:
                                 logging.debug(f"Thumb download error: {e}")
-                        elif hasattr(current_msg, "document") and current_msg.document and current_msg.document.thumbs:
+                        elif hasattr(current_msg, "document") and current_msg.document and getattr(current_msg.document, "thumbs", None):
                             try:
                                 thumb_path = await user_client.download_media(current_msg.document.thumbs[-1])
                             except Exception as e:
@@ -506,17 +521,14 @@ async def download_handler(client, message, link_override=None, processed_albums
                         width = 0
                         height = 0
 
-                        if current_msg.video:
-                            duration = current_msg.video.duration or 0
-                            width = current_msg.video.width or 0
-                            height = current_msg.video.height or 0
-                        elif current_msg.document and current_msg.document.mime_type and current_msg.document.mime_type.startswith("video/"):
-                            if hasattr(current_msg.document, "duration"):
-                                duration = current_msg.document.duration or 0
-                            if hasattr(current_msg.document, "width"):
-                                width = current_msg.document.width or 0
-                            if hasattr(current_msg.document, "height"):
-                                height = current_msg.document.height or 0
+                        if hasattr(current_msg, "video") and current_msg.video:
+                            duration = getattr(current_msg.video, "duration", 0) or 0
+                            width = getattr(current_msg.video, "width", 0) or 0
+                            height = getattr(current_msg.video, "height", 0) or 0
+                        elif hasattr(current_msg, "document") and current_msg.document and current_msg.document.mime_type and current_msg.document.mime_type.startswith("video/"):
+                            duration = getattr(current_msg.document, "duration", 0) or 0
+                            width = getattr(current_msg.document, "width", 0) or 0
+                            height = getattr(current_msg.document, "height", 0) or 0
 
                         try:
                             path = await download_media_fast(

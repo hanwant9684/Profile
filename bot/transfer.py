@@ -11,14 +11,19 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
     """Fast media downloader with FloodWait handling"""
     # Get file size to determine worker count
     file_size = 0
-    if message.document:
+    if getattr(message, "document", None):
         file_size = message.document.file_size
-    elif message.video:
+    elif getattr(message, "video", None):
         file_size = message.video.file_size
-    elif message.audio:
+    elif getattr(message, "audio", None):
         file_size = message.audio.file_size
-    elif message.photo:
+    elif getattr(message, "photo", None):
         file_size = message.photo.sizes[-1].file_size
+    elif type(message).__name__ == "Story":
+        if getattr(message, "video", None):
+            file_size = message.video.file_size
+        elif getattr(message, "photo", None):
+            file_size = message.photo.sizes[-1].file_size
 
     retries = 5
     for i in range(retries):
