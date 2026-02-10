@@ -647,7 +647,7 @@ async def upgrade(client, message):
         f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
         f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
         f"💳 **Card**: **[Click Here for Card]({CARD_PAYMENT_LINK})**\n\n"
-        f"> **🚀 After payment, send a screenshot to: @Wolfy0046**"
+        f"> **🚀 After payment, send a screenshot to: ♥️ @Wolfy0046**"
     )
     await message.reply(
         text,
