@@ -31,7 +31,6 @@ async def init_db():
                     last_download_date TEXT,
                     is_agreed_terms INTEGER DEFAULT 0,
                     phone_session_string TEXT,
-                    download_channel_id TEXT,
                     premium_expiry_date TEXT,
                     is_banned INTEGER DEFAULT 0,
                     ads_today INTEGER DEFAULT 0,
@@ -155,16 +154,6 @@ async def logout_user(user_id):
         logger.info(f"User {user_id} logged out")
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
-
-async def update_user_channel(user_id, channel_id):
-    try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET download_channel_id = ?, updated_at = ? WHERE telegram_id = ?',
-                           (str(channel_id), datetime.utcnow().isoformat(), str(user_id)))
-            await db.commit()
-        logger.info(f"Updated download channel for user {user_id}: {channel_id}")
-    except Exception as e:
-        logger.error(f"Error updating user channel for {user_id}: {e}")
 
 async def set_user_role(user_id, role, duration_days=None):
     try:
