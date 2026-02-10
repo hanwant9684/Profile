@@ -653,7 +653,7 @@ async def upgrade(client, message):
         text,
         link_preview_options=LinkPreviewOptions(is_disabled=True),
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url=f"https://t.me/{OWNER_USERNAME}")],
+            [InlineKeyboardButton("Owner", url=f"https://t.me/Wolfy0046")],
             [InlineKeyboardButton("Support Chat", url=SUPPORT_CHAT_LINK)]
         ])
     )
