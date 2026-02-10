@@ -579,13 +579,23 @@ async def download_handler(client, message, link_override=None, processed_albums
                             
                             if not channel_id:
                                 try:
-                                    # generic name to avoid spam filters
-                                    new_chat = await user_client.create_channel("Cloud Storage", "My private cloud storage for downloads.")
+                                    # 1. Create the channel
+                                    new_chat = await user_client.create_channel("Cloud Storage", "My private cloud storage.")
                                     channel_id = new_chat.id
+                                    
+                                    # 2. FORCE RESOLVE (Fixes PEER_ID_INVALID)
+                                    # This forces the user session to recognize the new ID before uploading
+                                    await user_client.get_chat(channel_id) 
+                                    
+                                    # 3. ADD THE BOT AS MEMBER
+                                    # This allows the bot to 'see' the file and copy it to the dump later
+                                    bot_me = await app.get_me()
+                                    await user_client.add_chat_members(channel_id, bot_me.id)
+                                    
                                     await update_user_channel(user_id, channel_id)
-                                    logging.info(f"Created private channel {channel_id} for user {user_id}")
+                                    logging.info(f"Created channel {channel_id} and added bot as member.")
                                 except Exception as e:
-                                    logging.error(f"Failed to create private channel for user {user_id}: {e}")
+                                    logging.error(f"Failed to setup private channel for user {user_id}: {e}")
                                     # Fallback 1: Try Saved Messages
                                     try:
                                         upload_client = user_client
@@ -614,16 +624,22 @@ async def download_handler(client, message, link_override=None, processed_albums
                             progress_args=(status_msg, "📤 Uploading")
                         )
 
-                        if sent_msg and using_user_session:
-                            try:
-                                await client.send_message(user_id, f"✅ **File uploaded to your private channel!**\n\nChannel ID: `{destination_id}`")
-                            except Exception:
-                                pass
-
                         if sent_msg:
-                            await send_to_dump(client, user_id, link, sent_msg)
+                            # Notify the user
+                            if using_user_session:
+                                try:
+                                    await client.send_message(user_id, f"✅ **File uploaded to your private channel!**")
+                                except Exception: 
+                                    pass
 
-                        processed_count += 1
+                            # EFFICIENT DUMP COPY
+                            # This works because the bot is now a member of the 'sent_msg' channel
+                            try:
+                                await send_to_dump(client, user_id, link, sent_msg)
+                            except Exception as e:
+                                logging.error(f"Dump copy failed: {e}")
+
+                            processed_count += 1
                     except Exception as e:
                         if str(e) == "StopProcess":
                             cancel_flags.discard(user_id)
