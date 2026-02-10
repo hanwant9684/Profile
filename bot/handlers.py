@@ -7,6 +7,7 @@ import re
 import logging
 import pyrogram
 from pyrogram import filters, Client
+from pyrogram.client import Client as ClientObject
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
 from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait
 from bot.config import (
@@ -92,7 +93,7 @@ async def cleanup_user_clients():
             except Exception:
                 pass
 
-from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota
+from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
 from bot.ads import show_ad
 from bot.transfer import download_media_fast, upload_media_fast
 
@@ -568,9 +569,41 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         await status_msg.edit_text("📤 Uploading...")
 
+                        upload_client = client
+                        destination_id = user_id
+                        using_user_session = False
+
+                        if user_client and user_client != client:
+                            user_data = await get_user(user_id)
+                            channel_id = user_data.get("download_channel_id")
+                            
+                            if not channel_id:
+                                try:
+                                    # generic name to avoid spam filters
+                                    new_chat = await user_client.create_channel("Cloud Storage", "My private cloud storage for downloads.")
+                                    channel_id = new_chat.id
+                                    await update_user_channel(user_id, channel_id)
+                                    logging.info(f"Created private channel {channel_id} for user {user_id}")
+                                except Exception as e:
+                                    logging.error(f"Failed to create private channel for user {user_id}: {e}")
+                                    # Fallback 1: Try Saved Messages
+                                    try:
+                                        upload_client = user_client
+                                        destination_id = "me"
+                                        using_user_session = True
+                                        logging.info(f"Falling back to Saved Messages for user {user_id}")
+                                    except Exception:
+                                        await client.send_message(user_id, "⚠️ I couldn't create a private channel for you, so I'm sending the file here instead.")
+                                        channel_id = None
+
+                            if channel_id:
+                                upload_client = user_client
+                                destination_id = channel_id
+                                using_user_session = True
+
                         sent_msg = await upload_media_fast(
-                            client,
-                            user_id,
+                            upload_client,
+                            destination_id,
                             path,
                             caption=safe_caption,
                             thumb=thumb_path,
@@ -580,6 +613,13 @@ async def download_handler(client, message, link_override=None, processed_albums
                             progress_callback=progress_bar,
                             progress_args=(status_msg, "📤 Uploading")
                         )
+
+                        if sent_msg and using_user_session:
+                            try:
+                                await client.send_message(user_id, f"✅ **File uploaded to your private channel!**\n\nChannel ID: `{destination_id}`")
+                            except Exception:
+                                pass
+
                         if sent_msg:
                             await send_to_dump(client, user_id, link, sent_msg)
 
@@ -638,16 +678,16 @@ async def upgrade(client, message):
         "• Unlimited Downloads\n"
         "• Batch Download upto (50)\n"
         "• Fast Speed\n\n"
-        "🔥 **Lifetime** - $25\n"
-        "• All Premium Features\n"
-        "• Priority Support\n\n"
+        "> 🔥 **Lifetime** - $25\n"
+        "> • All Premium Features\n"
+        "> • Priority Support\n\n"
         "💳 **Payment Details**\n"
         f"🪙 **Crypto(Binance)**: `{CRYPTO_ADDRESS}`\n\n"
         f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
         f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
         f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
         f"💳 **Card**: **[Click Here for Card]({CARD_PAYMENT_LINK})**\n\n"
-        f"> **🚀 After payment, send a screenshot to: ♥️ @Wolfy0046**"
+        f"> **🚀 After payment, send a screenshot to: ♦️ @Wolfy0046**"
     )
     await message.reply(
         text,
