@@ -10,13 +10,3 @@ aiofiles
 pyyaml
 flask
 aiofiles
-aiohttp
-aiosqlite
-certifi
-flask
-psutil
-pyrotgfork
-python-dotenv
-pyyaml
-tgcrypto
-uvloop
