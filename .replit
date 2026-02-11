@@ -1,7 +1,7 @@
 modules = ["python-3.12"]
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "libuv", "libyaml", "unzip", "sqlite"]
+packages = ["cacert", "libuv", "libyaml", "sqlite", "unzip"]
 
 [agent]
 expertMode = true

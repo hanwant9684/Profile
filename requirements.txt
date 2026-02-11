@@ -9,4 +9,3 @@ psutil
 aiofiles
 pyyaml
 flask
-aiofiles
