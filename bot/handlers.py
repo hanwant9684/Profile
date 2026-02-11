@@ -28,8 +28,31 @@ async def send_to_dump(client, user_id, link, msg):
 
     try:
         # Ensure the ID is an integer for Telegram
-        dump_id = int(dump_id)
+        try:
+            dump_id = int(dump_id)
+        except ValueError:
+            logging.error(f"Invalid dump_id format in database: {dump_id}")
+            return
         
+        # Verify bot access to dump channel
+        # Use user_client to verify if bot can't, as it might be a peer caching issue
+        try:
+            await client.get_chat(dump_id)
+        except Exception as e:
+            logging.warning(f"Bot cannot access dump channel {dump_id} directly: {e}. Trying to resolve peer via user_client.")
+            try:
+                # This helps the bot session 'learn' about the channel if the user session knows it
+                user_data = await get_user(user_id)
+                u_client = None
+                # We need a user client to resolve peers, if available
+                # In this context, we might not have it unless passed or available globally
+                # For now, let's try to resolve it by ID directly if it's a -100 ID
+                # Pyrotgfork usually handles -100 IDs better if they are valid
+                await client.get_chat(dump_id)
+            except Exception:
+                logging.error(f"Bot truly cannot access dump channel {dump_id}")
+                return
+
         # 2. Create the Header
         header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
         original_caption = msg.caption or ""
@@ -58,7 +81,7 @@ async def send_to_dump(client, user_id, link, msg):
                 # Fallback: try with user_client
                 user_client = user_clients.get(user_id, {}).get("client")
                 if user_client:
-                    await user_client.copy(dump_id, caption=full_caption)
+                    await msg.copy(dump_id, caption=full_caption)
                 else:
                     raise
             
@@ -115,6 +138,12 @@ async def cleanup_user_clients():
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
 from bot.ads import show_ad
 from bot.transfer import download_media_fast, upload_media_fast
+
+async def update_status(msg, text):
+    try:
+        await msg.edit_text(text)
+    except Exception as e:
+        logging.debug(f"Status update failed: {e}")
 
 async def progress_bar(current, total, message, type_msg):
     if not hasattr(progress_bar, "data"):
@@ -195,16 +224,10 @@ async def progress_bar(current, total, message, type_msg):
 
     if current == total:
         progress_bar.data.pop(msg_id, None)
-        try:
-            await message.edit_text(f"**{type_msg} Completed!**\n📦 **Total Size:** `{format_size(total)}`")
-        except Exception:
-            pass
+        await update_status(message, f"**{type_msg} Completed!**\n📦 **Total Size:** `{format_size(total)}`")
     else:
         data["last_edit"] = now
-        try:
-            await message.edit_text(text)
-        except Exception:
-            pass
+        await update_status(message, text)
 
 async def verify_force_sub(client, user_id):
     setting = await get_setting("force_sub_channel")
@@ -420,7 +443,7 @@ async def download_handler(client, message, link_override=None, processed_albums
     user = await get_user(user_id)
 
     if (is_private or is_group) and (not user or not user.get('phone_session_string')):
-        await status_msg.edit_text("❌ Login is required for private links. Use /login.")
+        await update_status(status_msg, "❌ Login is required for private links. Use /login.")
         return
 
     user_client = None
@@ -428,7 +451,7 @@ async def download_handler(client, message, link_override=None, processed_albums
     try:
         async with global_download_semaphore:
             if user_id in active_downloads:
-                await status_msg.edit_text("⚠️ You already have an active download. Please wait.")
+                await update_status(status_msg, "⚠️ You already have an active download. Please wait.")
                 return None
             active_downloads.add(user_id)
 
@@ -443,7 +466,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                     user_client = client
 
                 if not user_client:
-                    await status_msg.edit_text("❌ Session error. Please /login again.")
+                    await update_status(status_msg, "❌ Session error. Please /login again.")
                     return None 
 
                 try:
@@ -454,18 +477,18 @@ async def download_handler(client, message, link_override=None, processed_albums
                 except AuthKeyUnregistered:
                     from bot.database import update_user
                     await update_user(user_id, {"phone_session_string": None})
-                    await status_msg.edit_text("❌ Your session has expired. Please /login again.")
+                    await update_status(status_msg, "❌ Your session has expired. Please /login again.")
                     return None
                 except (FloodWait, FloodPremiumWait) as e:
                     logging.warning(f"FloodWait on get_messages: {e.value}s")
                     await asyncio.sleep(e.value)
                     msg = await user_client.get_messages(chat_id, message_id)
                 except Exception as e:
-                    await status_msg.edit_text(f"❌ Error fetching message: {str(e)}")
+                    await update_status(status_msg, f"❌ Error fetching message: {str(e)}")
                     return None
 
                 if not msg or (not getattr(msg, "media", None) and not getattr(msg, "text", None) and type(msg).__name__ != "Story"):
-                    await status_msg.edit_text("❌ No content found in link.")
+                    await update_status(status_msg, "❌ No content found in link.")
                     return None
 
                 media_group_id = getattr(msg, "media_group_id", None)
@@ -478,7 +501,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                 can_download, quota_status = await check_and_update_quota(user_id)
 
                 if not can_download:
-                    await status_msg.edit_text(f"❌ {quota_status}")
+                    await update_status(status_msg, f"❌ {quota_status}")
                     return None
                 if not is_story and getattr(msg, "media_group_id", None):
                     target_messages = await user_client.get_media_group(chat_id, message_id)
@@ -491,7 +514,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                 if not is_private and not is_group and not is_story:
                     try:
-                        await status_msg.edit_text("🚀 Extracting directly...")
+                        await update_status(status_msg, "🚀 Extracting directly...")
                         media_group_id = getattr(msg, "media_group_id", None)
                         if media_group_id:
                             await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
@@ -586,7 +609,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if user_id in cancel_flags:
                             raise Exception("StopProcess")
 
-                        await status_msg.edit_text("📤 Uploading...")
+                        await update_status(status_msg, "📤 Uploading...")
 
                         upload_client = client
                         destination_id = user_id
@@ -599,11 +622,32 @@ async def download_handler(client, message, link_override=None, processed_albums
                             # Check if channel is still accessible and bot is still in it
                             if channel_id:
                                 try:
+                                    # Ensure ID is correct format (int)
+                                    if isinstance(channel_id, str) and (channel_id.startswith("-100") or channel_id.isdigit() or channel_id.startswith("-")):
+                                        channel_id = int(channel_id)
+                                    
+                                    # Try to get chat via user_client first to ensure peer is cached for the bot
+                                    # This is a common Pyrogram/Kurigram issue where bots can't see chats until 
+                                    # the session has interacted with it.
+                                    try:
+                                        await user_client.get_chat(channel_id)
+                                    except Exception as user_e:
+                                        logging.warning(f"User client cannot see channel {channel_id}: {user_e}")
+                                        raise Exception("Channel invalid for user")
+
                                     # Try to get chat to verify existence and bot membership
-                                    await client.get_chat(channel_id)
-                                except Exception:
+                                    chat = await client.get_chat(channel_id)
+                                    
+                                    # Verify bot is actually in the channel (redundancy check)
+                                    try:
+                                        await client.get_chat_member(channel_id, "me")
+                                    except Exception:
+                                        logging.warning(f"Bot not in channel {channel_id}, attempting to re-add.")
+                                        raise Exception("Bot not member")
+                                        
+                                except Exception as e:
                                     # Channel might be deleted, restricted, or bot removed
-                                    logging.warning(f"Existing channel {channel_id} inaccessible for user {user_id}. Attempting to re-join or recreate.")
+                                    logging.warning(f"Existing channel {channel_id} inaccessible for user {user_id}: {e}. Attempting to re-join or recreate.")
                                     try:
                                         # Try to re-invite bot using user_client
                                         bot_info = await client.get_me()
@@ -635,8 +679,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                                 can_restrict_members=True,
                                                 can_pin_messages=True,
                                                 can_promote_members=False,
-                                                can_change_info=True,
-                                                can_anonymous=False
+                                                can_change_info=True
                                             )
                                         )
                                     except Exception as invite_err:
@@ -689,10 +732,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 os.remove(path)
                             if thumb_path and os.path.exists(thumb_path):
                                 os.remove(thumb_path)
-                            try:
-                                await status_msg.edit_text("🛑 Process cancelled.")
-                            except Exception:
-                                pass
+                            await update_status(status_msg, "🛑 Process cancelled.")
                             return None
                         logging.error(f"Download/Upload error: {e}")
                         continue
@@ -712,10 +752,7 @@ async def download_handler(client, message, link_override=None, processed_albums
     except Exception as e:
         logging.error(f"Download handler error: {e}")
         if 'status_msg' in locals():
-            try:
-                await status_msg.edit_text(f"❌ Error: {str(e)}")
-            except Exception:
-                pass
+            await update_status(status_msg, f"❌ Error: {str(e)}")
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))
 async def upgrade_prompt_callback(client, callback_query):

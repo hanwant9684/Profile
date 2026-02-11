@@ -1,5 +1,13 @@
 import asyncio
+import logging
 from pyrogram import filters
+
+async def update_status(msg, text):
+    try:
+        await msg.edit_text(text)
+    except Exception as e:
+        logging.debug(f"Status update failed: {e}")
+
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
 from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count
 
@@ -199,16 +207,13 @@ async def broadcast(client, message):
             
             # Periodically update the progress message for transparency
             if (index + 1) % 50 == 0:
-                try:
-                    await msg.edit_text(f"🚀 Broadcasting...\nProgress: {index + 1}/{total}\nSent: {count}\nFailed: {blocked}")
-                except Exception:
-                    pass
+                await update_status(msg, f"🚀 Broadcasting...\nProgress: {index + 1}/{total}\nSent: {count}\nFailed: {blocked}")
             
             # Rate limiting: 20 messages per second (0.05s delay) 
             # to stay within Telegram's broad limits for bots
             await asyncio.sleep(0.05)
     
-    await msg.edit_text(f"✅ Broadcast complete.\nTotal: {total if not target_ids else len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
+    await update_status(msg, f"✅ Broadcast complete.\nTotal: {total if not target_ids else len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
 
 @app.on_message(filters.command("premium_users") & filters.private, group=-1)
 async def list_premium_users(client, message):
