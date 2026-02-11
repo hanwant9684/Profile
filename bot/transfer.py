@@ -69,6 +69,12 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
             except (ValueError, TypeError):
                 target_id = chat_id
 
+        # Peer resolution attempt for channels/groups
+        try:
+            await client.get_chat(target_id)
+        except Exception as e:
+            logging.debug(f"Upload peer resolution failed for {target_id}: {e}")
+
         if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
             upload_kwargs.update(kwargs)
             upload_kwargs["thumb"] = thumb

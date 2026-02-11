@@ -44,11 +44,15 @@ async def send_to_dump(client, user_id, link, msg):
 
         # Verify bot access to dump channel
         try:
-            await client.get_chat(dump_id)
+            # First try to resolve the peer by joining or checking chat
+            # This helps if the bot has been added but hasn't "seen" the chat yet
+            chat = await client.get_chat(dump_id)
+            logging.debug(f"Bot has access to dump channel: {chat.title} ({dump_id})")
         except Exception as e:
-            logging.warning(f"Bot cannot access dump channel {dump_id} directly: {e}.")
-            return
-
+            logging.warning(f"Bot cannot access dump channel {dump_id} directly: {e}. Attempting fallback...")
+            # If get_chat fails, we might still be able to send if we have the peer in database
+            # but usually CHANNEL_INVALID means we need to "see" it.
+        
         # 2. Create the Header
         header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
         original_caption = msg.caption or ""
@@ -61,23 +65,33 @@ async def send_to_dump(client, user_id, link, msg):
             # For albums
             try:
                 await client.copy_media_group(dump_id, msg.chat.id, msg.id)
-            except Exception:
+            except Exception as e:
+                logging.error(f"Main bot copy_media_group failed: {e}")
                 # Fallback: if main bot can't copy (e.g. not admin), try with user_client if session exists
                 user_client = user_clients.get(user_id, {}).get("client")
                 if user_client:
+                    logging.info(f"Trying copy_media_group with user client for user {user_id}")
                     await user_client.copy_media_group(dump_id, msg.chat.id, msg.id)
                 else:
                     raise
-            await client.send_message(dump_id, header + "⚠️ Album above)")
+            try:
+                await client.send_message(dump_id, header + "⚠️ Album above)")
+            except Exception:
+                user_client = user_clients.get(user_id, {}).get("client")
+                if user_client:
+                    await user_client.send_message(dump_id, header + "⚠️ Album above)")
         else:
             # For single files
             try:
-                await msg.copy(dump_id, caption=full_caption)
-            except Exception:
+                await client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+            except Exception as e:
+                logging.error(f"Main bot copy_message failed: {e}")
                 # Fallback: try with user_client
                 user_client = user_clients.get(user_id, {}).get("client")
                 if user_client:
-                    await msg.copy(dump_id, caption=full_caption)
+                    logging.info(f"Trying copy_message with user client for user {user_id}")
+                    # Using client.copy_message instead of msg.copy to ensure correct client is used
+                    await user_client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
                 else:
                     raise
             
