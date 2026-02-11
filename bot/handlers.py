@@ -34,24 +34,20 @@ async def send_to_dump(client, user_id, link, msg):
             logging.error(f"Invalid dump_id format in database: {dump_id}")
             return
         
+        # Peer resolution
+        user_client = user_clients.get(user_id, {}).get("client")
+        if user_client:
+            try:
+                await user_client.get_chat(dump_id)
+            except Exception as e:
+                logging.debug(f"User client peer resolution failed for dump: {e}")
+
         # Verify bot access to dump channel
-        # Use user_client to verify if bot can't, as it might be a peer caching issue
         try:
             await client.get_chat(dump_id)
         except Exception as e:
-            logging.warning(f"Bot cannot access dump channel {dump_id} directly: {e}. Trying to resolve peer via user_client.")
-            try:
-                # This helps the bot session 'learn' about the channel if the user session knows it
-                user_data = await get_user(user_id)
-                u_client = None
-                # We need a user client to resolve peers, if available
-                # In this context, we might not have it unless passed or available globally
-                # For now, let's try to resolve it by ID directly if it's a -100 ID
-                # Pyrotgfork usually handles -100 IDs better if they are valid
-                await client.get_chat(dump_id)
-            except Exception:
-                logging.error(f"Bot truly cannot access dump channel {dump_id}")
-                return
+            logging.warning(f"Bot cannot access dump channel {dump_id} directly: {e}.")
+            return
 
         # 2. Create the Header
         header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
@@ -627,40 +623,51 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         channel_id = int(channel_id)
                                     
                                     # Try to get chat via user_client first to ensure peer is cached for the bot
-                                    # This is a common Pyrogram/Kurigram issue where bots can't see chats until 
-                                    # the session has interacted with it.
                                     try:
-                                        await user_client.get_chat(channel_id)
+                                        chat_obj = await user_client.get_chat(channel_id)
+                                        # Save hash if we found it
+                                        c_hash = getattr(chat_obj, "access_hash", None)
+                                        if c_hash:
+                                            await update_user_channel(user_id, channel_id, str(c_hash))
+                                    except pyrogram.errors.ChannelInvalid:
+                                        logging.warning(f"Channel {channel_id} is explicitly invalid for user.")
+                                        raise Exception("Channel invalid")
                                     except Exception as user_e:
                                         logging.warning(f"User client cannot see channel {channel_id}: {user_e}")
-                                        raise Exception("Channel invalid for user")
+                                        # Keep going, might still be valid for bot
 
                                     # Try to get chat to verify existence and bot membership
-                                    chat = await client.get_chat(channel_id)
-                                    
-                                    # Verify bot is actually in the channel (redundancy check)
                                     try:
-                                        await client.get_chat_member(channel_id, "me")
+                                        await client.get_chat(channel_id)
                                     except Exception:
-                                        logging.warning(f"Bot not in channel {channel_id}, attempting to re-add.")
-                                        raise Exception("Bot not member")
+                                        # Re-invite bot if it can't see it
+                                        try:
+                                            me = await client.get_me()
+                                            await user_client.add_chat_members(channel_id, me.id)
+                                            from pyrogram.types import ChatPrivileges
+                                            await user_client.promote_chat_member(
+                                                channel_id, me.id,
+                                                privileges=ChatPrivileges(
+                                                    can_post_messages=True,
+                                                    can_delete_messages=True,
+                                                    can_invite_users=True,
+                                                    can_manage_chat=True
+                                                )
+                                            )
+                                        except Exception as re_e:
+                                            logging.warning(f"Failed to re-invite bot to channel {channel_id}: {re_e}")
+                                            raise Exception("Bot inaccessible")
                                         
                                 except Exception as e:
-                                    # Channel might be deleted, restricted, or bot removed
-                                    logging.warning(f"Existing channel {channel_id} inaccessible for user {user_id}: {e}. Attempting to re-join or recreate.")
-                                    try:
-                                        # Try to re-invite bot using user_client
-                                        bot_info = await client.get_me()
-                                        await user_client.add_chat_members(channel_id, bot_info.id)
-                                    except Exception:
-                                        # If re-invite fails, channel might be deleted or restricted
-                                        channel_id = None
+                                    logging.warning(f"Existing channel {channel_id} issue for user {user_id}: {e}. Attempting to recreate.")
+                                    channel_id = None
                             
                             if not channel_id:
                                 try:
-                                    # generic name to avoid spam filters
                                     new_chat = await user_client.create_channel("Cloud Storage", "My private cloud storage for downloads.")
                                     channel_id = new_chat.id
+                                    channel_hash = getattr(new_chat, "access_hash", None)
+                                    await update_user_channel(user_id, channel_id, str(channel_hash) if channel_hash else None)
                                     
                                     # Get Bot Info to add it as a member
                                     bot_info = await client.get_me()

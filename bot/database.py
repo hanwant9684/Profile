@@ -32,6 +32,7 @@ async def init_db():
                     is_agreed_terms INTEGER DEFAULT 0,
                     phone_session_string TEXT,
                     download_channel_id TEXT,
+                    download_channel_hash TEXT,
                     premium_expiry_date TEXT,
                     is_banned INTEGER DEFAULT 0,
                     ads_today INTEGER DEFAULT 0,
@@ -52,6 +53,13 @@ async def init_db():
             
             await db.execute('CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)')
+            
+            # Migration check
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN download_channel_hash TEXT")
+            except Exception:
+                pass # Column already exists
+            
             await db.commit()
             
         _db_initialized = True
@@ -156,13 +164,13 @@ async def logout_user(user_id):
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
 
-async def update_user_channel(user_id, channel_id):
+async def update_user_channel(user_id, channel_id, channel_hash=None):
     try:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET download_channel_id = ?, updated_at = ? WHERE telegram_id = ?',
-                           (str(channel_id), datetime.utcnow().isoformat(), str(user_id)))
+            await db.execute('UPDATE users SET download_channel_id = ?, download_channel_hash = ?, updated_at = ? WHERE telegram_id = ?',
+                           (str(channel_id), channel_hash, datetime.utcnow().isoformat(), str(user_id)))
             await db.commit()
-        logger.info(f"Updated download channel for user {user_id}: {channel_id}")
+        logger.info(f"Updated download channel for user {user_id}: {channel_id} (hash: {channel_hash})")
     except Exception as e:
         logger.error(f"Error updating user channel for {user_id}: {e}")
 
