@@ -55,7 +55,7 @@ async def send_to_dump(client, user_id, link, msg):
         
         # 2. Create the Header
         header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
-        original_caption = msg.caption or ""
+        original_caption = msg.text or msg.caption or ""
         full_caption = (header + original_caption)[:1020]
 
         # Ensure bot has access by trying to resolve the peer first if needed, 
@@ -83,7 +83,11 @@ async def send_to_dump(client, user_id, link, msg):
         else:
             # For single files
             try:
-                await client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+                if msg.media:
+                    await client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+                else:
+                    # It's JUST text, copy_message with caption fails. Send a new message instead.
+                    await client.send_message(dump_id, full_caption)
             except Exception as e:
                 logging.error(f"Main bot copy_message failed: {e}")
                 # Fallback: try with user_client
@@ -91,7 +95,10 @@ async def send_to_dump(client, user_id, link, msg):
                 if user_client:
                     logging.info(f"Trying copy_message with user client for user {user_id}")
                     # Using client.copy_message instead of msg.copy to ensure correct client is used
-                    await user_client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+                    if msg.media:
+                        await user_client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+                    else:
+                        await user_client.send_message(dump_id, full_caption)
                 else:
                     raise
             
@@ -556,6 +563,14 @@ async def download_handler(client, message, link_override=None, processed_albums
                     if not getattr(current_msg, "media", None) and type(current_msg).__name__ != "Story":
                         try:
                             await client.send_message(user_id, safe_caption)
+                            user_data = await get_user(user_id)
+                            channel_id = user_data.get("download_channel_id")
+                            if channel_id:
+                                try:
+                                    # Use user_client to send to their private cloud storage
+                                    await user_client.send_message(int(channel_id), safe_caption)
+                                except Exception as e:
+                                    logging.error(f"Text upload to private channel failed: {e}")
                             await send_to_dump(client, user_id, link, current_msg)
                             processed_count += 1
                             continue
