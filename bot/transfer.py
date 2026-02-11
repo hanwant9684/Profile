@@ -60,13 +60,22 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         return None
 
     try:
+        # Resolve chat_id: if it's "me", we keep it as is, otherwise ensure it's an int
+        if isinstance(chat_id, str) and chat_id.lower() == "me":
+            target_id = "me"
+        else:
+            try:
+                target_id = int(chat_id)
+            except (ValueError, TypeError):
+                target_id = chat_id
+
         if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
             upload_kwargs.update(kwargs)
             upload_kwargs["thumb"] = thumb
             if file_path_lower.endswith(".gif"):
-                return await client.send_animation(chat_id, file_path, **upload_kwargs)
+                return await client.send_animation(target_id, file_path, **upload_kwargs)
             return await client.send_video(
-                chat_id,
+                target_id,
                 file_path,
                 supports_streaming=True,
                 **upload_kwargs
@@ -75,21 +84,21 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         elif file_path_lower.endswith((".mp3", ".m4a", ".ogg", ".wav")):
             upload_kwargs["duration"] = kwargs.get("duration", 0)
             if file_path_lower.endswith((".ogg", ".wav")): # Voice formats
-                return await client.send_voice(chat_id, file_path, **upload_kwargs)
+                return await client.send_voice(target_id, file_path, **upload_kwargs)
             #Normal Audio
             upload_kwargs["thumb"] = thumb
-            return await client.send_audio(chat_id, file_path, **upload_kwargs)
+            return await client.send_audio(target_id, file_path, **upload_kwargs)
         #Images
         elif file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
             return await client.send_photo(
-                chat_id,
+                target_id,
                 file_path,
                 **upload_kwargs
             )
          #Documents   
         upload_kwargs["thumb"] = thumb    
         return await client.send_document(
-            chat_id,
+            target_id,
             file_path,
             **upload_kwargs
         )
