@@ -1,7 +1,7 @@
-modules = ["python-3.12"]
+modules = ["python-3.11"]
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "libuv", "libyaml", "postgresql", "redis", "unzip"]
+packages = ["unzip", "redis"]
 
 [agent]
 expertMode = true
@@ -16,18 +16,18 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Run Bot with Redis"
+args = "Main Bot"
 
 [[workflows.workflow]]
-name = "Run Bot with Redis"
+name = "Main Bot"
 author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "redis-server --bind 0.0.0.0 --port 6379 --daemonize yes && python main.py; pkill redis-server"
+args = "python main.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
 
 [[ports]]
 localPort = 6379
