@@ -21,6 +21,16 @@ except Exception:
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 async def main():
+    # Start Redis server on Replit if not already running
+    import subprocess
+    try:
+        subprocess.run(["redis-cli", "ping"], capture_output=True, check=True)
+        print("✅ Redis is already running.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("🚀 Starting Redis server...")
+        subprocess.Popen(["redis-server", "--bind", "0.0.0.0", "--port", "6379", "--daemonize", "yes"])
+        await asyncio.sleep(2)  # Wait for it to start
+
     if os.path.exists("downloads"):
         import shutil
         for filename in os.listdir("downloads"):
@@ -100,6 +110,11 @@ async def main():
     if shared_session and not shared_session.closed:
         await shared_session.close()
         print("Global aiohttp session closed.")
+
+    # Stop Redis server on exit
+    print("🛑 Stopping Redis server...")
+    import subprocess
+    subprocess.run(["redis-cli", "shutdown"], capture_output=True)
 
 if __name__ == "__main__":
     uvloop.run(main())
