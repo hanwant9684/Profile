@@ -302,7 +302,7 @@ async def check_and_update_quota(user_id):
             user["downloads_today"] = 0
         
         if user.get("downloads_today", 0) >= 5:
-            return False, "Daily limit reached (5/5). Upgrade to Premium for unlimited downloads."
+            return False, "Daily limit reached (5/5). Upgrade to Premium for unlimited downloads. use /upgrade"
         
         return True, f"{user.get('downloads_today', 0)}/5"
     except Exception as e:
