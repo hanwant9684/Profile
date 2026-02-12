@@ -36,7 +36,6 @@ async def main():
     # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
     from bot.database import init_db
-    from bot.cloud_backup import restore_latest_from_cloud, periodic_cloud_backup
     from bot.login import cleanup_expired_logins
     from bot.logger import cleanup_loop
     import bot.transfer 
@@ -47,9 +46,6 @@ async def main():
     import bot.admin
     import bot.info
 
-    print("Attempting to restore database from cloud backup...")
-    await restore_latest_from_cloud()
-    
     print("Initializing database...")
     await init_db()
 
@@ -71,9 +67,10 @@ async def main():
         print("Starting web server for health checks...")
         # start_health_check()
         
+    from bot.cloud_backup import periodic_cloud_backup
+    asyncio.create_task(periodic_cloud_backup())
     asyncio.create_task(cleanup_expired_logins())
     asyncio.create_task(cleanup_loop())
-    asyncio.create_task(periodic_cloud_backup(interval_minutes=10))
     
     print("Starting bot...")
     if app:
@@ -106,7 +103,10 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        uvloop.run(main()) #changed to below line (added new line beloe)
-        #asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+        uvloop.run(main())
+    finally:
+        # Kill redis and itself to ensure Replit can stop the container
+        import os
+        import signal
+        os.system("pkill -9 redis-server")
+        os.kill(os.getpid(), signal.SIGKILL)

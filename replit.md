@@ -81,12 +81,28 @@ Users table stores:
 
 Settings table stores key-value pairs (e.g., `force_sub_channel`)
 
-## External Dependencies
+## VPS Backup Guide
 
-### Database
-- **SQLite**: Local file-based database (`telegram_bot.db`)
-- No external database setup required - works out of the box
+To keep your data safe on a VPS, follow these practices:
 
-### Telegram API
-- **Kurigram Client**: Requires `API_ID`, `API_HASH`, `BOT_TOKEN` environment variables
-- User session strings stored for authenticated downloads
+### 1. PostgreSQL Backup (Main Data)
+The most critical data is in your PostgreSQL database.
+- **Automated Dump**: Set up a cron job to run `pg_dump` daily.
+  ```bash
+  pg_dump $DATABASE_URL > backup_$(date +%F).sql
+  ```
+- **Off-site Storage**: Move these `.sql` files to a secure cloud storage (like Google Drive or S3) automatically.
+
+### 2. Redis Connection (Cache)
+- The "Connection Refused" error usually means Redis isn't running on the target machine.
+- **Permanent Fix**: Ensure the Redis server is started on your VPS.
+  ```bash
+  sudo systemctl enable redis
+  sudo systemctl start redis
+  ```
+- **Fallback**: The bot is now updated to automatically skip Redis and use only the main database if Redis is unavailable, so it won't crash.
+
+### 3. File Persistence
+- All media files are handled on-the-fly or stored in the `downloads/` folder during processing.
+- The bot cleans the `downloads/` folder on startup to save space. No critical data is stored there permanently.
+
