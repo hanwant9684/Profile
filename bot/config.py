@@ -2,6 +2,8 @@ import os
 import asyncio
 import logging
 import aiohttp
+import redis.asyncio as redis
+import json
 from bot.logger import setup_logger, cleanup_loop
 from pyrogram import Client
 from dotenv import load_dotenv
@@ -21,6 +23,17 @@ if API_ID:
 API_HASH = str(os.environ.get("API_HASH", ""))
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
+# Redis Configuration
+REDIS_URL = os.environ.get("REDIS_URL")
+redis_client = None
+if REDIS_URL:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    except Exception as e:
+        logging.error(f"Failed to initialize Redis client: {e}")
+else:
+    logging.warning("REDIS_URL environment variable is missing! Caching will be disabled.")
+
 # Bot Configuration
 OWNER_ID_RAW = os.environ.get("OWNER_ID")
 OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW and OWNER_ID_RAW.isdigit() else None
@@ -32,7 +45,17 @@ APPLE_PAY_ID = os.environ.get("APPLE_PAY_ID", "Contact Owner")
 CRYPTO_ADDRESS = os.environ.get("CRYPTO_ADDRESS", "Contact Owner")
 CARD_PAYMENT_LINK = os.environ.get("CARD_PAYMENT_LINK", "Contact Owner")
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
-DUMP_CHANNEL_ID = os.environ.get("DUMP_CHANNEL_ID")
+
+async def get_dump_channel_id():
+    """Pull dump_channel_id from Redis for instant access"""
+    try:
+        cached_val = await redis_client.get("setting:dump_channel_id")
+        if cached_val:
+            data = json.loads(cached_val)
+            return data.get('value')
+    except Exception:
+        pass
+    return os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
 MAX_CONCURRENT_DOWNLOADS = 10

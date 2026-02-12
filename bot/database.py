@@ -1,7 +1,9 @@
 import os
-import aiosqlite
+import asyncpg
+import redis.asyncio as redis
 import logging
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from bot.config import OWNER_ID
@@ -9,76 +11,118 @@ from bot.config import OWNER_ID
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+REDIS_URL = os.environ.get("REDIS_URL")
 
-_db_initialized = False
+pool: Optional[asyncpg.Pool] = None
+redis_client: Optional[redis.Redis] = None
 
 async def init_db():
-    global _db_initialized
-    if _db_initialized:
+    global pool, redis_client
+    if pool:
         return
     
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA synchronous=NORMAL")
-            
-            await db.execute('''
+        if not DATABASE_URL:
+            logger.error("DATABASE_URL is not set")
+            return
+        
+        # Try to restore from cloud on startup
+        from bot.cloud_backup import restore_from_github_async
+        await restore_from_github_async()
+        
+        pool = await asyncpg.create_pool(DATABASE_URL)
+        
+        if REDIS_URL:
+            try:
+                redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+                # Test connection
+                await redis_client.ping()
+                logger.info("Redis connection established")
+            except Exception as e:
+                logger.error(f"Failed to connect to Redis at {REDIS_URL}: {e}")
+                redis_client = None
+        else:
+            logger.warning("REDIS_URL is not set, running without Redis cache")
+            redis_client = None
+        
+        async with pool.acquire() as conn:
+            await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
-                    telegram_id TEXT PRIMARY KEY,
+                    telegram_id BIGINT PRIMARY KEY,
                     role TEXT DEFAULT 'free',
                     downloads_today INTEGER DEFAULT 0,
-                    last_download_date TEXT,
-                    is_agreed_terms INTEGER DEFAULT 0,
+                    last_download_date DATE,
+                    is_agreed_terms BOOLEAN DEFAULT FALSE,
                     phone_session_string TEXT,
                     download_channel_id TEXT,
                     download_channel_hash TEXT,
-                    premium_expiry_date TEXT,
-                    is_banned INTEGER DEFAULT 0,
+                    premium_expiry_date TIMESTAMP WITH TIME ZONE,
+                    is_banned BOOLEAN DEFAULT FALSE,
                     ads_today INTEGER DEFAULT 0,
-                    last_ad_date TEXT,
-                    created_at TEXT,
-                    updated_at TEXT
+                    last_ad_date DATE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            await db.execute('''
+            await conn.execute('''
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT,
-                    json_value TEXT,
-                    updated_at TEXT
+                    json_value JSONB,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)')
-            await db.execute('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_role_expiry ON users(role, premium_expiry_date)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)')
             
-            # Migration check
-            try:
-                await db.execute("ALTER TABLE users ADD COLUMN download_channel_hash TEXT")
-            except Exception:
-                pass # Column already exists
-            
-            await db.commit()
-            
-        _db_initialized = True
-        logger.info(f"SQLite database initialized: {DATABASE_PATH}")
+        logger.info("PostgreSQL database initialized")
     except Exception as e:
-        logger.error(f"SQLite initialization error: {e}")
+        logger.error(f"PostgreSQL initialization error: {e}")
         raise
 
 async def get_user(user_id) -> Optional[Dict]:
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('SELECT * FROM users WHERE telegram_id = ?', (str(user_id),)) as cursor:
-                row = await cursor.fetchone()
+        # Check Redis first
+        cache_key = f"user:{user_id}"
+        if redis_client:
+            try:
+                cached_user = await redis_client.get(cache_key)
+                if cached_user:
+                    return json.loads(cached_user)
+            except Exception as e:
+                logger.error(f"Redis get error: {e}")
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT * FROM users WHERE telegram_id = $1', int(user_id))
         
         if row:
             user = dict(row)
-            user['is_banned'] = bool(user['is_banned'])
-            user['is_agreed_terms'] = bool(user['is_agreed_terms'])
+            # Ensure owner role is set if this is the owner
+            if OWNER_ID and int(user_id) == int(OWNER_ID) and user.get("role") != "owner":
+                await set_user_role(user_id, "owner")
+                user["role"] = "owner"
+                
+            # Convert datetime objects to ISO strings for JSON serialization
+            if user.get('premium_expiry_date'):
+                user['premium_expiry_date'] = user['premium_expiry_date'].isoformat()
+            if user.get('created_at'):
+                user['created_at'] = user['created_at'].isoformat()
+            if user.get('updated_at'):
+                user['updated_at'] = user['updated_at'].isoformat()
+            if user.get('last_download_date'):
+                user['last_download_date'] = user['last_download_date'].isoformat()
+            if user.get('last_ad_date'):
+                user['last_ad_date'] = user['last_ad_date'].isoformat()
+                
+            # Cache in Redis for 10 minutes
+            if redis_client:
+                try:
+                    await redis_client.setex(cache_key, 600, json.dumps(user))
+                except Exception as e:
+                    logger.error(f"Redis set error: {e}")
             return user
         
         if OWNER_ID and int(user_id) == int(OWNER_ID):
@@ -86,6 +130,8 @@ async def get_user(user_id) -> Optional[Dict]:
             if user:
                 await set_user_role(user_id, "owner")
                 user["role"] = "owner"
+            # Cache in Redis for 10 minutes
+            await redis_client.setex(cache_key, 600, json.dumps(user))
             return user
         
         return None
@@ -95,82 +141,60 @@ async def get_user(user_id) -> Optional[Dict]:
 
 async def create_user(user_id) -> Optional[Dict]:
     try:
-        now = datetime.utcnow().isoformat()
-        today = datetime.utcnow().date().isoformat()
+        now = datetime.now()
+        today = now.date()
         
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            async with db.execute('SELECT 1 FROM users WHERE telegram_id = ?', (str(user_id),)) as cursor:
-                if await cursor.fetchone():
-                    return {
-                        "telegram_id": str(user_id),
-                        "role": "free",
-                        "downloads_today": 0,
-                        "last_download_date": today,
-                        "is_agreed_terms": False,
-                        "phone_session_string": None,
-                        "premium_expiry_date": None,
-                        "is_banned": False,
-                        "created_at": now
-                    }
-            
-            await db.execute('''
+        async with pool.acquire() as conn:
+            await conn.execute('''
                 INSERT INTO users (telegram_id, role, downloads_today, last_download_date, 
                                    is_agreed_terms, is_banned, ads_today, created_at, updated_at)
-                VALUES (?, 'free', 0, ?, 0, 0, 0, ?, ?)
-            ''', (str(user_id), today, now, now))
-            await db.commit()
+                VALUES ($1, 'free', 0, $2, FALSE, FALSE, 0, $3, $4)
+                ON CONFLICT (telegram_id) DO NOTHING
+            ''', int(user_id), today, now, now)
         
-        return {
-            "telegram_id": str(user_id),
-            "role": "free",
-            "downloads_today": 0,
-            "last_download_date": today,
-            "is_agreed_terms": False,
-            "phone_session_string": None,
-            "premium_expiry_date": None,
-            "is_banned": False,
-            "created_at": now
-        }
+        # Clear cache
+        await redis_client.delete(f"user:{user_id}")
+        return await get_user(user_id)
     except Exception as e:
         logger.error(f"Error creating user {user_id}: {e}")
         return None
 
 async def update_user_terms(user_id, agreed=True):
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET is_agreed_terms = ?, updated_at = ? WHERE telegram_id = ?',
-                           (1 if agreed else 0, datetime.utcnow().isoformat(), str(user_id)))
-            await db.commit()
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET is_agreed_terms = $1, updated_at = $2 WHERE telegram_id = $3',
+                           agreed, datetime.now(), int(user_id))
+        await redis_client.delete(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error updating terms for {user_id}: {e}")
 
 async def save_session_string(user_id, session_string):
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET phone_session_string = ?, updated_at = ? WHERE telegram_id = ?',
-                           (session_string, datetime.utcnow().isoformat(), str(user_id)))
-            await db.commit()
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET phone_session_string = $1, updated_at = $2 WHERE telegram_id = $3',
+                           session_string, datetime.now(), int(user_id))
+        await redis_client.delete(f"user:{user_id}")
         logger.info(f"Saved session for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving session for {user_id}: {e}")
 
 async def logout_user(user_id):
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET phone_session_string = NULL, updated_at = ? WHERE telegram_id = ?',
-                           (datetime.utcnow().isoformat(), str(user_id)))
-            await db.commit()
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET phone_session_string = NULL, updated_at = $1 WHERE telegram_id = $2',
+                           datetime.now(), int(user_id))
+        await redis_client.delete(f"user:{user_id}")
         logger.info(f"User {user_id} logged out")
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
 
 async def update_user_channel(user_id, channel_id, channel_hash=None):
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET download_channel_id = ?, download_channel_hash = ?, updated_at = ? WHERE telegram_id = ?',
-                           (str(channel_id), channel_hash, datetime.utcnow().isoformat(), str(user_id)))
-            await db.commit()
-        logger.info(f"Updated download channel for user {user_id}: {channel_id} (hash: {channel_hash})")
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET download_channel_id = $1, download_channel_hash = $2, updated_at = $3 WHERE telegram_id = $4',
+                           str(channel_id), channel_hash, datetime.now(), int(user_id))
+        await redis_client.delete(f"user:{user_id}")
+        logger.info(f"Updated download channel for user {user_id}: {channel_id}")
     except Exception as e:
         logger.error(f"Error updating user channel for {user_id}: {e}")
 
@@ -178,21 +202,21 @@ async def set_user_role(user_id, role, duration_days=None):
     try:
         expiry_date = None
         if role == 'premium' and duration_days:
-            expiry_date = (datetime.utcnow() + timedelta(days=int(duration_days))).isoformat()
+            expiry_date = datetime.now() + timedelta(days=int(duration_days))
         
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET role = ?, premium_expiry_date = ?, updated_at = ? WHERE telegram_id = ?',
-                           (role, expiry_date, datetime.utcnow().isoformat(), str(user_id)))
-            await db.commit()
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET role = $1, premium_expiry_date = $2, updated_at = $3 WHERE telegram_id = $4',
+                           role, expiry_date, datetime.now(), int(user_id))
+        await redis_client.delete(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error setting role for {user_id}: {e}")
 
 async def ban_user(user_id, is_banned=True):
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET is_banned = ?, updated_at = ? WHERE telegram_id = ?',
-                           (1 if is_banned else 0, datetime.utcnow().isoformat(), str(user_id)))
-            await db.commit()
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET is_banned = $1, updated_at = $2 WHERE telegram_id = $3',
+                           is_banned, datetime.now(), int(user_id))
+        await redis_client.delete(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error banning user {user_id}: {e}")
 
@@ -205,21 +229,30 @@ async def check_and_update_quota(user_id):
         if user.get("is_banned"):
             return False, "You are banned from using this bot."
         
-        today = datetime.utcnow().date().isoformat()
+        now = datetime.now()
+        today = now.date()
         
         if user.get("role") == 'premium' and user.get("premium_expiry_date"):
-            if user["premium_expiry_date"] < today:
-                await set_user_role(user_id, "free")
+            expiry = datetime.fromisoformat(user["premium_expiry_date"])
+            if expiry < now:
+                # Automatically update role to free and clear Redis
+                async with pool.acquire() as conn:
+                    await conn.execute("UPDATE users SET role = 'free', updated_at = $1 WHERE telegram_id = $2", now, int(user_id))
+                await redis_client.delete(f"user:{user_id}")
                 user["role"] = "free"
         
         if user.get("role") in ['premium', 'admin', 'owner']:
             return True, "Unlimited"
         
-        if user.get("last_download_date") != today:
-            async with aiosqlite.connect(DATABASE_PATH) as db:
-                await db.execute('UPDATE users SET downloads_today = 0, last_download_date = ? WHERE telegram_id = ?',
-                               (today, str(user_id)))
-                await db.commit()
+        last_download_date = None
+        if user.get("last_download_date"):
+            last_download_date = datetime.fromisoformat(user["last_download_date"]).date()
+
+        if last_download_date != today:
+            async with pool.acquire() as conn:
+                await conn.execute('UPDATE users SET downloads_today = 0, last_download_date = $1 WHERE telegram_id = $2',
+                               today, int(user_id))
+            await redis_client.delete(f"user:{user_id}")
             user["downloads_today"] = 0
         
         if user.get("downloads_today", 0) >= 5:
@@ -236,20 +269,20 @@ async def increment_quota(user_id, count=1):
         if not user or user.get("role") != 'free':
             return
             
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET downloads_today = downloads_today + ? WHERE telegram_id = ?',
-                           (count, str(user_id)))
-            await db.commit()
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET downloads_today = downloads_today + $1 WHERE telegram_id = $2',
+                           count, int(user_id))
+        await redis_client.delete(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error incrementing quota for {user_id}: {e}")
 
 async def increment_ad_count(user_id):
     try:
-        today = datetime.utcnow().date().isoformat()
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('UPDATE users SET ads_today = ads_today + 1, last_ad_date = ? WHERE telegram_id = ?',
-                           (today, str(user_id)))
-            await db.commit()
+        today = datetime.now().date()
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET ads_today = ads_today + 1, last_ad_date = $1 WHERE telegram_id = $2',
+                           today, int(user_id))
+        await redis_client.delete(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error incrementing ad count for {user_id}: {e}")
 
@@ -259,12 +292,16 @@ async def get_ad_count_today(user_id):
         if not user:
             return 0
         
-        today = datetime.utcnow().date().isoformat()
-        if user.get("last_ad_date") != today:
-            async with aiosqlite.connect(DATABASE_PATH) as db:
-                await db.execute('UPDATE users SET ads_today = 0, last_ad_date = ? WHERE telegram_id = ?',
-                               (today, str(user_id)))
-                await db.commit()
+        today = datetime.now().date()
+        last_ad_date = None
+        if user.get("last_ad_date"):
+            last_ad_date = datetime.fromisoformat(user["last_ad_date"]).date()
+
+        if last_ad_date != today:
+            async with pool.acquire() as conn:
+                await conn.execute('UPDATE users SET ads_today = 0, last_ad_date = $1 WHERE telegram_id = $2',
+                               today, int(user_id))
+            await redis_client.delete(f"user:{user_id}")
             return 0
         return user.get("ads_today", 0)
     except Exception as e:
@@ -280,10 +317,14 @@ async def get_remaining_quota(user_id):
         if user.get("role") in ['premium', 'admin', 'owner']:
             return 999999, True
         
-        today = datetime.utcnow().date().isoformat()
+        today = datetime.now().date()
         downloads_today = user.get("downloads_today", 0)
         
-        if user.get("last_download_date") != today:
+        last_download_date = None
+        if user.get("last_download_date"):
+            last_download_date = datetime.fromisoformat(user["last_download_date"]).date()
+
+        if last_download_date != today:
             downloads_today = 0
         
         remaining = max(0, 5 - downloads_today)
@@ -294,13 +335,28 @@ async def get_remaining_quota(user_id):
 
 async def get_setting(key):
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('SELECT * FROM settings WHERE key = ?', (key,)) as cursor:
-                row = await cursor.fetchone()
+        # Check Redis first
+        cache_key = f"setting:{key}"
+        if redis_client:
+            try:
+                cached_val = await redis_client.get(cache_key)
+                if cached_val:
+                    return json.loads(cached_val)
+            except Exception as e:
+                logger.error(f"Redis get setting error: {e}")
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow('SELECT * FROM settings WHERE key = $1', key)
         
         if row:
-            return dict(row)
+            res = dict(row)
+            if res.get('json_value'):
+                res['json_value'] = json.dumps(res['json_value'])
+            if res.get('updated_at'):
+                res['updated_at'] = res['updated_at'].isoformat()
+            
+            await redis_client.setex(cache_key, 3600, json.dumps(res))
+            return res
         return None
     except Exception as e:
         logger.error(f"Error getting setting {key}: {e}")
@@ -308,41 +364,32 @@ async def get_setting(key):
 
 async def update_setting(key, value, json_value=None):
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute('''
+        if json_value and isinstance(json_value, str):
+            json_value = json.loads(json_value)
+            
+        async with pool.acquire() as conn:
+            await conn.execute('''
                 INSERT INTO settings (key, value, json_value, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = ?, json_value = ?, updated_at = ?
-            ''', (key, value, json_value, datetime.utcnow().isoformat(),
-                  value, json_value, datetime.utcnow().isoformat()))
-            await db.commit()
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT(key) DO UPDATE SET value = $2, json_value = $3, updated_at = $4
+            ''', key, value, json_value, datetime.now())
+        await redis_client.delete(f"setting:{key}")
     except Exception as e:
         logger.error(f"Error updating setting {key}: {e}")
 
 async def get_all_users() -> List[Dict]:
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('SELECT * FROM users') as cursor:
-                rows = await cursor.fetchall()
-        
-        users = []
-        for row in rows:
-            user = dict(row)
-            user['is_banned'] = bool(user['is_banned'])
-            user['is_agreed_terms'] = bool(user['is_agreed_terms'])
-            users.append(user)
-        return users
+        async with pool.acquire() as conn:
+            rows = await conn.fetch('SELECT * FROM users')
+        return [dict(row) for row in rows]
     except Exception as e:
         logger.error(f"Error getting all users: {e}")
         return []
 
 async def get_user_count():
     try:
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            async with db.execute('SELECT COUNT(*) FROM users') as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else 0
+        async with pool.acquire() as conn:
+            return await conn.fetchval('SELECT COUNT(*) FROM users')
     except Exception as e:
         logger.error(f"Error getting user count: {e}")
         return 0

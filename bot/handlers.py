@@ -18,12 +18,13 @@ from bot.config import (
 # Dump channel 
 async def send_to_dump(client, user_id, link, msg):
     """Fetches dump channel from database and sends a copy"""
-    # 1. Fetch the setting from the database
-    setting = await get_setting("dump_channel_id")
-    dump_id = setting.get('value') if setting else None
+    # 1. Fetch the setting from Database
+    from bot.database import get_setting
+    res = await get_setting("dump_channel_id")
+    dump_id = res.get("value") if res else None
 
     if not dump_id:
-        logging.warning("Dump channel not set in database.")
+        logging.warning("Dump channel not set.")
         return
 
     try:

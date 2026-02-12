@@ -223,8 +223,11 @@ async def list_premium_users(client, message):
         return
         
     try:
-        all_users = await get_all_users()
-        premium_users = [u for u in all_users if u.get("role") == "premium"]
+        from bot.database import pool
+        from datetime import datetime
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM users WHERE role = 'premium' AND premium_expiry_date >= $1", datetime.now())
+        premium_users = [dict(row) for row in rows]
         
         if not premium_users:
             await message.reply("No premium users found.")
