@@ -126,7 +126,6 @@ async def get_user_client(user_id, session_str):
         api_hash=API_HASH,
         in_memory=True,
         sleep_threshold=60,
-        takeout=True,
         no_updates=True
     )
     await client.start()
@@ -498,11 +497,26 @@ async def download_handler(client, message, link_override=None, processed_albums
                     await update_status(status_msg, "❌ Your session has expired. Please /login again.")
                     return None
                 except (FloodWait, FloodPremiumWait) as e:
-                    logging.warning(f"FloodWait on get_messages: {e.value}s")
-                    await asyncio.sleep(e.value)
-                    msg = await user_client.get_messages(chat_id, message_id)
+                    await message.reply(f"⏳ **Telegram Security Delay**\n\nFor security reasons, you must wait `{e.value}` seconds before downloading. Please check the notification Telegram sent to your other devices and click **'Allow'** or **'Yes, it's me'** to authorize this export.")
+                    return None
                 except Exception as e:
-                    await update_status(status_msg, f"❌ Error fetching message: {str(e)}")
+                    if "TAKEOUT_INIT_DELAY" in str(e):
+                        wait_time = "24 hours"
+                        match = re.search(r"in (\d+) seconds", str(e))
+                        if match:
+                            seconds = int(match.group(1))
+                            hours = seconds // 3600
+                            minutes = (seconds % 3600) // 60
+                            wait_time = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                        
+                        await message.reply(
+                            f"⚠️ **Telegram Security Notice**\n\n"
+                            f"Telegram requires a wait time of **{wait_time}** before you can download content through this session.\n\n"
+                            f"💡 **Action Required:**\n"
+                            f"Check your other Telegram devices for a notification about an **'Account Export Request'**. Click **'Allow'** or **'Yes, it's me'** to potentially speed up this process or authorize the access."
+                        )
+                        return None
+                    await update_status(status_msg, f"❌ Error: {str(e)}")
                     return None
 
                 if not msg or (not getattr(msg, "media", None) and not getattr(msg, "text", None) and type(msg).__name__ != "Story"):

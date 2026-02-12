@@ -183,10 +183,39 @@ async def logout_user(user_id):
         async with pool.acquire() as conn:
             await conn.execute('UPDATE users SET phone_session_string = NULL, updated_at = $1 WHERE telegram_id = $2',
                            datetime.now(), int(user_id))
-        await redis_client.delete(f"user:{user_id}")
+        if redis_client:
+            await redis_client.delete(f"user:{user_id}")
         logger.info(f"User {user_id} logged out")
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
+
+async def update_user(user_id, data: dict):
+    """Update user fields dynamically"""
+    try:
+        if not data:
+            return
+        
+        fields = []
+        values = []
+        for i, (k, v) in enumerate(data.items(), start=1):
+            fields.append(f"{k} = ${i}")
+            values.append(v)
+        
+        # Add updated_at
+        fields.append(f"updated_at = ${len(data) + 1}")
+        values.append(datetime.now())
+        # Add user_id
+        values.append(int(user_id))
+        
+        query = f"UPDATE users SET {', '.join(fields)} WHERE telegram_id = ${len(values)}"
+        
+        async with pool.acquire() as conn:
+            await conn.execute(query, *values)
+        
+        if redis_client:
+            await redis_client.delete(f"user:{user_id}")
+    except Exception as e:
+        logger.error(f"Error updating user {user_id}: {e}")
 
 async def update_user_channel(user_id, channel_id, channel_hash=None):
     try:
@@ -233,13 +262,30 @@ async def check_and_update_quota(user_id):
         today = now.date()
         
         if user.get("role") == 'premium' and user.get("premium_expiry_date"):
-            expiry = datetime.fromisoformat(user["premium_expiry_date"])
-            if expiry < now:
-                # Automatically update role to free and clear Redis
-                async with pool.acquire() as conn:
-                    await conn.execute("UPDATE users SET role = 'free', updated_at = $1 WHERE telegram_id = $2", now, int(user_id))
-                await redis_client.delete(f"user:{user_id}")
-                user["role"] = "free"
+            try:
+                # Handle both ISO string and datetime object
+                expiry_val = user["premium_expiry_date"]
+                if isinstance(expiry_val, str):
+                    expiry = datetime.fromisoformat(expiry_val)
+                else:
+                    expiry = expiry_val
+                
+                # Ensure comparison is timezone-aware if expiry has timezone
+                if expiry.tzinfo is not None and now.tzinfo is None:
+                    from datetime import timezone
+                    now = datetime.now(timezone.utc)
+                elif expiry.tzinfo is None and now.tzinfo is not None:
+                    expiry = expiry.replace(tzinfo=None)
+
+                if expiry < now:
+                    # Automatically update role to free and clear Redis
+                    async with pool.acquire() as conn:
+                        await conn.execute("UPDATE users SET role = 'free', updated_at = $1 WHERE telegram_id = $2", now, int(user_id))
+                    if redis_client:
+                        await redis_client.delete(f"user:{user_id}")
+                    user["role"] = "free"
+            except Exception as e:
+                logger.error(f"Error checking premium expiry for {user_id}: {e}")
         
         if user.get("role") in ['premium', 'admin', 'owner']:
             return True, "Unlimited"
