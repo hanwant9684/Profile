@@ -123,6 +123,26 @@ async def backup_to_github_async():
             async with session.put(url, json=data, headers=headers) as response:
                 if response.status == 201:
                     logger.info(f"Uploaded PostgreSQL backup to GitHub: {file_path}")
+                    # Keep only 2 latest files
+                    try:
+                        list_url = f"https://api.github.com/repos/{repo}/contents/backups"
+                        async with session.get(list_url, headers=headers) as list_resp:
+                            if list_resp.status == 200:
+                                backups = await list_resp.json()
+                                if len(backups) > 2:
+                                    # Sort by name (which has timestamp) and delete older ones
+                                    backups.sort(key=lambda x: x['name'], reverse=True)
+                                    for old_backup in backups[2:]:
+                                        del_url = f"https://api.github.com/repos/{repo}/contents/{old_backup['path']}"
+                                        del_data = {
+                                            "message": f"Deleting old backup: {old_backup['name']}",
+                                            "sha": old_backup['sha']
+                                        }
+                                        async with session.delete(del_url, json=del_data, headers=headers) as del_resp:
+                                            if del_resp.status == 200:
+                                                logger.info(f"Deleted old backup: {old_backup['name']}")
+                    except Exception as e:
+                        logger.error(f"Failed to clean up old backups: {e}")
                     return True
                 else:
                     logger.error(f"GitHub upload failed: {response.status}")
