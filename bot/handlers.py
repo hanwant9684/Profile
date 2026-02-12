@@ -126,7 +126,9 @@ async def get_user_client(user_id, session_str):
         api_hash=API_HASH,
         in_memory=True,
         sleep_threshold=60,
-        no_updates=True
+        no_updates=True,
+        max_concurrent_transmissions=50,
+        workers=50
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
