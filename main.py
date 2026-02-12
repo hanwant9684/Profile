@@ -102,11 +102,4 @@ async def main():
         print("Global aiohttp session closed.")
 
 if __name__ == "__main__":
-    try:
-        uvloop.run(main())
-    finally:
-        # Kill redis and itself to ensure Replit can stop the container
-        import os
-        import signal
-        os.system("pkill -9 redis-server")
-        os.kill(os.getpid(), signal.SIGKILL)
+    uvloop.run(main())
