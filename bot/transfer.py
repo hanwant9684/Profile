@@ -111,6 +111,9 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
             file_path,
             **upload_kwargs
         )
+    except AuthKeyUnregistered:
+        logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}")
+        raise
     except Exception:
         logging.exception("Upload Error:")
         raise

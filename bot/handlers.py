@@ -515,19 +515,30 @@ async def download_handler(client, message, link_override=None, processed_albums
                 except AuthKeyUnregistered:
                     from bot.database import update_user
                     await update_user(user_id, {"phone_session_string": None})
-                    # Cleanup the client from cache
+                    # Cleanup the client from cache and stop it immediately
                     if user_id in user_clients:
+                        client_data = user_clients.pop(user_id)
                         try:
-                            await user_clients[user_id]["client"].stop()
+                            await client_data["client"].stop()
                         except:
                             pass
-                        del user_clients[user_id]
-                    await update_status(status_msg, "❌ Your session has expired. Please /login again.")
+                    await update_status(status_msg, "❌ Your session has expired or was revoked. Please /login again.")
                     return None
                 except (FloodWait, FloodPremiumWait) as e:
                     await message.reply(f"⏳ **Telegram Security Delay**\n\nFor security reasons, you must wait `{e.value}` seconds before downloading. Please check the notification Telegram sent to your other devices and click **'Allow'** or **'Yes, it's me'** to authorize this export.")
                     return None
                 except Exception as e:
+                    if "AUTH_KEY_UNREGISTERED" in str(e):
+                        from bot.database import update_user
+                        await update_user(user_id, {"phone_session_string": None})
+                        if user_id in user_clients:
+                            client_data = user_clients.pop(user_id)
+                            try:
+                                await client_data["client"].stop()
+                            except:
+                                pass
+                        await update_status(status_msg, "❌ Session expired. Please /login again.")
+                        return None
                     if "TAKEOUT_INIT_DELAY" in str(e):
                         wait_time = "24 hours"
                         match = re.search(r"in (\d+) seconds", str(e))
@@ -805,6 +816,16 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         processed_count += 1
                     except Exception as e:
+                        if "AUTH_KEY_UNREGISTERED" in str(e):
+                            from bot.database import update_user
+                            await update_user(user_id, {"phone_session_string": None})
+                            if user_id in user_clients:
+                                client_data = user_clients.pop(user_id)
+                                try: await client_data["client"].stop()
+                                except: pass
+                            await update_status(status_msg, "❌ Session expired. Please /login again.")
+                            return None
+
                         if str(e) == "StopProcess":
                             cancel_flags.discard(user_id)
                             if path and os.path.exists(path):
