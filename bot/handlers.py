@@ -35,24 +35,16 @@ async def send_to_dump(client, user_id, link, msg):
             logging.error(f"Invalid dump_id format in database: {dump_id}")
             return
         
-        # Peer resolution
-        user_client = user_clients.get(user_id, {}).get("client")
-        if user_client:
-            try:
-                await user_client.get_chat(dump_id)
-            except Exception as e:
-                logging.debug(f"User client peer resolution failed for dump: {e}")
-
         # Verify bot access to dump channel
         try:
-            # First try to resolve the peer by joining or checking chat
-            # This helps if the bot has been added but hasn't "seen" the chat yet
-            chat = await client.get_chat(dump_id)
-            logging.debug(f"Bot has access to dump channel: {chat.title} ({dump_id})")
+            # We use get_chat to "resolve" the peer. 
+            # If this fails with CHANNEL_INVALID, it means the bot doesn't know this ID yet
+            await client.get_chat(dump_id)
+        except pyrogram.errors.ChannelInvalid:
+            logging.error(f"Bot cannot access dump channel {dump_id}. Ensure the bot is an ADMIN in that channel and has been added to it.")
+            return
         except Exception as e:
-            logging.warning(f"Bot cannot access dump channel {dump_id} directly: {e}. Attempting fallback...")
-            # If get_chat fails, we might still be able to send if we have the peer in database
-            # but usually CHANNEL_INVALID means we need to "see" it.
+            logging.warning(f"Error resolving dump channel {dump_id}: {e}")
         
         # 2. Create the Header
         header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
@@ -110,14 +102,25 @@ async def send_to_dump(client, user_id, link, msg):
         
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
+active_sessions = set() # Track sessions currently in use
 _cleanup_task_started = False
 
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
     now = time.time()
+    
     if user_id in user_clients:
-        user_clients[user_id]["last_used"] = now
-        return user_clients[user_id]["client"]
+        client = user_clients[user_id]["client"]
+        if client.is_connected:
+            user_clients[user_id]["last_used"] = now
+            return client
+        else:
+            # Reconnect or cleanup dead client
+            try:
+                await client.stop()
+            except:
+                pass
+            del user_clients[user_id]
 
     client = Client(
         f"user_{user_id}",
@@ -142,15 +145,24 @@ async def cleanup_user_clients():
         now = time.time()
         to_remove = []
         for user_id, data in user_clients.items():
+            # Don't cleanup if currently in use
+            if user_id in active_sessions:
+                data["last_used"] = now # Refresh last_used
+                continue
+                
             if now - data["last_used"] > 600: # 10 minutes
                 to_remove.append(user_id)
 
         for user_id in to_remove:
-            client = user_clients.pop(user_id)["client"]
-            try:
-                await client.stop()
-            except Exception:
-                pass
+            if user_id in active_sessions: # Double check
+                continue
+            data = user_clients.pop(user_id, None)
+            if data:
+                client = data["client"]
+                try:
+                    await client.stop()
+                except Exception:
+                    pass
 
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
 from bot.ads import show_ad
@@ -478,6 +490,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                 if is_private or is_group or is_story:
                     session_str = user.get('phone_session_string') if user else None
                     if session_str:
+                        active_sessions.add(user_id)
                         user_client = await get_user_client(user_id, session_str)
                 else:
                     user_client = client
@@ -485,7 +498,15 @@ async def download_handler(client, message, link_override=None, processed_albums
                 if not user_client:
                     await update_status(status_msg, "❌ Session error. Please /login again.")
                     return None 
-
+                
+                # Double check client connection
+                if not user_client.is_connected:
+                    try:
+                        await user_client.start()
+                    except Exception as e:
+                        logging.error(f"Failed to restart user_client: {e}")
+                        await update_status(status_msg, "❌ Session disconnected. Please try again.")
+                        return None
                 try:
                     if is_story:
                         msg = await user_client.get_stories(chat_id, message_id)
@@ -494,6 +515,13 @@ async def download_handler(client, message, link_override=None, processed_albums
                 except AuthKeyUnregistered:
                     from bot.database import update_user
                     await update_user(user_id, {"phone_session_string": None})
+                    # Cleanup the client from cache
+                    if user_id in user_clients:
+                        try:
+                            await user_clients[user_id]["client"].stop()
+                        except:
+                            pass
+                        del user_clients[user_id]
                     await update_status(status_msg, "❌ Your session has expired. Please /login again.")
                     return None
                 except (FloodWait, FloodPremiumWait) as e:
@@ -803,7 +831,16 @@ async def download_handler(client, message, link_override=None, processed_albums
     except Exception as e:
         logging.error(f"Download handler error: {e}")
         if 'status_msg' in locals():
-            await update_status(status_msg, f"❌ Error: {str(e)}")
+            try:
+                await update_status(status_msg, f"❌ Error: {str(e)}")
+            except:
+                pass
+    finally:
+        active_downloads.discard(user_id)
+        active_sessions.discard(user_id)
+        cancel_flags.discard(user_id)
+        if 'status_msg' in locals() and hasattr(progress_bar, "data"):
+            progress_bar.data.pop(status_msg.id, None)
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))
 async def upgrade_prompt_callback(client, callback_query):

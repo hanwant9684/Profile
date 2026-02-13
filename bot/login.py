@@ -183,11 +183,16 @@ async def handle_login_steps(client, message: Message):
                 await message.reply("Two-Step Verification enabled. Send your **Cloud Password**.")
                 return
             except PhoneCodeInvalid:
-                await message.reply("Invalid code. Try again.")
+                await message.reply("❌ **Invalid Code.** Please check and try again.")
                 return
             except Exception as e:
-                logger.error(f"Login code check error: {e}")
-                await message.reply(f"Login failed: {e}")
+                error_msg = str(e)
+                if "PHONE_CODE_EXPIRED" in error_msg:
+                    await message.reply("⏰ **Code Expired.** The OTP you entered is no longer valid. Please start the /login process again.")
+                else:
+                    logger.error(f"Login code check error: {e}")
+                    await message.reply(f"❌ **Login failed:** {e}")
+                
                 try:
                     await temp_client.disconnect()
                 except Exception:
@@ -296,7 +301,13 @@ async def logout(client, message):
         try:
             from pyrogram import Client
             from bot.config import API_ID, API_HASH
-            temp_client = Client(f"logout_{user_id}", session_string=user.get('phone_session_string'), api_id=API_ID, api_hash=API_HASH, in_memory=True)
+            temp_client = Client(
+                f"logout_{user_id}", 
+                session_string=user.get('phone_session_string'), 
+                api_id=API_ID, 
+                api_hash=API_HASH, 
+                in_memory=True
+            )
             await temp_client.start()
             await temp_client.log_out()
 

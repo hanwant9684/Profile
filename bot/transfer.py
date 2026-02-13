@@ -60,6 +60,9 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         return None
 
     try:
+        if not client.is_connected:
+            await client.start()
+            
         # Resolve chat_id: if it's "me", we keep it as is, otherwise ensure it's an int
         if isinstance(chat_id, str) and chat_id.lower() == "me":
             target_id = "me"

@@ -45,10 +45,13 @@ class RichAdsManager:
                     if ads and len(ads) > 0:
                         logger.info(f"RichAds: Ad received for user {telegram_id}")
                         return ads
-                    logger.info(f"RichAds: No ads available for user {telegram_id}")
+                    logger.debug(f"RichAds: No ads available for user {telegram_id}")
                     return None
                 else:
-                    logger.warning(f"RichAds: API Error {response.status} for user {telegram_id}")
+                    if response.status == 204:
+                        logger.debug(f"RichAds: No ads (204) for user {telegram_id}")
+                    else:
+                        logger.warning(f"RichAds: API Error {response.status} for user {telegram_id}")
                     return None
         except Exception as e:
             logger.error(f"RichAds: Fetch error for user {telegram_id}: {e}")
