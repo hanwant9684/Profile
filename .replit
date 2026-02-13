@@ -1,7 +1,7 @@
 modules = ["python-3.11"]
 [nix]
 channel = "stable-25_05"
-packages = ["unzip", "redis"]
+packages = ["cacert", "libuv", "libyaml", "postgresql", "redis", "unzip"]
 
 [agent]
 expertMode = true
@@ -22,13 +22,18 @@ args = "Main Bot"
 name = "Main Bot"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
 
-[workflows.workflow.metadata]
-outputType = "console"
-
 [[ports]]
 localPort = 6379
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+REDIS_URL = "redis://localhost:6379"
