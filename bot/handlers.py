@@ -49,10 +49,6 @@ async def send_to_dump(client, user_id, link, msg):
         # 2. Create the Header
         header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
         original_caption = msg.text or msg.caption or ""
-        # If it's a story, text/caption might be None
-        if not original_caption and type(msg).__name__ == "Story":
-             original_caption = "Story Media"
-             
         full_caption = (header + original_caption)[:1020]
 
         # Ensure bot has access by trying to resolve the peer first if needed, 
@@ -82,28 +78,20 @@ async def send_to_dump(client, user_id, link, msg):
             try:
                 if msg.media:
                     await client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
-                elif msg.text:
-                    # It's JUST text
-                    await client.send_message(dump_id, full_caption)
-                elif type(msg).__name__ == "Story":
-                    # For stories, copy_message might fail if bot isn't the owner or has no access
-                    # But we try anyway or send the caption if it's just media we can't copy
-                    await client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
                 else:
-                    logging.warning(f"Skipping dump for message {msg.id} as it has no media or text")
+                    # It's JUST text, copy_message with caption fails. Send a new message instead.
+                    await client.send_message(dump_id, full_caption)
             except Exception as e:
                 logging.error(f"Main bot copy_message failed: {e}")
                 # Fallback: try with user_client
                 user_client = user_clients.get(user_id, {}).get("client")
                 if user_client:
                     logging.info(f"Trying copy_message with user client for user {user_id}")
+                    # Using client.copy_message instead of msg.copy to ensure correct client is used
                     if msg.media:
                         await user_client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
-                    elif msg.text:
-                        await user_client.send_message(dump_id, full_caption)
                     else:
-                        # Story or other
-                        await user_client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+                        await user_client.send_message(dump_id, full_caption)
                 else:
                     raise
             
@@ -529,29 +517,26 @@ async def download_handler(client, message, link_override=None, processed_albums
                     await update_user(user_id, {"phone_session_string": None})
                     # Cleanup the client from cache and stop it immediately
                     if user_id in user_clients:
-                        client_data = user_clients.pop(user_id, None)
-                        if client_data:
-                            try:
-                                await client_data["client"].stop()
-                            except:
-                                pass
+                        client_data = user_clients.pop(user_id)
+                        try:
+                            await client_data["client"].stop()
+                        except:
+                            pass
                     await update_status(status_msg, "❌ Your session has expired or was revoked. Please /login again.")
                     return None
                 except (FloodWait, FloodPremiumWait) as e:
                     await message.reply(f"⏳ **Telegram Security Delay**\n\nFor security reasons, you must wait `{e.value}` seconds before downloading. Please check the notification Telegram sent to your other devices and click **'Allow'** or **'Yes, it's me'** to authorize this export.")
                     return None
                 except Exception as e:
-                    error_str = str(e)
-                    if "AUTH_KEY_UNREGISTERED" in error_str or "401" in error_str:
+                    if "AUTH_KEY_UNREGISTERED" in str(e):
                         from bot.database import update_user
                         await update_user(user_id, {"phone_session_string": None})
                         if user_id in user_clients:
-                            client_data = user_clients.pop(user_id, None)
-                            if client_data:
-                                try:
-                                    await client_data["client"].stop()
-                                except:
-                                    pass
+                            client_data = user_clients.pop(user_id)
+                            try:
+                                await client_data["client"].stop()
+                            except:
+                                pass
                         await update_status(status_msg, "❌ Session expired. Please /login again.")
                         return None
                     if "TAKEOUT_INIT_DELAY" in str(e):
@@ -792,14 +777,6 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                                     await update_user_channel(user_id, channel_id)
                                     logging.info(f"Created private channel {channel_id} and added bot for user {user_id}")
-                                except pyrogram.errors.UserRestricted:
-                                    logging.error(f"User {user_id} is spamreported and cannot create channels.")
-                                    # Fallback 1: Try Saved Messages
-                                    upload_client = user_client
-                                    destination_id = "me"
-                                    using_user_session = True
-                                    logging.info(f"Falling back to Saved Messages for user {user_id}")
-                                    channel_id = None
                                 except Exception as e:
                                     logging.error(f"Failed to create private channel for user {user_id}: {e}")
                                     # Fallback 1: Try Saved Messages
@@ -839,26 +816,20 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         processed_count += 1
                     except Exception as e:
-                        error_str = str(e)
-                        if "AUTH_KEY_UNREGISTERED" in error_str or "401" in error_str:
+                        if "AUTH_KEY_UNREGISTERED" in str(e):
                             from bot.database import update_user
                             await update_user(user_id, {"phone_session_string": None})
                             if user_id in user_clients:
-                                client_data = user_clients.pop(user_id, None)
-                                if client_data:
-                                    try: await client_data["client"].stop()
-                                    except: pass
+                                client_data = user_clients.pop(user_id)
+                                try: await client_data["client"].stop()
+                                except: pass
                             await update_status(status_msg, "❌ Session expired. Please /login again.")
                             return None
 
                         if str(e) == "StopProcess":
                             cancel_flags.discard(user_id)
-                            if path:
-                                if isinstance(path, list):
-                                    for p in path:
-                                        if os.path.exists(p): os.remove(p)
-                                elif os.path.exists(path):
-                                    os.remove(path)
+                            if path and os.path.exists(path):
+                                os.remove(path)
                             if thumb_path and os.path.exists(thumb_path):
                                 os.remove(thumb_path)
                             await update_status(status_msg, "🛑 Process cancelled.")
@@ -866,12 +837,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                         logging.error(f"Download/Upload error: {e}")
                         continue
                     finally:
-                        if path:
-                            if isinstance(path, list):
-                                for p in path:
-                                    if os.path.exists(p): os.remove(p)
-                            elif os.path.exists(path):
-                                os.remove(path)
+                        if path and os.path.exists(path):
+                            os.remove(path)
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
@@ -918,7 +885,7 @@ async def upgrade(client, message):
         "> 🔥 **Lifetime** - $25\n"
         "> • All Premium Features\n"
         "> • Priority Support\n\n"
-        "💳 **Payment Details**\n"
+        "> 💳 **Payment Details**\n"
         f"🪙 **Crypto(Binance)**: `{CRYPTO_ADDRESS}`\n\n"
         f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
         f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
