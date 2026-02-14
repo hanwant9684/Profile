@@ -366,9 +366,18 @@ async def batch_handler(client, message):
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
 async def download_handler(client, message, link_override=None, processed_albums=None):
     user_id = message.from_user.id
+    username = message.from_user.username
+    full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
     link = link_override or message.text.strip()
 
+    from bot.database import create_user
     user = await get_user(user_id)
+    if not user:
+        user = await create_user(user_id, username, full_name)
+    elif user.get("username") != username or user.get("full_name") != full_name:
+        await create_user(user_id, username, full_name)
+        user = await get_user(user_id)
+
     if user and user.get("role") == "banned":
         await message.reply("❌ **You are banned from using this bot.**")
         return

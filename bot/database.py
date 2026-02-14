@@ -47,9 +47,12 @@ async def init_db():
             redis_client = None
         
         async with pool.acquire() as conn:
+            # Main table creation
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
                     role TEXT DEFAULT 'free',
                     downloads_today INTEGER DEFAULT 0,
                     last_download_date DATE,
@@ -66,6 +69,13 @@ async def init_db():
                 )
             ''')
             
+            # Auto-migration: Add columns if they don't exist in existing table
+            try:
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
+            except Exception as e:
+                logger.info(f"Migration notice (likely columns already exist): {e}")
+
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
@@ -139,21 +149,25 @@ async def get_user(user_id) -> Optional[Dict]:
         logger.error(f"Error getting user {user_id}: {e}")
         return None
 
-async def create_user(user_id) -> Optional[Dict]:
+async def create_user(user_id, username=None, full_name=None) -> Optional[Dict]:
     try:
         now = datetime.now()
         today = now.date()
         
         async with pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO users (telegram_id, role, downloads_today, last_download_date, 
+                INSERT INTO users (telegram_id, username, full_name, role, downloads_today, last_download_date, 
                                    is_agreed_terms, is_banned, ads_today, created_at, updated_at)
-                VALUES ($1, 'free', 0, $2, FALSE, FALSE, 0, $3, $4)
-                ON CONFLICT (telegram_id) DO NOTHING
-            ''', int(user_id), today, now, now)
+                VALUES ($1, $2, $3, 'free', 0, $4, FALSE, FALSE, 0, $5, $6)
+                ON CONFLICT (telegram_id) DO UPDATE SET 
+                    username = EXCLUDED.username,
+                    full_name = EXCLUDED.full_name,
+                    updated_at = EXCLUDED.updated_at
+            ''', int(user_id), username, full_name, today, now, now)
         
         # Clear cache
-        await redis_client.delete(f"user:{user_id}")
+        if redis_client:
+            await redis_client.delete(f"user:{user_id}")
         return await get_user(user_id)
     except Exception as e:
         logger.error(f"Error creating user {user_id}: {e}")

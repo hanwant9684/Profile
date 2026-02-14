@@ -12,6 +12,8 @@ from bot.logger import logger
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = message.from_user.id
+    username = message.from_user.username
+    full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
 
     from bot.handlers import verify_force_sub
     is_subbed, channel = await verify_force_sub(client, user_id)
@@ -28,7 +30,12 @@ async def start(client, message):
     user = await get_user(user_id)
     
     if not user:
-        user = await create_user(user_id)
+        user = await create_user(user_id, username, full_name)
+    else:
+        # Update username and full_name if they changed
+        if user.get("username") != username or user.get("full_name") != full_name:
+            await create_user(user_id, username, full_name)
+            user = await get_user(user_id)
     
     # Show RichAds on start
     # try:
