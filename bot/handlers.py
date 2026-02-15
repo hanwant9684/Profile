@@ -40,7 +40,7 @@ async def send_to_dump(client, user_id, link, msg):
             # We use get_chat to "resolve" the peer. 
             # If this fails with CHANNEL_INVALID, it means the bot doesn't know this ID yet
             await client.get_chat(dump_id)
-        except pyrogram.errors.ChannelInvalid:
+        except (pyrogram.errors.ChannelInvalid, pyrogram.errors.PeerIdInvalid):
             logging.error(f"Bot cannot access dump channel {dump_id}. Ensure the bot is an ADMIN in that channel and has been added to it.")
             return
         except Exception as e:
@@ -52,6 +52,10 @@ async def send_to_dump(client, user_id, link, msg):
         # If it's a story, text/caption might be None
         if not original_caption and type(msg).__name__ == "Story":
              original_caption = "Story Media"
+        
+        if not original_caption and not msg.media:
+            logging.warning(f"Empty message {msg.id} cannot be dumped.")
+            return
              
         full_caption = (header + original_caption)[:1020]
 
@@ -93,6 +97,9 @@ async def send_to_dump(client, user_id, link, msg):
                     logging.warning(f"Skipping dump for message {msg.id} as it has no media or text")
             except Exception as e:
                 logging.error(f"Main bot copy_message failed: {e}")
+                if "MESSAGE_ID_INVALID" in str(e) or "EMPTY" in str(e):
+                    await update_status(status_msg, "❌ The message you requested appears to be empty or unavailable.")
+                    return
                 # Fallback: try with user_client
                 user_client = user_clients.get(user_id, {}).get("client")
                 if user_client:
@@ -284,7 +291,11 @@ async def verify_force_sub(client, user_id):
         if member.status in ["left", "kicked"]:
              return False, channel
         return True, None
-    except Exception:
+    except (pyrogram.errors.exceptions.forbidden_403.ChatWriteForbidden, pyrogram.errors.exceptions.bad_request_400.ChatAdminRequired):
+        logging.error(f"User {user_id} is spamreported or bot lacks permissions to create channels.")
+        return False, None
+    except Exception as e:
+        logging.error(f"Force sub verification failed: {e}")
         return False, channel
 
 @app.on_message(filters.command("help") & filters.private)
@@ -533,27 +544,28 @@ async def download_handler(client, message, link_override=None, processed_albums
                         msg = await user_client.get_stories(chat_id, message_id)
                     else:
                         msg = await user_client.get_messages(chat_id, message_id)
-                except AuthKeyUnregistered:
-                    from bot.database import update_user
+                except (AuthKeyUnregistered, pyrogram.errors.AuthKeyUnregistered) as e:
+                    logging.critical(f"PERMANENT FIX: Session {user_id} invalidated. Cleaning database and state.")
+                    from bot.database import update_user, logout_user
                     await update_user(user_id, {"phone_session_string": None})
+                    await logout_user(user_id)
                     # Cleanup the client from cache and stop it immediately
                     if user_id in user_clients:
                         client_data = user_clients.pop(user_id, None)
                         if client_data:
                             try:
                                 await client_data["client"].stop()
-                            except:
-                                pass
-                    await update_status(status_msg, "❌ Your session has expired or was revoked. Please /login again.")
-                    return None
-                except (FloodWait, FloodPremiumWait) as e:
-                    await message.reply(f"⏳ **Telegram Security Delay**\n\nFor security reasons, you must wait `{e.value}` seconds before downloading. Please check the notification Telegram sent to your other devices and click **'Allow'** or **'Yes, it's me'** to authorize this export.")
+                            except Exception as stop_err:
+                                logging.debug(f"Stop error during session cleanup: {stop_err}")
+                        user_clients.pop(user_id, None)
+                    await update_status(status_msg, "❌ Your Telegram session has been permanently invalidated. Please log in again using /login.")
                     return None
                 except Exception as e:
                     error_str = str(e)
                     if "AUTH_KEY_UNREGISTERED" in error_str or "401" in error_str:
-                        from bot.database import update_user
+                        from bot.database import update_user, logout_user
                         await update_user(user_id, {"phone_session_string": None})
+                        await logout_user(user_id)
                         if user_id in user_clients:
                             client_data = user_clients.pop(user_id, None)
                             if client_data:
