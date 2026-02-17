@@ -89,8 +89,8 @@ async def login_start(client, message):
         await message.reply("Please agree to the Terms & Conditions first using /start.")
         return
 
-    if user.get('phone_session_string'):
-        await message.reply("You are already logged in! Contact support if you need to re-login.")
+    if user and user.get('phone_session_string'):
+        await message.reply("You are already logged in! If you want to re-login, please use /logout first.")
         return
 
     # Check for login state limit to prevent resource exhaustion
