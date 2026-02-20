@@ -550,7 +550,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         msg = await user_client.get_stories(chat_id, message_id)
                     else:
                         msg = await user_client.get_messages(chat_id, message_id)
-                except (AuthKeyUnregistered, pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.exceptions.unauthorized_401.AuthKeyUnregistered) as e:
+                except (AuthKeyUnregistered, pyrogram.errors.AuthKeyUnregistered) as e:
                     logging.critical(f"Session {user_id} invalidated. Cleaning database.")
                     from bot.database import logout_user
                     await logout_user(user_id)
@@ -565,9 +565,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                     return None
                 except Exception as e:
                     error_str = str(e)
-                    if "StopProcess" in error_str:
-                        logging.info(f"Process stopped for user {user_id}")
-                        return None
                     if "AUTH_KEY_UNREGISTERED" in error_str or "401" in error_str:
                         from bot.database import logout_user
                         await logout_user(user_id)
