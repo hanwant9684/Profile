@@ -18,6 +18,7 @@ from bot.config import (
 # Dump channel 
 async def send_to_dump(client, user_id, link, msg):
     """Fetches dump channel from database and sends a copy"""
+    return #Remove this line for dump channel activation.
     # 1. Fetch the setting from Database
     from bot.database import get_setting
     res = await get_setting("dump_channel_id")
