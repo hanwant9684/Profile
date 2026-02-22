@@ -48,6 +48,7 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
 
 async def get_dump_channel_id():
     """Pull dump_channel_id from Redis for instant access"""
+    return None #Remove this line for dump channel activation.
     try:
         cached_val = await redis_client.get("setting:dump_channel_id")
         if cached_val:
