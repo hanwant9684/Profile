@@ -111,8 +111,8 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
             file_path,
             **upload_kwargs
         )
-    except AuthKeyUnregistered:
-        logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}")
+    except (AuthKeyUnregistered, pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.SessionRevoked, pyrogram.errors.exceptions.unauthorized_401.AuthKeyUnregistered) as e:
+        logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}: {e}")
         raise
     except Exception:
         logging.exception("Upload Error:")

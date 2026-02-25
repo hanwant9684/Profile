@@ -317,7 +317,11 @@ async def help_command(client, message):
         "Free users: 5 files/day\n"
         "Premium users: Unlimited"
     )
-    await message.reply(help_text)
+    await message.reply(help_text, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Owner", url=f"https://t.me/Wolfy0046")],
+            [InlineKeyboardButton("Support Chat", url=f"https://t.me/Wolfy004chatbot")]
+        ])
+                       )
 
 @app.on_message(filters.command("batch") & filters.private)
 async def batch_handler(client, message):
@@ -379,6 +383,9 @@ async def batch_handler(client, message):
         except Exception as e:
             logging.error(f"Batch loop error for link {link}: {e}")
             continue
+    
+    # Show ad after whole batch is complete
+    await show_ad(client, user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
 async def download_handler(client, message, link_override=None, processed_albums=None):
@@ -551,8 +558,11 @@ async def download_handler(client, message, link_override=None, processed_albums
                         msg = await user_client.get_stories(chat_id, message_id)
                     else:
                         msg = await user_client.get_messages(chat_id, message_id)
-                except (AuthKeyUnregistered, pyrogram.errors.AuthKeyUnregistered) as e:
-                    logging.critical(f"Session {user_id} invalidated. Cleaning database.")
+                    
+                    # Verify session is still valid by making a small call
+                    await user_client.get_me()
+                except (AuthKeyUnregistered, pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.SessionRevoked, pyrogram.errors.exceptions.unauthorized_401.AuthKeyUnregistered) as e:
+                    logging.critical(f"Session {user_id} invalidated: {e}. Cleaning database.")
                     from bot.database import logout_user
                     await logout_user(user_id)
                     if user_id in user_clients:
@@ -566,7 +576,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                     return None
                 except Exception as e:
                     error_str = str(e)
-                    if "AUTH_KEY_UNREGISTERED" in error_str or "401" in error_str:
+                    if "AUTH_KEY_UNREGISTERED" in error_str or "SESSION_REVOKED" in error_str or "401" in error_str:
+                        logging.error(f"Session error for {user_id}: {error_str}")
                         from bot.database import logout_user
                         await logout_user(user_id)
                         if user_id in user_clients:
@@ -616,8 +627,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                     return None
                 if not is_story and getattr(msg, "media_group_id", None):
                     target_messages = await user_client.get_media_group(chat_id, message_id)
+                    is_media_group = True
                 else:
                     target_messages = [msg]
+                    is_media_group = False
 
                 user_data = await get_user(user_id)
                 if user_data.get("role") == "free":
@@ -640,6 +653,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                             
                             processed_count = 1
                         await status_msg.delete()
+                        # Show ad after direct extraction
+                        await show_ad(client, user_id)
                         return msg 
                     except Exception as e:
                         logging.error(f"Direct extraction failed: {e}")
@@ -901,6 +916,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                             os.remove(thumb_path)
 
                 await status_msg.delete()
+                # Show ad after download handler completes (covers single and media groups)
+                await show_ad(client, user_id)
                 return msg 
             finally:
                 active_downloads.discard(user_id)
