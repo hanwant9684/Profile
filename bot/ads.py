@@ -109,7 +109,7 @@ class RichAdsManager:
             message = ad.get("message", "")
             brand = ad.get("brand", "")
             
-            caption = f"📢 **{title}**\n\n{message}"
+            caption = f"📢 #ad **{title}**\n\n{message}"
             if brand:
                 caption += f"\n\n🏷️ {brand}"
 
