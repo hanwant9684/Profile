@@ -74,6 +74,7 @@ class RichAdsManager:
 
     async def show_ad(self, client, user_id, lang_code="en"):
         """Fetch and show RichAd to user"""
+        return # Ads disabled
         if not self.is_enabled():
             return
 
