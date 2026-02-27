@@ -9,11 +9,12 @@ async def update_status(msg, text):
         logging.debug(f"Status update failed: {e}")
 
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
-from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count
+from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID): return
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"): return
     
     total_users = await get_user_count()
     
@@ -25,7 +26,8 @@ async def stats(client, message):
 
 @app.on_message(filters.command("killall") & filters.private)
 async def kill_all_processes(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID): return
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"): return
     
     from bot.config import cancel_flags
     
@@ -42,7 +44,8 @@ async def kill_all_processes(client, message):
 
 @app.on_message(filters.command("setrole") & filters.private)
 async def setrole(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         await message.reply("⛔ Authorized personnel only.")
         return
         
@@ -83,7 +86,8 @@ async def setrole(client, message):
 
 @app.on_message(filters.command("ban") & filters.private)
 async def ban(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     try:
@@ -95,7 +99,8 @@ async def ban(client, message):
 
 @app.on_message(filters.command("unban") & filters.private)
 async def unban(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     try:
@@ -107,7 +112,8 @@ async def unban(client, message):
 
 @app.on_message(filters.command("set_force_sub") & filters.private)
 async def set_force_sub(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
     
     try:
@@ -119,7 +125,8 @@ async def set_force_sub(client, message):
 
 @app.on_message(filters.command("set_dump") & filters.private)
 async def set_dump(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
     
     try:
@@ -131,7 +138,8 @@ async def set_dump(client, message):
 
 @app.on_message(filters.command("settings") & filters.private)
 async def view_settings(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     fs = await get_setting("force_sub_channel")
@@ -152,7 +160,8 @@ async def view_settings(client, message):
 
 @app.on_message(filters.command("broadcast") & filters.private)
 async def broadcast(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     if not message.reply_to_message:
@@ -218,15 +227,16 @@ async def broadcast(client, message):
 @app.on_message(filters.command("premium_users") & filters.private, group=-1)
 async def list_premium_users(client, message):
     user_id = message.from_user.id
+    user = await get_user(user_id)
     
-    if OWNER_ID is None or int(user_id) != int(OWNER_ID):
+    if (OWNER_ID is None or int(user_id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     try:
         from bot.database import pool
         from datetime import datetime
         async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM users WHERE role = 'premium' AND premium_expiry_date >= $1", datetime.now())
+            rows = await conn.fetch("SELECT telegram_id, username, full_name, premium_expiry_date FROM users WHERE role = 'premium' AND (premium_expiry_date IS NULL OR premium_expiry_date >= $1)", datetime.now())
         premium_users = [dict(row) for row in rows]
         
         if not premium_users:
@@ -234,31 +244,14 @@ async def list_premium_users(client, message):
             return
 
         text = "💎 **Premium Users List**\n\n"
-        for user in premium_users:
-            u_id = user.get("telegram_id")
-            expiry = user.get("premium_expiry_date", "Never")
+        for user_data in premium_users:
+            u_id = user_data.get("telegram_id")
+            expiry = user_data.get("premium_expiry_date", "Never")
             
-            name = "Unknown"
+            name = user_data.get("full_name") or "No Name"
             username_str = ""
-            
-            try:
-                user_key = int(u_id) if str(u_id).strip("-").isdigit() else u_id
-                tg_user = await client.get_users(user_key)
-                
-                name = tg_user.first_name or "No Name"
-                if tg_user.last_name:
-                    name += f" {tg_user.last_name}"
-                
-                if tg_user.username:
-                    username_str = f" (@{tg_user.username})"
-            except Exception as e:
-                name = user.get("first_name") or "Unknown"
-                if user.get("last_name"):
-                    name += f" {user['last_name']}"
-                
-                username = user.get("username")
-                if username:
-                    username_str = f" (@{username})"
+            if user_data.get("username"):
+                username_str = f" (@{user_data['username']})"
                 
             text += f"👤 Name: **{name}**{username_str}\n🆔 ID: `{u_id}`\n📅 Expiry: `{expiry}`\n\n"
         
@@ -271,4 +264,3 @@ async def list_premium_users(client, message):
         await message.reply(f"Error: {e}")
     
     message.stop_propagation()
-
