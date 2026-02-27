@@ -961,7 +961,7 @@ async def upgrade(client, message):
         "> • All Premium Features\n"
         "> • Priority Support\n\n"
         "> 💳 **Payment Details**\n"
-        f"🪙 **Crypto(Binance)**: `{CRYPTO_ADDRESS}`\n\n"
+        f"🪙 **Crypto(Binance)**: [Crpto Payment / Binance]({CRYPTO_ADDRESS})\n\n"
         f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
         f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
         f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
