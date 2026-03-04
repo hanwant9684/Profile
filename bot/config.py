@@ -42,6 +42,7 @@ SUPPORT_CHAT_LINK = os.environ.get("SUPPORT_CHAT_LINK", "https://t.me/Wolfy004ch
 PAYPAL_LINK = os.environ.get("PAYPAL_LINK", "Contact Owner")
 UPI_ID = os.environ.get("UPI_ID", "Contact Owner")
 APPLE_PAY_ID = os.environ.get("APPLE_PAY_ID", "Contact Owner")
+BINANCE = os.environ.get("BINANCE", "Contact Owner")
 CRYPTO_ADDRESS = os.environ.get("CRYPTO_ADDRESS", "Contact Owner")
 CARD_PAYMENT_LINK = os.environ.get("CARD_PAYMENT_LINK", "Contact Owner")
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
