@@ -945,7 +945,7 @@ async def upgrade_prompt_callback(client, callback_query):
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
-    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
+    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK, BINANCE
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
@@ -961,7 +961,8 @@ async def upgrade(client, message):
         "> • All Premium Features\n"
         "> • Priority Support\n\n"
         "> 💳 **Payment Details**\n"
-        f"🪙 **Crypto(Binance)**: [Crpto Payment / Binance]({CRYPTO_ADDRESS})\n\n"
+        f"🪙 **Crypto**: [Crpto USDT]({CRYPTO_ADDRESS})\n\n"
+        f"🅱️ **Binance**: [Biannce QR Code]({BINANCE})\n\n"
         f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
         f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
         f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
