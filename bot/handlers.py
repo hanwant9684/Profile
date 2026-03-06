@@ -9,7 +9,8 @@ import pyrogram
 from pyrogram import filters, Client
 from pyrogram.client import Client as ClientObject
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
-from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait
+from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait, SessionRevoked
+from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
     OWNER_ID, global_upload_semaphore, cancel_flags
@@ -403,7 +404,7 @@ async def download_handler(client, message, link_override=None, processed_albums
         user = await get_user(user_id)
 
     if user and user.get("role") == "banned":
-        await message.reply("❌ **You are banned from using this bot. for ⭕ unban contact here ↪️: @Wolfy0046.**")
+        await message.reply("❌ **You are banned from using this bot.**")
         return
 
     chat_id = None
@@ -561,22 +562,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                     
                     # Verify session is still valid by making a small call
                     await user_client.get_me()
-                except (AuthKeyUnregistered, pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.SessionRevoked, pyrogram.errors.exceptions.unauthorized_401.AuthKeyUnregistered) as e:
-                    logging.critical(f"Session {user_id} invalidated: {e}. Cleaning database.")
-                    from bot.database import logout_user
-                    await logout_user(user_id)
-                    if user_id in user_clients:
-                        client_data = user_clients.pop(user_id, None)
-                        if client_data:
-                            try:
-                                await client_data["client"].stop()
-                            except:
-                                pass
-                    await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
-                    return None
                 except Exception as e:
                     error_str = str(e)
-                    if "AUTH_KEY_UNREGISTERED" in error_str or "SESSION_REVOKED" in error_str or "401" in error_str:
+                    if any(kw in error_str for kw in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "401"]):
                         logging.error(f"Session error for {user_id}: {error_str}")
                         from bot.database import logout_user
                         await logout_user(user_id)
@@ -587,10 +575,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     await client_data["client"].stop()
                                 except:
                                     pass
-                        await update_status(status_msg, "❌ Session expired or revoked. Please /login again.")
+                        await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
                         return None
                     
-                    if "TAKEOUT_INIT_DELAY" in str(e):
+                    if "TAKEOUT_INIT_DELAY" in error_str:
                         wait_time = "24 hours"
                         match = re.search(r"in (\d+) seconds", str(e))
                         if match:
@@ -606,6 +594,11 @@ async def download_handler(client, message, link_override=None, processed_albums
                             f"Check your other Telegram devices for a notification about an **'Account Export Request'**. Click **'Allow'** or **'Yes, it's me'** to potentially speed up this process or authorize the access."
                         )
                         return None
+                    
+                    # Direct extraction fallback
+                    if "msg.copy" in str(e) or "copy_media_group" in str(e):
+                         raise e
+
                     await update_status(status_msg, f"❌ Error: {str(e)}")
                     return None
 
@@ -655,7 +648,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await status_msg.delete()
                         # Show ad after direct extraction
                         await show_ad(client, user_id)
+                        active_downloads.discard(user_id)
                         return msg 
+                    except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
+                        raise e
                     except Exception as e:
                         logging.error(f"Direct extraction failed: {e}")
                         await status_msg.edit_text("⚠️ Direct extraction failed, falling back to download/upload...")
@@ -925,6 +921,25 @@ async def download_handler(client, message, link_override=None, processed_albums
                     progress_bar.data.pop(status_msg.id, None)
 
     except Exception as e:
+        error_str = str(e)
+        if any(kw in error_str for kw in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "401"]):
+            logging.error(f"Session error for {user_id}: {error_str}")
+            from bot.database import logout_user
+            await logout_user(user_id)
+            if user_id in user_clients:
+                client_data = user_clients.pop(user_id, None)
+                if client_data:
+                    try:
+                        await client_data["client"].stop()
+                    except:
+                        pass
+            if 'status_msg' in locals():
+                try:
+                    await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
+                except:
+                    pass
+            return None
+        
         logging.error(f"Download handler error: {e}")
         if 'status_msg' in locals():
             try:
@@ -945,7 +960,7 @@ async def upgrade_prompt_callback(client, callback_query):
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
-    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK, BINANCE
+    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
@@ -961,8 +976,7 @@ async def upgrade(client, message):
         "> • All Premium Features\n"
         "> • Priority Support\n\n"
         "> 💳 **Payment Details**\n"
-        f"🪙 **Crypto**: [Crpto USDT]({CRYPTO_ADDRESS})\n\n"
-        f"🅱️ **Binance**: [Biannce QR Code]({BINANCE})\n\n"
+        f"🪙 **Crypto(Binance)**: [Crpto Payment / Binance]({CRYPTO_ADDRESS})\n\n"
         f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
         f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
         f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
