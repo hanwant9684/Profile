@@ -94,15 +94,28 @@ async def main():
             except Exception as e:
                 logging.debug(f"DC Check Error: {e}")
 
-        async def main_bot():
-            asyncio.create_task(check_dc_later())
-            await app.start()
-            # This is to keep the event loop running while pyrogram's idle() handles signals
-            from pyrogram.methods.utilities.idle import idle
-            await idle()
-            await app.stop()
+        # FIX: Startup retry logic for TCP connection resilience
+        async def start_bot_with_retry(max_retries=5):
+            for attempt in range(1, max_retries + 1):
+                try:
+                    asyncio.create_task(check_dc_later())
+                    await app.start()
+                    print(f"✅ Bot started successfully on attempt {attempt}")
+                    from pyrogram.methods.utilities.idle import idle
+                    await idle()
+                    await app.stop()
+                    return True
+                except Exception as e:
+                    logging.error(f"Bot start attempt {attempt}/{max_retries} failed: {e}")
+                    if attempt < max_retries:
+                        wait_time = 5 * (2 ** (attempt - 1))
+                        print(f"⏳ Retrying in {wait_time} seconds...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logging.critical(f"Bot failed to start after {max_retries} attempts")
+                        return False
 
-        await main_bot()
+        await start_bot_with_retry()
     else:
         print("Bot app not initialized due to missing config. Exiting.")
     
