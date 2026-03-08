@@ -48,7 +48,6 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "telegram_bot.db")
 
 async def get_dump_channel_id():
     """Pull dump_channel_id from Redis for instant access"""
-    return None #Remove this line for dump channel activation.
     try:
         cached_val = await redis_client.get("setting:dump_channel_id")
         if cached_val:
@@ -108,10 +107,8 @@ if missing_vars:
 # RichAds Configuration
 RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "989337")
 RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "381546")
-AD_DAILY_LIMIT_FREE = int(os.environ.get("AD_DAILY_LIMIT_FREE", 50))
-AD_DAILY_LIMIT_PREMIUM = int(os.environ.get("AD_DAILY_LIMIT_PREMIUM", 5))
-AD_DAILY_LIMIT = AD_DAILY_LIMIT_FREE # Legacy fallback
-AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
+AD_DAILY_LIMIT = int(os.environ.get("AD_DAILY_LIMIT", 500))
+AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "False").lower() == "true"
 
 # Update client with higher max_concurrent_transmissions
 app = Client(
@@ -120,8 +117,8 @@ app = Client(
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
-    sleep_threshold=120,
+    sleep_threshold=60,
     no_updates=False,
-    max_concurrent_transmissions=5,
-    workers=10
+    max_concurrent_transmissions=20,
+    workers=20
 )

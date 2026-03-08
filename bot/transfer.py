@@ -3,8 +3,7 @@ import logging
 import asyncio
 from pyrogram import Client
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
-from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
+from pyrogram.errors import FloodWait, FloodPremiumWait
 
 from bot.config import get_smart_download_workers
 
@@ -112,8 +111,8 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
             file_path,
             **upload_kwargs
         )
-    except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
-        logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}: {e}")
+    except AuthKeyUnregistered:
+        logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}")
         raise
     except Exception:
         logging.exception("Upload Error:")

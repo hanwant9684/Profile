@@ -2,10 +2,7 @@ import logging
 import html
 from typing import Optional, Dict, Any, List
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from bot.config import (
-    RICHADS_PUBLISHER_ID, RICHADS_WIDGET_ID, AD_DAILY_LIMIT_FREE, 
-    AD_DAILY_LIMIT_PREMIUM, AD_FOR_PREMIUM, get_shared_session
-)
+from bot.config import RICHADS_PUBLISHER_ID, RICHADS_WIDGET_ID, AD_DAILY_LIMIT, AD_FOR_PREMIUM, get_shared_session
 from bot.database import get_user, increment_ad_count, get_ad_count_today
 import aiohttp
 
@@ -74,7 +71,6 @@ class RichAdsManager:
 
     async def show_ad(self, client, user_id, lang_code="en"):
         """Fetch and show RichAd to user"""
-        return # Ads disabled
         if not self.is_enabled():
             return
 
@@ -86,13 +82,10 @@ class RichAdsManager:
         if user.get("role") in ["premium", "admin", "owner"] and not self.for_premium:
             return
         
-        # Check daily limit based on role
-        is_premium = user.get("role") in ["premium", "admin", "owner"]
-        limit = AD_DAILY_LIMIT_PREMIUM if is_premium else AD_DAILY_LIMIT_FREE
-        
+        # Check daily limit
         ad_count = await get_ad_count_today(user_id)
-        if ad_count >= limit:
-            logger.info(f"RichAds: Daily limit reached for user {user_id} ({ad_count}/{limit})")
+        if ad_count >= AD_DAILY_LIMIT:
+            logger.info(f"RichAds: Daily limit reached for user {user_id}")
             return
 
         ads = await self.fetch_ad(language_code=lang_code, telegram_id=str(user_id))
@@ -110,7 +103,7 @@ class RichAdsManager:
             message = ad.get("message", "")
             brand = ad.get("brand", "")
             
-            caption = f"📢 #ad **{title}**\n\n{message}"
+            caption = f"📢 **{title}**\n\n{message}"
             if brand:
                 caption += f"\n\n🏷️ {brand}"
 
