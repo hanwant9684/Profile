@@ -31,7 +31,16 @@ async def init_db():
         from bot.cloud_backup import restore_from_github_async
         await restore_from_github_async()
         
-        pool = await asyncpg.create_pool(DATABASE_URL)
+        # FIX: Proper connection pooling with thread safety
+        pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=5,
+            max_size=20,
+            command_timeout=60,
+            server_settings={
+                'application_name': 'telegram_bot'
+            }
+        )
         
         if REDIS_URL:
             try:

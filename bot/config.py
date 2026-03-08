@@ -113,7 +113,7 @@ AD_DAILY_LIMIT_PREMIUM = int(os.environ.get("AD_DAILY_LIMIT_PREMIUM", 5))
 AD_DAILY_LIMIT = AD_DAILY_LIMIT_FREE # Legacy fallback
 AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
-# Update client with higher max_concurrent_transmissions
+# FIX: Improved client configuration (keep only valid Pyrogram parameters)
 app = Client(
     "bot_session", 
     api_id=API_ID, 
@@ -122,6 +122,6 @@ app = Client(
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
-    max_concurrent_transmissions=20,
-    workers=20
+    max_concurrent_transmissions=50,
+    workers=50
 )
