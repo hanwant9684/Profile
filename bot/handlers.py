@@ -128,32 +128,6 @@ user_clients = {}
 active_sessions = set() # Track sessions currently in use
 _cleanup_task_started = False
 
-async def verify_channel_access(user_id, channel_id, user_client):
-    """Verify that channel is still valid and accessible (FIX for channel issues)"""
-    if not channel_id:
-        return False
-    
-    try:
-        chat = await user_client.get_chat(channel_id)
-        if not chat:
-            logging.warning(f"Channel {channel_id} returned None for user {user_id}")
-            return False
-        
-        # Check if bot is still a member
-        try:
-            await user_client.get_chat_member(channel_id, "me")
-        except Exception as e:
-            logging.warning(f"Bot not in channel {channel_id} for user {user_id}: {e}")
-            return False
-        
-        return True
-    except (pyrogram.errors.ChannelInvalid, pyrogram.errors.ChatAdminRequired, pyrogram.errors.UsernameNotOccupied) as e:
-        logging.warning(f"Channel {channel_id} is invalid for user {user_id}: {e}")
-        return False
-    except Exception as e:
-        logging.warning(f"Channel access verification failed for {channel_id}: {e}")
-        return False
-
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
     now = time.time()
