@@ -3,9 +3,38 @@ import logging
 import asyncio
 from pyrogram import Client
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait, FloodPremiumWait
+from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
+from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
 
 from bot.config import get_smart_download_workers
+
+def validate_file(file_path):
+    """Validate that a file exists and has content"""
+    if not os.path.exists(file_path):
+        logging.error(f"File validation failed: {file_path} does not exist")
+        return False
+    
+    file_size = os.path.getsize(file_path)
+    if file_size == 0:
+        logging.error(f"File validation failed: {file_path} is empty (0 bytes)")
+        return False
+    
+    if file_size < 512:
+        logging.warning(f"File {file_path} is suspiciously small ({file_size} bytes), may be incomplete")
+    
+    return True
+
+def cleanup_temp_files(base_path):
+    """Clean up incomplete download temp files"""
+    temp_extensions = ['.temp', '.downloading', '.tmp']
+    for ext in temp_extensions:
+        temp_path = f"{base_path}{ext}"
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+                logging.debug(f"Cleaned up temp file: {temp_path}")
+            except Exception as e:
+                logging.debug(f"Could not remove temp file {temp_path}: {e}")
 
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
     """Fast media downloader with FloodWait handling"""
@@ -45,7 +74,17 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
 
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
     """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""
+    
+    # CRITICAL FIX: Validate file before upload
+    if not validate_file(file_path):
+        cleanup_temp_files(file_path)
+        return None
+    
     safe_caption = str(caption) if caption is not None else ""
+    # Truncate caption to Telegram limit (1024 chars)
+    if len(safe_caption) > 1024:
+        safe_caption = safe_caption[:1020] + "..."
+        logging.warning(f"Caption truncated to 1020 chars for upload to {chat_id}")
 
     file_path_lower = file_path.lower()
     # Base arguments for all upload methods
@@ -54,10 +93,6 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         "progress": progress_callback,
         "progress_args": progress_args,
     }
-
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        logging.error(f"Upload failed: File {file_path} is empty or does not exist.")
-        return None
 
     try:
         if not client.is_connected:
@@ -111,8 +146,8 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
             file_path,
             **upload_kwargs
         )
-    except AuthKeyUnregistered:
-        logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}")
+    except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
+        logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}: {e}")
         raise
     except Exception:
         logging.exception("Upload Error:")
