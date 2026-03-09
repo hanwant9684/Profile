@@ -36,9 +36,37 @@ def cleanup_temp_files(base_path):
             except Exception as e:
                 logging.debug(f"Could not remove temp file {temp_path}: {e}")
 
+def is_downloadable_media(message):
+    """Check if message/media object is actually downloadable"""
+    message_type = type(message).__name__
+    
+    # Non-downloadable types
+    non_downloadable = ['Poll', 'WebPage', 'Game', 'Dice', 'Venue', 'Location']
+    if message_type in non_downloadable:
+        return False, f"{message_type} is not downloadable"
+    
+    # Must have actual media - FIX: Added video_note (recorded video) and voice (recorded voice)
+    if not (getattr(message, "document", None) or 
+            getattr(message, "video", None) or 
+            getattr(message, "audio", None) or 
+            getattr(message, "photo", None) or
+            getattr(message, "video_note", None) or  # Recorded video message
+            getattr(message, "voice", None) or  # Recorded voice message
+            (message_type == "Story" and (getattr(message, "video", None) or getattr(message, "photo", None)))):
+        return False, f"No downloadable media found in {message_type}"
+    
+    return True, None
+
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
-    """Fast media downloader with FloodWait handling"""
+    """Fast media downloader with FloodWait handling and type validation"""
+    # FIX: Check if media is actually downloadable
+    is_valid, error_msg = is_downloadable_media(message)
+    if not is_valid:
+        logging.error(f"Media not downloadable: {error_msg}")
+        return None
+    
     # Get file size to determine worker count
+    # FIX: Added video_note and voice detection
     file_size = 0
     if getattr(message, "document", None):
         file_size = message.document.file_size
@@ -46,6 +74,10 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
         file_size = message.video.file_size
     elif getattr(message, "audio", None):
         file_size = message.audio.file_size
+    elif getattr(message, "voice", None):
+        file_size = message.voice.file_size
+    elif getattr(message, "video_note", None):
+        file_size = message.video_note.file_size
     elif getattr(message, "photo", None):
         file_size = message.photo.sizes[-1].file_size
     elif type(message).__name__ == "Story":
@@ -67,6 +99,10 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
             logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
             await asyncio.sleep(e.value)
         except Exception as e:
+            # FIX: Better error handling for cancellations
+            if "StopProcess" in str(e):
+                logging.info(f"Download cancelled by user")
+                return None
             if i == retries - 1:
                 raise e
             logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
