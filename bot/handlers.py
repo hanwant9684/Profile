@@ -128,32 +128,6 @@ user_clients = {}
 active_sessions = set() # Track sessions currently in use
 _cleanup_task_started = False
 
-async def verify_channel_access(user_id, channel_id, user_client):
-    """Verify that channel is still valid and accessible (FIX for channel issues)"""
-    if not channel_id:
-        return False
-    
-    try:
-        chat = await user_client.get_chat(channel_id)
-        if not chat:
-            logging.warning(f"Channel {channel_id} returned None for user {user_id}")
-            return False
-        
-        # Check if bot is still a member
-        try:
-            await user_client.get_chat_member(channel_id, "me")
-        except Exception as e:
-            logging.warning(f"Bot not in channel {channel_id} for user {user_id}: {e}")
-            return False
-        
-        return True
-    except (pyrogram.errors.ChannelInvalid, pyrogram.errors.ChatAdminRequired, pyrogram.errors.UsernameNotOccupied) as e:
-        logging.warning(f"Channel {channel_id} is invalid for user {user_id}: {e}")
-        return False
-    except Exception as e:
-        logging.warning(f"Channel access verification failed for {channel_id}: {e}")
-        return False
-
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
     now = time.time()
@@ -387,8 +361,6 @@ async def batch_handler(client, message):
     await message.reply(f"🚀 Starting batch download of {count} messages...")
 
     processed_albums = set()
-    consecutive_errors = 0
-    # FIX: Proper FLOOD_WAIT handling with exponential backoff
     for msg_id in range(start_id, end_id + 1):
         if user_id in cancel_flags:
             cancel_flags.discard(user_id)
@@ -400,24 +372,17 @@ async def batch_handler(client, message):
         else:
             link = f"https://t.me/{start_match.group(1)}/{msg_id}"
         
+        # Random delay between messages in batch to further reduce FloodWait risk
+        import random
+        await asyncio.sleep(random.uniform(2, 5))
+
         try:
             result = await download_handler(client, message, link_override=link, processed_albums=processed_albums)
-            consecutive_errors = 0  # Reset on success
-            # Increased delay between messages to avoid hitting rate limits
-            await asyncio.sleep(4)
+            # Add a safety delay between messages in batch to avoid FloodWait
+            if result:
+                await asyncio.sleep(3) 
         except Exception as e:
-            error_str = str(e)
-            # Handle FLOOD_WAIT specifically
-            if "FLOOD_WAIT" in error_str or "420" in error_str:
-                consecutive_errors += 1
-                # Extract wait time if available
-                match = re.search(r"(\d+)\s*seconds?", error_str)
-                wait_time = int(match.group(1)) if match else min(30 * (2 ** consecutive_errors), 3600)
-                logging.warning(f"FLOOD_WAIT hit, waiting {wait_time}s before retry")
-                await asyncio.sleep(min(wait_time + 5, 3600))  # Add buffer, cap at 1 hour
-            else:
-                consecutive_errors = 0
-                logging.error(f"Batch loop error for link {link}: {e}")
+            logging.error(f"Batch loop error for link {link}: {e}")
             continue
     
     # Show ad after whole batch is complete
@@ -428,11 +393,7 @@ async def download_handler(client, message, link_override=None, processed_albums
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
-    # FIX: Handle None message.text safely
-    link = link_override or (message.text.strip() if message.text else None)
-    if not link:
-        await message.reply("❌ **No valid link found in your message.**")
-        return
+    link = link_override or message.text.strip()
 
     from bot.database import create_user
     user = await get_user(user_id)
