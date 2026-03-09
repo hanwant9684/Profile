@@ -354,23 +354,15 @@ async def get_ad_count_today(user_id):
         
         today = datetime.now().date()
         last_ad_date = None
-        
-        # user['last_ad_date'] is already an ISO string from get_user
         if user.get("last_ad_date"):
-            try:
-                last_ad_date = datetime.fromisoformat(user["last_ad_date"]).date()
-            except (ValueError, TypeError):
-                last_ad_date = None
+            last_ad_date = datetime.fromisoformat(user["last_ad_date"]).date()
 
         if last_ad_date != today:
-            # If the date has changed, reset the count for the new day
             async with pool.acquire() as conn:
                 await conn.execute('UPDATE users SET ads_today = 0, last_ad_date = $1 WHERE telegram_id = $2',
                                today, int(user_id))
-            if redis_client:
-                await redis_client.delete(f"user:{user_id}")
+            await redis_client.delete(f"user:{user_id}")
             return 0
-            
         return user.get("ads_today", 0)
     except Exception as e:
         logger.error(f"Error getting ad count for {user_id}: {e}")

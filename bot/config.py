@@ -109,7 +109,7 @@ if missing_vars:
 RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "989337")
 RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "381546")
 AD_DAILY_LIMIT_FREE = int(os.environ.get("AD_DAILY_LIMIT_FREE", 50))
-AD_DAILY_LIMIT_PREMIUM = int(os.environ.get("AD_DAILY_LIMIT_PREMIUM", 5))
+AD_DAILY_LIMIT_PREMIUM = int(os.environ.get("AD_DAILY_LIMIT_PREMIUM", 10))
 AD_DAILY_LIMIT = AD_DAILY_LIMIT_FREE # Legacy fallback
 AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
