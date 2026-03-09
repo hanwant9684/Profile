@@ -63,19 +63,15 @@ MAX_CONCURRENT_DOWNLOADS = 10
 MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 10))
 
 def get_smart_chunk_size(file_size):
-    """FIX: Optimize chunk sizes for faster downloads (15-20 MB/s instead of 3-4 MB/s)"""
     if file_size < 10 * 1024 * 1024:      # < 10MB
-        return 512 * 1024                # 512KB (was 128KB)
+        return 128 * 1024                # 128KB
     elif file_size < 100 * 1024 * 1024:  # 10-100MB
-        return 1024 * 1024               # 1MB (was 512KB)
+        return 512 * 1024                # 512KB
     else:                                # > 100MB
-        return 2 * 1024 * 1024           # 2MB (was 1MB)
+        return 1024 * 1024               # 1024KB (1MB)
 
 def get_smart_download_workers(file_size):
-    """FIX: Use more parallel workers for faster downloads"""
-    if file_size < 10 * 1024 * 1024:
-        return 1
-    elif file_size < 100 * 1024 * 1024:
+    if file_size < 100 * 1024 * 1024:
         return 1
     else:
         return 4
@@ -117,7 +113,7 @@ AD_DAILY_LIMIT_PREMIUM = int(os.environ.get("AD_DAILY_LIMIT_PREMIUM", 5))
 AD_DAILY_LIMIT = AD_DAILY_LIMIT_FREE # Legacy fallback
 AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
-# FIX: Improved client configuration (keep only valid Pyrogram parameters)
+# Update client with higher max_concurrent_transmissions
 app = Client(
     "bot_session", 
     api_id=API_ID, 
@@ -126,6 +122,6 @@ app = Client(
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
-    max_concurrent_transmissions=20,
-    workers=20
+    max_concurrent_transmissions=5,
+    workers=10
 )

@@ -8,65 +8,9 @@ from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as A
 
 from bot.config import get_smart_download_workers
 
-def validate_file(file_path):
-    """Validate that a file exists and has content"""
-    if not os.path.exists(file_path):
-        logging.error(f"File validation failed: {file_path} does not exist")
-        return False
-    
-    file_size = os.path.getsize(file_path)
-    if file_size == 0:
-        logging.error(f"File validation failed: {file_path} is empty (0 bytes)")
-        return False
-    
-    if file_size < 512:
-        logging.warning(f"File {file_path} is suspiciously small ({file_size} bytes), may be incomplete")
-    
-    return True
-
-def cleanup_temp_files(base_path):
-    """Clean up incomplete download temp files"""
-    temp_extensions = ['.temp', '.downloading', '.tmp']
-    for ext in temp_extensions:
-        temp_path = f"{base_path}{ext}"
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                logging.debug(f"Cleaned up temp file: {temp_path}")
-            except Exception as e:
-                logging.debug(f"Could not remove temp file {temp_path}: {e}")
-
-def is_downloadable_media(message):
-    """Check if message/media object is actually downloadable"""
-    message_type = type(message).__name__
-    
-    # Non-downloadable types
-    non_downloadable = ['Poll', 'WebPage', 'Game', 'Dice', 'Venue', 'Location']
-    if message_type in non_downloadable:
-        return False, f"{message_type} is not downloadable"
-    
-    # Must have actual media - FIX: Added video_note (recorded video) and voice (recorded voice)
-    if not (getattr(message, "document", None) or 
-            getattr(message, "video", None) or 
-            getattr(message, "audio", None) or 
-            getattr(message, "photo", None) or
-            getattr(message, "video_note", None) or  # Recorded video message
-            getattr(message, "voice", None) or  # Recorded voice message
-            (message_type == "Story" and (getattr(message, "video", None) or getattr(message, "photo", None)))):
-        return False, f"No downloadable media found in {message_type}"
-    
-    return True, None
-
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
-    """Fast media downloader with FloodWait handling and type validation"""
-    # FIX: Check if media is actually downloadable
-    is_valid, error_msg = is_downloadable_media(message)
-    if not is_valid:
-        logging.error(f"Media not downloadable: {error_msg}")
-        return None
-    
+    """Fast media downloader with FloodWait handling"""
     # Get file size to determine worker count
-    # FIX: Added video_note and voice detection
     file_size = 0
     if getattr(message, "document", None):
         file_size = message.document.file_size
@@ -74,10 +18,6 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
         file_size = message.video.file_size
     elif getattr(message, "audio", None):
         file_size = message.audio.file_size
-    elif getattr(message, "voice", None):
-        file_size = message.voice.file_size
-    elif getattr(message, "video_note", None):
-        file_size = message.video_note.file_size
     elif getattr(message, "photo", None):
         file_size = message.photo.sizes[-1].file_size
     elif type(message).__name__ == "Story":
@@ -99,10 +39,6 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
             logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
             await asyncio.sleep(e.value)
         except Exception as e:
-            # FIX: Better error handling for cancellations
-            if "StopProcess" in str(e):
-                logging.info(f"Download cancelled by user")
-                return None
             if i == retries - 1:
                 raise e
             logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
@@ -110,17 +46,7 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
 
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
     """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""
-    
-    # CRITICAL FIX: Validate file before upload
-    if not validate_file(file_path):
-        cleanup_temp_files(file_path)
-        return None
-    
     safe_caption = str(caption) if caption is not None else ""
-    # Truncate caption to Telegram limit (1024 chars)
-    if len(safe_caption) > 1024:
-        safe_caption = safe_caption[:1020] + "..."
-        logging.warning(f"Caption truncated to 1020 chars for upload to {chat_id}")
 
     file_path_lower = file_path.lower()
     # Base arguments for all upload methods
@@ -129,6 +55,10 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         "progress": progress_callback,
         "progress_args": progress_args,
     }
+
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logging.error(f"Upload failed: File {file_path} is empty or does not exist.")
+        return None
 
     try:
         if not client.is_connected:
