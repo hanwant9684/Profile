@@ -44,49 +44,21 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
             logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
             await asyncio.sleep(2 * (i + 1))
 
-def truncate_caption(caption, max_length=1024):
-    """Safely truncate caption to Telegram's limit (1024 characters)"""
-    if not caption:
-        return ""
-    caption_str = str(caption)
-    if len(caption_str) <= max_length:
-        return caption_str
-    return caption_str[:max_length-3] + "..."
-
-def check_file_size(file_path, max_size_mib=2000):
-    """Check if file size is within Telegram limits"""
-    if not os.path.exists(file_path):
-        raise ValueError(f"File not found: {file_path}")
-    
-    file_size_bytes = os.path.getsize(file_path)
-    file_size_mib = file_size_bytes / (1024 * 1024)
-    
-    if file_size_mib > max_size_mib:
-        raise ValueError(f"File size ({file_size_mib:.2f} MiB) exceeds Telegram limit of {max_size_mib} MiB")
-    
-    if file_size_bytes == 0:
-        raise ValueError(f"File is empty: {file_path}")
-    
-    return file_size_bytes
-
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
     """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""
-    safe_caption = truncate_caption(caption)
+    safe_caption = str(caption) if caption is not None else ""
 
     file_path_lower = file_path.lower()
-    
-    try:
-        check_file_size(file_path)
-    except ValueError as e:
-        logging.error(f"File validation error: {e}")
-        return None
-    
     # Base arguments for all upload methods
     upload_kwargs = {
         "caption": safe_caption,
         "progress": progress_callback,
         "progress_args": progress_args,
     }
+
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logging.error(f"Upload failed: File {file_path} is empty or does not exist.")
+        return None
 
     try:
         if not client.is_connected:
