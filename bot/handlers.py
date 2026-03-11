@@ -61,7 +61,7 @@ async def send_to_dump(client, user_id, link, msg):
         if not original_caption and type(msg).__name__ == "Story":
              original_caption = "Story Media"
         
-        full_caption = (header + original_caption)[:1020]
+        full_caption = truncate_caption(header + original_caption)
 
         # Ensure bot has access by trying to resolve the peer first if needed, 
         # but copy() usually works if the ID is known and valid.
@@ -189,7 +189,7 @@ async def cleanup_user_clients():
 
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
 from bot.ads import show_ad
-from bot.transfer import download_media_fast, upload_media_fast
+from bot.transfer import download_media_fast, upload_media_fast, truncate_caption
 
 async def update_status(msg, text):
     try:
@@ -664,6 +664,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                         safe_caption = current_msg.caption
                     elif hasattr(current_msg, "text") and current_msg.text:
                         safe_caption = current_msg.text
+                    
+                    safe_caption = truncate_caption(safe_caption)
 
                     if not getattr(current_msg, "media", None) and type(current_msg).__name__ != "Story":
                         try:
@@ -899,7 +901,11 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 os.remove(thumb_path)
                             await update_status(status_msg, "🛑 Process cancelled.")
                             return None
-                        logging.error(f"Download/Upload error: {e}")
+                        if "Can't upload files bigger" in str(e) or "File size" in str(e):
+                            logging.error(f"File size error: {e}")
+                            await update_status(status_msg, "❌ File is too large (exceeds 2GB limit).")
+                        else:
+                            logging.error(f"Download/Upload error: {e}")
                         continue
                     finally:
                         if path:
