@@ -32,17 +32,17 @@ async def main():
         subprocess.Popen(["redis-server", "--bind", "0.0.0.0", "--port", "6379", "--daemonize", "yes"])
         await asyncio.sleep(2)  # Wait for it to start
 
-    if os.path.exists("downloads"):
-        import shutil
-        for filename in os.listdir("downloads"):
-            file_path = os.path.join("downloads", filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception:
-                pass
+    os.makedirs("downloads", exist_ok=True)
+    import shutil
+    for filename in os.listdir("downloads"):
+        file_path = os.path.join("downloads", filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+        except Exception:
+            pass
 
     # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
