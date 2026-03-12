@@ -91,7 +91,8 @@ shared_session = None
 async def get_shared_session():
     global shared_session
     if shared_session is None or shared_session.closed:
-        shared_session = aiohttp.ClientSession()
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        shared_session = aiohttp.ClientSession(timeout=timeout)
     return shared_session
 
 # Verification and immediate exit if missing

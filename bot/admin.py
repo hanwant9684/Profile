@@ -9,7 +9,7 @@ async def update_status(msg, text):
         logging.debug(f"Status update failed: {e}")
 
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
-from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user
+from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user, iter_user_ids
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
@@ -185,44 +185,37 @@ async def broadcast(client, message):
     msg = await message.reply("🚀 Starting broadcast...")
     count = 0
     blocked = 0
-    
+    index = 0
+
     if target_ids:
         # Broadcast to specific users
         for tid in target_ids:
             try:
-                # Convert to int if it's a numeric ID to avoid BOT_METHOD_INVALID
                 target_key = int(tid) if str(tid).strip("-").isdigit() else tid
                 await message.reply_to_message.copy(target_key)
                 count += 1
             except Exception:
                 blocked += 1
             await asyncio.sleep(0.05)
+        await update_status(msg, f"✅ Broadcast complete.\nTotal: {len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
     else:
-        # Broadcast to all users
-        users = await get_all_users()
-        total = len(users)
-        
-        for index, row in enumerate(users):
+        # Paginated broadcast — never loads all users into RAM
+        total = await get_user_count()
+        async for tid in iter_user_ids():
             try:
-                # Get the telegram_id and ensure it's an integer
-                tid = row.get('telegram_id')
-                if tid:
-                    target_key = int(tid) if str(tid).strip("-").isdigit() else tid
-                    await message.reply_to_message.copy(target_key)
-                    count += 1
+                await message.reply_to_message.copy(int(tid))
+                count += 1
             except Exception as e:
                 blocked += 1
-                print(f"[ERROR] Broadcast failed for {row.get('telegram_id')}: {e}")
-            
-            # Periodically update the progress message for transparency
-            if (index + 1) % 50 == 0:
-                await update_status(msg, f"🚀 Broadcasting...\nProgress: {index + 1}/{total}\nSent: {count}\nFailed: {blocked}")
-            
-            # Rate limiting: 20 messages per second (0.05s delay) 
-            # to stay within Telegram's broad limits for bots
+                logging.debug(f"Broadcast failed for {tid}: {e}")
+
+            index += 1
+            if index % 50 == 0:
+                await update_status(msg, f"🚀 Broadcasting...\nProgress: {index}/{total}\nSent: {count}\nFailed: {blocked}")
+
             await asyncio.sleep(0.05)
-    
-    await update_status(msg, f"✅ Broadcast complete.\nTotal: {total if not target_ids else len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
+
+        await update_status(msg, f"✅ Broadcast complete.\nTotal: {total}\nSent: {count}\nFailed/Blocked: {blocked}")
 
 @app.on_message(filters.command("premium_users") & filters.private, group=-1)
 async def list_premium_users(client, message):
