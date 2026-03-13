@@ -5,7 +5,6 @@ from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
-
 from bot.config import get_smart_download_workers
 
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
@@ -29,16 +28,38 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
     retries = 5
     for i in range(retries):
         try:
-            return await client.download_media(
+            path = await client.download_media(
                 message,
                 file_name=file_name or "downloads/",
                 progress=progress_callback if progress_callback else None,
                 progress_args=progress_args
             )
+            # Guard against empty files (download silently failed)
+            if path and os.path.exists(path) and os.path.getsize(path) == 0:
+                logging.warning(f"Download returned empty file on attempt {i+1}: {path} — retrying")
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                if i < retries - 1:
+                    await asyncio.sleep(2 * (i + 1))
+                    continue
+                raise ValueError(f"File downloaded as empty after {retries} attempts: {path}")
+            return path
         except (FloodWait, FloodPremiumWait) as e:
             logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
             await asyncio.sleep(e.value)
         except Exception as e:
+            # Clean up any leftover temp files before retrying
+            try:
+                import glob as _glob
+                for tmp in _glob.glob("downloads/*.temp"):
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             if i == retries - 1:
                 raise e
             logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
@@ -100,12 +121,6 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
                 target_id = int(chat_id)
             except (ValueError, TypeError):
                 target_id = chat_id
-
-        # Peer resolution attempt for channels/groups
-        try:
-            await client.get_chat(target_id)
-        except Exception as e:
-            logging.debug(f"Upload peer resolution failed for {target_id}: {e}")
 
         if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
             upload_kwargs.update(kwargs)
