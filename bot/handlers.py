@@ -12,8 +12,8 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, 
 from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
 from bot.config import (
-    app, API_ID, API_HASH, active_downloads, global_download_semaphore,
-    OWNER_ID, cancel_flags
+    app, API_ID, API_HASH, active_downloads, global_download_semaphore, 
+    OWNER_ID, global_upload_semaphore, cancel_flags
 )
 
 # Dump channel 
@@ -168,9 +168,8 @@ async def get_user_client(user_id, session_str):
         api_id=API_ID,
         api_hash=API_HASH,
         in_memory=True,
-        sleep_threshold=120,
-        no_updates=True,
-        max_concurrent_transmissions=15
+        sleep_threshold=60,
+        no_updates=True
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -359,7 +358,7 @@ async def batch_handler(client, message):
 
     user_id = message.from_user.id
     user = await get_user(user_id)
-    if not user or user.get('role', 'free') == 'free':
+    if user.get('role', 'free') == 'free':
         await message.reply("❌ Batch command is for Premium users only.")
         return
 
@@ -654,6 +653,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                             msg = await user_client.get_stories(chat_id, message_id)
                         else:
                             msg = await user_client.get_messages(chat_id, message_id)
+                        await user_client.get_me()
                         break
                     except (FloodWait, FloodPremiumWait) as e:
                         wait_secs = e.value
@@ -753,25 +753,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                     except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
                         raise e
                     except Exception as e:
-                        error_str = str(e)
-                        if "MEDIA_CAPTION_TOO_LONG" in error_str:
-                            # Caption exceeds Telegram's 1024-char limit — retry with blank caption
-                            try:
-                                if media_group_id:
-                                    msgs = await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id, captions="")
-                                else:
-                                    await msg.copy(chat_id=user_id, caption="")
-                                await send_to_dump(client, user_id, link, msg)
-                                processed_count = len(target_messages) if media_group_id else 1
-                                await status_msg.delete()
-                                await show_ad(client, user_id)
-                                active_downloads.discard(user_id)
-                                return msg
-                            except Exception as retry_e:
-                                logging.error(f"Direct extraction retry (no caption) failed: {retry_e}")
-                        elif "Unknown media" in error_str or "unknown media" in error_str.lower():
-                            await update_status(status_msg, "❌ This media type is not supported for direct download.")
-                            return None
                         logging.error(f"Direct extraction failed: {e}")
                         await status_msg.edit_text("⚠️ Direct extraction failed, falling back to download/upload...")
 
@@ -790,15 +771,11 @@ async def download_handler(client, message, link_override=None, processed_albums
                         try:
                             await client.send_message(user_id, safe_caption)
                             user_data = await get_user(user_id)
-                            channel_id = user_data.get("download_channel_id") if user_data else None
-                            if channel_id and user_client and user_client != client:
+                            channel_id = user_data.get("download_channel_id")
+                            if channel_id:
                                 try:
-                                    # "saved_messages" sentinel means spam-reported user — send to Saved Messages
-                                    if channel_id == "saved_messages":
-                                        text_dest = "me"
-                                    else:
-                                        text_dest = int(channel_id)
-                                    await user_client.send_message(text_dest, safe_caption)
+                                    # Use user_client to send to their private cloud storage
+                                    await user_client.send_message(int(channel_id), safe_caption)
                                 except Exception as e:
                                     logging.error(f"Text upload to private channel failed: {e}")
                             await send_to_dump(client, user_id, link, current_msg)
@@ -885,51 +862,44 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                             # Check if an existing channel is still accessible
                             elif channel_id:
-                                # Skip channel ops if the user client has gone offline
-                                if not user_client.is_connected:
-                                    logging.warning(f"User client for {user_id} is no longer connected — skipping channel check, using bot delivery")
-                                    channel_id = None
-                                    _skip_channel_create = True
+                                try:
+                                    if isinstance(channel_id, str) and (channel_id.startswith("-100") or channel_id.isdigit() or channel_id.startswith("-")):
+                                        channel_id = int(channel_id)
 
-                                if channel_id:
                                     try:
-                                        if isinstance(channel_id, str) and (channel_id.startswith("-100") or channel_id.isdigit() or channel_id.startswith("-")):
-                                            channel_id = int(channel_id)
+                                        chat_obj = await user_client.get_chat(channel_id)
+                                        c_hash = getattr(chat_obj, "access_hash", None)
+                                        if c_hash:
+                                            await update_user_channel(user_id, channel_id, str(c_hash))
+                                    except pyrogram.errors.ChannelInvalid:
+                                        logging.warning(f"Channel {channel_id} is explicitly invalid for user.")
+                                        raise Exception("Channel invalid")
+                                    except Exception as user_e:
+                                        logging.warning(f"User client cannot see channel {channel_id}: {user_e}")
 
+                                    try:
+                                        await client.get_chat(channel_id)
+                                    except Exception:
                                         try:
-                                            chat_obj = await user_client.get_chat(channel_id)
-                                            c_hash = getattr(chat_obj, "access_hash", None)
-                                            if c_hash:
-                                                await update_user_channel(user_id, channel_id, str(c_hash))
-                                        except pyrogram.errors.ChannelInvalid:
-                                            logging.warning(f"Channel {channel_id} is explicitly invalid for user.")
-                                            raise Exception("Channel invalid")
-                                        except Exception as user_e:
-                                            logging.warning(f"User client cannot see channel {channel_id}: {user_e}")
-
-                                        try:
-                                            await client.get_chat(channel_id)
-                                        except Exception:
-                                            try:
-                                                me = await client.get_me()
-                                                await user_client.add_chat_members(channel_id, me.id)
-                                                from pyrogram.types import ChatPrivileges
-                                                await user_client.promote_chat_member(
-                                                    channel_id, me.id,
-                                                    privileges=ChatPrivileges(
-                                                        can_post_messages=True,
-                                                        can_delete_messages=True,
-                                                        can_invite_users=True,
-                                                        can_manage_chat=True
-                                                    )
+                                            me = await client.get_me()
+                                            await user_client.add_chat_members(channel_id, me.id)
+                                            from pyrogram.types import ChatPrivileges
+                                            await user_client.promote_chat_member(
+                                                channel_id, me.id,
+                                                privileges=ChatPrivileges(
+                                                    can_post_messages=True,
+                                                    can_delete_messages=True,
+                                                    can_invite_users=True,
+                                                    can_manage_chat=True
                                                 )
-                                            except Exception as re_e:
-                                                logging.warning(f"Failed to re-invite bot to channel {channel_id}: {re_e}")
-                                                raise Exception("Bot inaccessible")
+                                            )
+                                        except Exception as re_e:
+                                            logging.warning(f"Failed to re-invite bot to channel {channel_id}: {re_e}")
+                                            raise Exception("Bot inaccessible")
 
-                                    except Exception as e:
-                                        logging.warning(f"Existing channel {channel_id} issue for user {user_id}: {e}. Attempting to recreate.")
-                                        channel_id = None
+                                except Exception as e:
+                                    logging.warning(f"Existing channel {channel_id} issue for user {user_id}: {e}. Attempting to recreate.")
+                                    channel_id = None
 
                             # Create a new channel only if not spam-reported and no channel exists
                             if not _skip_channel_create and not channel_id:
@@ -1030,17 +1000,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 os.remove(thumb_path)
                             await update_status(status_msg, "🛑 Process cancelled.")
                             return None
-
-                        if isinstance(e, AttributeError) or "'NoneType' object has no attribute 'write'" in error_str:
-                            # Upload reference lost (usually after a cancelled/interrupted save_file)
-                            logging.error(f"Upload state corrupted (skipping item): {e}")
-                            continue
-
-                        if "Unknown media" in error_str or "unknown media" in error_str.lower():
-                            logging.warning(f"Unsupported media type for user {user_id}: {e}")
-                            await update_status(status_msg, "❌ This media type is not supported for download.")
-                            continue
-
                         if "Can't upload files bigger" in str(e) or "File size" in str(e):
                             logging.error(f"File size error: {e}")
                             await update_status(status_msg, "❌ File is too large (exceeds 2GB limit).")
