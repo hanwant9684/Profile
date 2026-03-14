@@ -11,10 +11,30 @@ from pyrogram.client import Client as ClientObject
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
 from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
+from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore,
     OWNER_ID, cancel_flags
 )
+
+MAX_FLOODWAIT_TOLERATE = 60
+
+async def safe_reply(message, text, **kwargs):
+    """Reply with automatic retry on short FloodWaits. Returns None on long waits."""
+    for attempt in range(3):
+        try:
+            return await message.reply(text, **kwargs)
+        except (FloodWait, FloodPremiumWait) as e:
+            wait = e.value
+            logging.warning(f"FloodWait {wait}s on reply (attempt {attempt+1})")
+            if wait <= MAX_FLOODWAIT_TOLERATE and attempt < 2:
+                await asyncio.sleep(wait)
+            else:
+                logging.error(f"FloodWait too long ({wait}s) — skipping reply")
+                return None
+        except Exception as e:
+            logging.error(f"safe_reply error: {e}")
+            return None
 
 # Dump channel 
 async def send_to_dump(client, user_id, link, msg):
@@ -386,12 +406,16 @@ async def batch_handler(client, message):
 
     import random
 
-    batch_status = await message.reply(
+    batch_status = await safe_reply(
+        message,
         f"🚀 **Batch started** — {count} item(s)\n\n"
         f"⏳ Progress: 0/{count}\n"
         f"✅ Done: 0 | ❌ Skipped: 0\n\n"
         f"ℹ️ If Telegram rate-limits are hit, the bot will pause and auto-resume. Use /cancel to stop."
     )
+    if batch_status is None:
+        logging.error(f"Could not send batch status message to user {user_id} — FloodWait too long")
+        return
 
     processed_albums = set()
     done = 0
@@ -607,7 +631,10 @@ async def download_handler(client, message, link_override=None, processed_albums
             logging.debug(f"Chat check error for {chat_id}: {e}")
             pass
 
-    status_msg = await message.reply("⏳ Processing...")
+    status_msg = await safe_reply(message, "⏳ Processing...")
+    if status_msg is None:
+        logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
+        return None
     user = await get_user(user_id)
 
     if (is_private or is_group) and (not user or not user.get('phone_session_string')):
@@ -851,6 +878,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 progress_callback=progress_bar,
                                 progress_args=(status_msg, "📥 Downloading")
                             )
+                        except (FileReferenceExpired, FileReferenceInvalid) as e:
+                            logging.error(f"File reference expired for message: {e}")
+                            await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
+                            path = None
                         except Exception as e:
                             if str(e) == "StopProcess":
                                 raise e
@@ -1041,7 +1072,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                             await update_status(status_msg, "❌ This media type is not supported for download.")
                             continue
 
-                        if "Can't upload files bigger" in str(e) or "File size" in str(e):
+                        if isinstance(e, (FloodWait, FloodPremiumWait)):
+                            logging.error(f"Download/Upload error: {e}")
+                            await update_status(status_msg, f"⏳ Telegram rate limit hit. Please try again later.")
+                        elif "Can't upload files bigger" in str(e) or "File size" in str(e):
                             logging.error(f"File size error: {e}")
                             await update_status(status_msg, "❌ File is too large (exceeds 2GB limit).")
                         else:

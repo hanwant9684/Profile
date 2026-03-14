@@ -5,11 +5,12 @@ from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
+from pyrogram.errors.exceptions.bad_request_400 import PhotoExtInvalid
+from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
 from bot.config import get_smart_download_workers
 
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
     """Fast media downloader with FloodWait handling"""
-    # Get file size to determine worker count
     file_size = 0
     if getattr(message, "document", None):
         file_size = message.document.file_size
@@ -34,7 +35,6 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
                 progress=progress_callback if progress_callback else None,
                 progress_args=progress_args
             )
-            # Guard against empty files (download silently failed)
             if path and os.path.exists(path) and os.path.getsize(path) == 0:
                 logging.warning(f"Download returned empty file on attempt {i+1}: {path} — retrying")
                 try:
@@ -49,8 +49,10 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
         except (FloodWait, FloodPremiumWait) as e:
             logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
             await asyncio.sleep(e.value)
+        except (FileReferenceExpired, FileReferenceInvalid) as e:
+            logging.error(f"File reference expired on attempt {i+1}: {e}")
+            raise
         except Exception as e:
-            # Clean up any leftover temp files before retrying
             try:
                 import glob as _glob
                 for tmp in _glob.glob("downloads/*.temp"):
@@ -90,8 +92,21 @@ def check_file_size(file_path, max_size_mib=2000):
     
     return file_size_bytes
 
+async def _send_with_floodwait(coro_fn, max_retries=3):
+    """Execute a send coroutine, sleeping through FloodWait up to max_retries times."""
+    for attempt in range(max_retries):
+        try:
+            return await coro_fn()
+        except (FloodWait, FloodPremiumWait) as e:
+            wait = e.value
+            logging.warning(f"Upload FloodWait {wait}s (attempt {attempt+1}/{max_retries})")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(min(wait, 60))
+            else:
+                raise
+
 async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
-    """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""
+    """Upload function with FloodWait retry and PhotoExtInvalid fallback."""
     safe_caption = truncate_caption(caption)
 
     file_path_lower = file_path.lower()
@@ -102,7 +117,6 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         logging.error(f"File validation error: {e}")
         return None
     
-    # Base arguments for all upload methods
     upload_kwargs = {
         "caption": safe_caption,
         "progress": progress_callback,
@@ -113,7 +127,6 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
         if not client.is_connected:
             await client.start()
             
-        # Resolve chat_id: if it's "me", we keep it as is, otherwise ensure it's an int
         if isinstance(chat_id, str) and chat_id.lower() == "me":
             target_id = "me"
         else:
@@ -122,39 +135,46 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
             except (ValueError, TypeError):
                 target_id = chat_id
 
-        if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
+        if file_path_lower.endswith((".mp4", ".mkv", ".mov", ".avi")):
             upload_kwargs.update(kwargs)
             upload_kwargs["thumb"] = thumb
             if file_path_lower.endswith(".gif"):
-                return await client.send_animation(target_id, file_path, **upload_kwargs)
-            return await client.send_video(
-                target_id,
-                file_path,
-                supports_streaming=True,
-                **upload_kwargs
+                return await _send_with_floodwait(
+                    lambda: client.send_animation(target_id, file_path, **upload_kwargs)
+                )
+            return await _send_with_floodwait(
+                lambda: client.send_video(target_id, file_path, supports_streaming=True, **upload_kwargs)
             )
-        #Audio
+
         elif file_path_lower.endswith((".mp3", ".m4a", ".ogg", ".wav")):
             upload_kwargs["duration"] = kwargs.get("duration", 0)
-            if file_path_lower.endswith((".ogg", ".wav")): # Voice formats
-                return await client.send_voice(target_id, file_path, **upload_kwargs)
-            #Normal Audio
+            if file_path_lower.endswith((".ogg", ".wav")):
+                return await _send_with_floodwait(
+                    lambda: client.send_voice(target_id, file_path, **upload_kwargs)
+                )
             upload_kwargs["thumb"] = thumb
-            return await client.send_audio(target_id, file_path, **upload_kwargs)
-        #Images
-        elif file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-            return await client.send_photo(
-                target_id,
-                file_path,
-                **upload_kwargs
+            return await _send_with_floodwait(
+                lambda: client.send_audio(target_id, file_path, **upload_kwargs)
             )
-         #Documents   
-        upload_kwargs["thumb"] = thumb    
-        return await client.send_document(
-            target_id,
-            file_path,
-            **upload_kwargs
+
+        elif file_path_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            try:
+                return await _send_with_floodwait(
+                    lambda: client.send_photo(target_id, file_path, **upload_kwargs)
+                )
+            except PhotoExtInvalid:
+                logging.warning(f"PhotoExtInvalid for {file_path} — falling back to send_document")
+                doc_kwargs = dict(upload_kwargs)
+                doc_kwargs["thumb"] = thumb
+                return await _send_with_floodwait(
+                    lambda: client.send_document(target_id, file_path, **doc_kwargs)
+                )
+
+        upload_kwargs["thumb"] = thumb
+        return await _send_with_floodwait(
+            lambda: client.send_document(target_id, file_path, **upload_kwargs)
         )
+
     except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
         logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}: {e}")
         raise
