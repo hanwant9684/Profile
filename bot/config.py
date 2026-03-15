@@ -60,17 +60,29 @@ async def get_dump_channel_id():
 
 # Performance Settings
 MAX_CONCURRENT_DOWNLOADS = 10
+MAX_CONCURRENT_UPLOADS = int(os.environ.get("MAX_CONCURRENT_UPLOADS", 10))
+
+def get_smart_chunk_size(file_size):
+    if file_size < 10 * 1024 * 1024:      # < 10MB
+        return 128 * 1024                # 128KB
+    elif file_size < 100 * 1024 * 1024:  # 10-100MB
+        return 512 * 1024                # 512KB
+    else:                                # > 100MB
+        return 1024 * 1024               # 1024KB (1MB)
 
 def get_smart_download_workers(file_size):
     if file_size < 100 * 1024 * 1024:
-        return 4
+        return 1
     else:
-        return 10
-        
+        return 4
+
+def get_smart_upload_workers(file_size):
+    return 4
 
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+global_upload_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
 login_states = {}
 
 # Global aiohttp session
