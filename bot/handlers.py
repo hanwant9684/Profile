@@ -395,15 +395,43 @@ async def batch_handler(client, message):
     start_link = parts[1]
     end_link = parts[2]
 
-    start_match = re.search(r"t\.me/c/(\d+)/(\d+)", start_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", start_link)
-    end_match = re.search(r"t\.me/c/(\d+)/(\d+)", end_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
+    # Topic links: t.me/c/CHANNEL/TOPIC/MSG  — must be checked before the plain 2-segment pattern
+    start_topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", start_link)
+    end_topic_match   = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", end_link)
 
-    if not start_match or not end_match:
+    # Public topic links: t.me/USERNAME/TOPIC/MSG
+    start_pub_topic_match = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)/(\d+)", start_link)
+    end_pub_topic_match   = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)/(\d+)", end_link)
+
+    # Plain private/public links (no topic)
+    start_match = re.search(r"t\.me/c/(\d+)/(\d+)", start_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", start_link)
+    end_match   = re.search(r"t\.me/c/(\d+)/(\d+)", end_link)   or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
+
+    # Determine link type and extract the correct message ID from each link
+    if start_topic_match and end_topic_match:
+        # Private topic: t.me/c/CHANNEL/TOPIC/MSG
+        link_type = "private_topic"
+        channel_part = start_topic_match.group(1)
+        topic_part    = start_topic_match.group(2)
+        start_id = int(start_topic_match.group(3))
+        end_id   = int(end_topic_match.group(3))
+    elif start_pub_topic_match and end_pub_topic_match:
+        # Public topic: t.me/USERNAME/TOPIC/MSG
+        link_type = "public_topic"
+        channel_part = start_pub_topic_match.group(1)
+        topic_part    = start_pub_topic_match.group(2)
+        start_id = int(start_pub_topic_match.group(3))
+        end_id   = int(end_pub_topic_match.group(3))
+    elif start_match and end_match:
+        # Plain private or public link
+        link_type    = "private" if "t.me/c/" in start_link else "public"
+        channel_part = start_match.group(1)
+        topic_part   = None
+        start_id = int(start_match.group(2))
+        end_id   = int(end_match.group(2))
+    else:
         await message.reply("❌ Invalid links provided.")
         return
-
-    start_id = int(start_match.group(2))
-    end_id = int(end_match.group(2))
 
     if start_id > end_id:
         start_id, end_id = end_id, start_id
@@ -439,10 +467,14 @@ async def batch_handler(client, message):
             )
             return
 
-        if "t.me/c/" in start_link:
-            link = f"https://t.me/c/{start_match.group(1)}/{msg_id}"
+        if link_type == "private_topic":
+            link = f"https://t.me/c/{channel_part}/{topic_part}/{msg_id}"
+        elif link_type == "public_topic":
+            link = f"https://t.me/{channel_part}/{topic_part}/{msg_id}"
+        elif link_type == "private":
+            link = f"https://t.me/c/{channel_part}/{msg_id}"
         else:
-            link = f"https://t.me/{start_match.group(1)}/{msg_id}"
+            link = f"https://t.me/{channel_part}/{msg_id}"
 
         # Update live status
         try:
