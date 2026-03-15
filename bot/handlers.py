@@ -148,6 +148,15 @@ user_clients = {}
 active_sessions = set() # Track sessions currently in use
 _cleanup_task_started = False
 
+# Cache for get_chat results keyed by chat_id to avoid repeated API calls
+# e.g. during a batch of 50 items from the same channel
+_chat_type_cache: dict = {}
+
+# Cache for resolved upload destinations keyed by user_id.
+# Stores (destination_id, using_user_session) so channel verification
+# (get_chat × 2 + get_user) only happens once per session, not once per batch item.
+_dest_channel_cache: dict = {}
+
 # Per-user rate limiting: {user_id: last_request_timestamp}
 _user_last_request: dict = {}
 RATE_LIMIT_SECONDS = 3
@@ -621,12 +630,17 @@ async def download_handler(client, message, link_override=None, processed_albums
         try:
             if chat_id.isdigit() or (chat_id.startswith("-") and chat_id[1:].isdigit()):
                 chat_id = int(chat_id)
-            chat = await asyncio.wait_for(client.get_chat(chat_id), timeout=5)
-            chat_type_str = str(chat.type).lower()
-            if "group" in chat_type_str or "supergroup" in chat_type_str:
-                is_group = True
-            elif hasattr(chat, "broadcast") and chat.broadcast is False:
-                 is_group = True
+            cache_key = str(chat_id)
+            if cache_key in _chat_type_cache:
+                is_group = _chat_type_cache[cache_key]
+            else:
+                chat = await asyncio.wait_for(client.get_chat(chat_id), timeout=5)
+                chat_type_str = str(chat.type).lower()
+                if "group" in chat_type_str or "supergroup" in chat_type_str:
+                    is_group = True
+                elif hasattr(chat, "broadcast") and chat.broadcast is False:
+                    is_group = True
+                _chat_type_cache[cache_key] = is_group
         except Exception as e:
             logging.debug(f"Chat check error for {chat_id}: {e}")
             pass
@@ -802,6 +816,135 @@ async def download_handler(client, message, link_override=None, processed_albums
                         logging.error(f"Direct extraction failed: {e}")
                         await status_msg.edit_text("⚠️ Direct extraction failed, falling back to download/upload...")
 
+                # ------------------------------------------------------------------
+                # Resolve upload destination ONCE before iterating over files.
+                # This avoids calling get_chat / get_user on every file when
+                # processing a media group or a large batch of items from the
+                # same channel (which would trigger Telegram rate-limits).
+                # ------------------------------------------------------------------
+                upload_client = client
+                destination_id = user_id
+                using_user_session = False
+                _resolved_channel_id = None  # track for text-only path below
+
+                if user_client and user_client != client:
+                    if user_id in _dest_channel_cache:
+                        # Already verified this session — reuse without any API call
+                        _resolved_channel_id, using_user_session = _dest_channel_cache[user_id]
+                        destination_id = _resolved_channel_id
+                        if using_user_session:
+                            upload_client = user_client
+                    else:
+                        user_data = await get_user(user_id)
+                        channel_id = user_data.get("download_channel_id") if user_data else None
+                        _skip_channel_create = False
+
+                        if channel_id == "saved_messages":
+                            upload_client = user_client
+                            destination_id = "me"
+                            using_user_session = True
+                            _skip_channel_create = True
+                            channel_id = None
+
+                        elif channel_id:
+                            if not user_client.is_connected:
+                                logging.warning(f"User client for {user_id} is no longer connected — skipping channel check, using bot delivery")
+                                channel_id = None
+                                _skip_channel_create = True
+
+                            if channel_id:
+                                try:
+                                    if isinstance(channel_id, str) and (channel_id.startswith("-100") or channel_id.isdigit() or channel_id.startswith("-")):
+                                        channel_id = int(channel_id)
+
+                                    try:
+                                        chat_obj = await user_client.get_chat(channel_id)
+                                        c_hash = getattr(chat_obj, "access_hash", None)
+                                        if c_hash:
+                                            await update_user_channel(user_id, channel_id, str(c_hash))
+                                    except pyrogram.errors.ChannelInvalid:
+                                        logging.warning(f"Channel {channel_id} is explicitly invalid for user.")
+                                        raise Exception("Channel invalid")
+                                    except Exception as user_e:
+                                        logging.warning(f"User client cannot see channel {channel_id}: {user_e}")
+
+                                    try:
+                                        await client.get_chat(channel_id)
+                                    except Exception:
+                                        try:
+                                            me = await client.get_me()
+                                            await user_client.add_chat_members(channel_id, me.id)
+                                            from pyrogram.types import ChatPrivileges
+                                            await user_client.promote_chat_member(
+                                                channel_id, me.id,
+                                                privileges=ChatPrivileges(
+                                                    can_post_messages=True,
+                                                    can_delete_messages=True,
+                                                    can_invite_users=True,
+                                                    can_manage_chat=True
+                                                )
+                                            )
+                                        except Exception as re_e:
+                                            logging.warning(f"Failed to re-invite bot to channel {channel_id}: {re_e}")
+                                            raise Exception("Bot inaccessible")
+
+                                except Exception as e:
+                                    logging.warning(f"Existing channel {channel_id} issue for user {user_id}: {e}. Attempting to recreate.")
+                                    channel_id = None
+
+                        if not _skip_channel_create and not channel_id:
+                            try:
+                                new_chat = await user_client.create_channel("Cloud Storage", "My private cloud storage for downloads.")
+                                channel_id = new_chat.id
+                                channel_hash = getattr(new_chat, "access_hash", None)
+                                await update_user_channel(user_id, channel_id, str(channel_hash) if channel_hash else None)
+
+                                bot_info = await client.get_me()
+                                bot_username = bot_info.username
+                                try:
+                                    from pyrogram.types import ChatPrivileges
+                                    invite_id = f"@{bot_username}" if bot_username else bot_info.id
+                                    await user_client.promote_chat_member(
+                                        channel_id,
+                                        invite_id,
+                                        privileges=ChatPrivileges(
+                                            can_post_messages=True,
+                                            can_delete_messages=True,
+                                            can_invite_users=True,
+                                            can_restrict_members=True,
+                                            can_pin_messages=True,
+                                            can_promote_members=False,
+                                            can_change_info=True
+                                        )
+                                    )
+                                except Exception as invite_err:
+                                    logging.warning(f"Failed to promote bot in new channel {channel_id}: {invite_err}")
+
+                                await update_user_channel(user_id, channel_id)
+                                logging.info(f"Created private channel {channel_id} and added bot for user {user_id}")
+                            except pyrogram.errors.UserRestricted:
+                                logging.warning(f"User {user_id} is spam-reported — persisting Saved Messages fallback.")
+                                await update_user_channel(user_id, "saved_messages")
+                                upload_client = user_client
+                                destination_id = "me"
+                                using_user_session = True
+                                channel_id = None
+                            except Exception as e:
+                                logging.error(f"Failed to create private channel for user {user_id}: {e}")
+                                upload_client = user_client
+                                destination_id = "me"
+                                using_user_session = True
+                                channel_id = None
+
+                        if channel_id:
+                            upload_client = user_client
+                            destination_id = channel_id
+                            using_user_session = True
+
+                        # Cache the resolved destination for the rest of this batch
+                        _dest_channel_cache[user_id] = (destination_id, using_user_session)
+                        _resolved_channel_id = destination_id
+
                 for current_msg in target_messages:
                     path = None
                     thumb_path = None
@@ -816,15 +959,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                     if not getattr(current_msg, "media", None) and type(current_msg).__name__ != "Story":
                         try:
                             await client.send_message(user_id, safe_caption)
-                            user_data = await get_user(user_id)
-                            channel_id = user_data.get("download_channel_id") if user_data else None
-                            if channel_id and user_client and user_client != client:
+                            if _resolved_channel_id and user_client and user_client != client:
                                 try:
-                                    # "saved_messages" sentinel means spam-reported user — send to Saved Messages
-                                    if channel_id == "saved_messages":
-                                        text_dest = "me"
-                                    else:
-                                        text_dest = int(channel_id)
+                                    text_dest = "me" if _resolved_channel_id == "me" else int(_resolved_channel_id) if isinstance(_resolved_channel_id, str) else _resolved_channel_id
                                     await user_client.send_message(text_dest, safe_caption)
                                 except Exception as e:
                                     logging.error(f"Text upload to private channel failed: {e}")
@@ -896,122 +1033,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                             raise Exception("StopProcess")
 
                         await update_status(status_msg, "📤 Uploading...")
-
-                        upload_client = client
-                        destination_id = user_id
-                        using_user_session = False
-
-                        if user_client and user_client != client:
-                            user_data = await get_user(user_id)
-                            channel_id = user_data.get("download_channel_id") if user_data else None
-                            _skip_channel_create = False
-
-                            # Spam-reported users: skip all channel logic, go straight to Saved Messages
-                            if channel_id == "saved_messages":
-                                upload_client = user_client
-                                destination_id = "me"
-                                using_user_session = True
-                                _skip_channel_create = True
-                                channel_id = None
-
-                            # Check if an existing channel is still accessible
-                            elif channel_id:
-                                # Skip channel ops if the user client has gone offline
-                                if not user_client.is_connected:
-                                    logging.warning(f"User client for {user_id} is no longer connected — skipping channel check, using bot delivery")
-                                    channel_id = None
-                                    _skip_channel_create = True
-
-                                if channel_id:
-                                    try:
-                                        if isinstance(channel_id, str) and (channel_id.startswith("-100") or channel_id.isdigit() or channel_id.startswith("-")):
-                                            channel_id = int(channel_id)
-
-                                        try:
-                                            chat_obj = await user_client.get_chat(channel_id)
-                                            c_hash = getattr(chat_obj, "access_hash", None)
-                                            if c_hash:
-                                                await update_user_channel(user_id, channel_id, str(c_hash))
-                                        except pyrogram.errors.ChannelInvalid:
-                                            logging.warning(f"Channel {channel_id} is explicitly invalid for user.")
-                                            raise Exception("Channel invalid")
-                                        except Exception as user_e:
-                                            logging.warning(f"User client cannot see channel {channel_id}: {user_e}")
-
-                                        try:
-                                            await client.get_chat(channel_id)
-                                        except Exception:
-                                            try:
-                                                me = await client.get_me()
-                                                await user_client.add_chat_members(channel_id, me.id)
-                                                from pyrogram.types import ChatPrivileges
-                                                await user_client.promote_chat_member(
-                                                    channel_id, me.id,
-                                                    privileges=ChatPrivileges(
-                                                        can_post_messages=True,
-                                                        can_delete_messages=True,
-                                                        can_invite_users=True,
-                                                        can_manage_chat=True
-                                                    )
-                                                )
-                                            except Exception as re_e:
-                                                logging.warning(f"Failed to re-invite bot to channel {channel_id}: {re_e}")
-                                                raise Exception("Bot inaccessible")
-
-                                    except Exception as e:
-                                        logging.warning(f"Existing channel {channel_id} issue for user {user_id}: {e}. Attempting to recreate.")
-                                        channel_id = None
-
-                            # Create a new channel only if not spam-reported and no channel exists
-                            if not _skip_channel_create and not channel_id:
-                                try:
-                                    new_chat = await user_client.create_channel("Cloud Storage", "My private cloud storage for downloads.")
-                                    channel_id = new_chat.id
-                                    channel_hash = getattr(new_chat, "access_hash", None)
-                                    await update_user_channel(user_id, channel_id, str(channel_hash) if channel_hash else None)
-
-                                    bot_info = await client.get_me()
-                                    bot_username = bot_info.username
-                                    try:
-                                        from pyrogram.types import ChatPrivileges
-                                        invite_id = f"@{bot_username}" if bot_username else bot_info.id
-                                        await user_client.promote_chat_member(
-                                            channel_id,
-                                            invite_id,
-                                            privileges=ChatPrivileges(
-                                                can_post_messages=True,
-                                                can_delete_messages=True,
-                                                can_invite_users=True,
-                                                can_restrict_members=True,
-                                                can_pin_messages=True,
-                                                can_promote_members=False,
-                                                can_change_info=True
-                                            )
-                                        )
-                                    except Exception as invite_err:
-                                        logging.warning(f"Failed to promote bot in new channel {channel_id}: {invite_err}")
-
-                                    await update_user_channel(user_id, channel_id)
-                                    logging.info(f"Created private channel {channel_id} and added bot for user {user_id}")
-                                except pyrogram.errors.UserRestricted:
-                                    # Persist so we never attempt channel creation again for this user
-                                    logging.warning(f"User {user_id} is spam-reported — persisting Saved Messages fallback.")
-                                    await update_user_channel(user_id, "saved_messages")
-                                    upload_client = user_client
-                                    destination_id = "me"
-                                    using_user_session = True
-                                    channel_id = None
-                                except Exception as e:
-                                    logging.error(f"Failed to create private channel for user {user_id}: {e}")
-                                    upload_client = user_client
-                                    destination_id = "me"
-                                    using_user_session = True
-                                    channel_id = None
-
-                            if channel_id:
-                                upload_client = user_client
-                                destination_id = channel_id
-                                using_user_session = True
 
                         sent_msg = await upload_media_fast(
                             upload_client,
