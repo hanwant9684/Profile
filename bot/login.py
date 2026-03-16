@@ -252,7 +252,10 @@ async def handle_login_steps(client, message: Message):
 
     except Exception as e:
         logger.error(f"handle_login_steps error: {e}")
-        await message.reply("Error. Login cancelled.")
+        try:
+            await message.reply("Error. Login cancelled.")
+        except Exception as reply_err:
+            logger.warning(f"Could not send login cancellation message: {reply_err}")
         if "client" in state:
             try:
                 await state["client"].disconnect()

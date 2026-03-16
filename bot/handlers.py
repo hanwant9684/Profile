@@ -20,7 +20,9 @@ from bot.config import (
 MAX_FLOODWAIT_TOLERATE = 60
 
 async def safe_reply(message, text, **kwargs):
-    """Reply with automatic retry on short FloodWaits. Returns None on long waits."""
+    """Reply with automatic retry on short FloodWaits. Returns None on long waits.
+    Also records per-user FloodWait cooldown so handlers can skip future requests."""
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
     for attempt in range(3):
         try:
             return await message.reply(text, **kwargs)
@@ -31,6 +33,9 @@ async def safe_reply(message, text, **kwargs):
                 await asyncio.sleep(wait)
             else:
                 logging.error(f"FloodWait too long ({wait}s) — skipping reply")
+                if user_id:
+                    _user_floodwait_until[user_id] = time.time() + wait
+                    logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
                 return None
         except Exception as e:
             logging.error(f"safe_reply error: {e}")
@@ -156,6 +161,11 @@ _chat_type_cache: dict = {}
 # Stores (destination_id, using_user_session) so channel verification
 # (get_chat × 2 + get_user) only happens once per session, not once per batch item.
 _dest_channel_cache: dict = {}
+
+# Per-user FloodWait cooldown: {user_id: unix_timestamp_when_cooldown_expires}
+# When a user triggers a large FloodWait we stop processing their messages
+# until Telegram lifts the ban, preventing a storm of repeated failed replies.
+_user_floodwait_until: dict = {}
 
 # Per-user rate limiting: {user_id: last_request_timestamp}
 _user_last_request: dict = {}
@@ -392,6 +402,13 @@ async def batch_handler(client, message):
         await message.reply("❌ Batch command is for Premium users only.")
         return
 
+    # FloodWait cooldown guard
+    _fw_deadline = _user_floodwait_until.get(user_id, 0)
+    if time.time() < _fw_deadline:
+        remaining = int(_fw_deadline - time.time())
+        logging.info(f"Dropping batch request from user {user_id} — FloodWait cooldown ({remaining}s left)")
+        return
+
     start_link = parts[1]
     end_link = parts[2]
 
@@ -528,12 +545,17 @@ async def batch_handler(client, message):
         if idx < count:
             await asyncio.sleep(random.uniform(4, 7))
 
-    await batch_status.edit_text(
-        f"✅ **Batch complete!**\n\n"
-        f"📋 Total: {count}\n"
-        f"✅ Done: {done}\n"
-        f"❌ Skipped: {skipped}"
-    )
+    try:
+        await batch_status.edit_text(
+            f"✅ **Batch complete!**\n\n"
+            f"📋 Total: {count}\n"
+            f"✅ Done: {done}\n"
+            f"❌ Skipped: {skipped}"
+        )
+    except (FloodWait, FloodPremiumWait) as e:
+        logging.warning(f"FloodWait {e.value}s on batch completion edit for user {user_id} — skipping final status update")
+    except Exception:
+        pass
     await show_ad(client, user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
@@ -553,6 +575,13 @@ async def download_handler(client, message, link_override=None, processed_albums
 
     if user and user.get("role") == "banned":
         await message.reply("❌ **You are banned from using this bot.**")
+        return
+
+    # FloodWait cooldown guard — silently drop requests while Telegram rate-limits this user
+    _fw_deadline = _user_floodwait_until.get(user_id, 0)
+    if time.time() < _fw_deadline:
+        remaining = int(_fw_deadline - time.time())
+        logging.info(f"Dropping request from user {user_id} — still in FloodWait cooldown ({remaining}s left)")
         return
 
     # Rate limiting — only for direct user messages, not internal batch calls
@@ -731,6 +760,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                     except (FloodWait, FloodPremiumWait) as e:
                         wait_secs = e.value
                         logging.warning(f"FloodWait on get_messages: {wait_secs}s for user {user_id} (attempt {_fetch_attempt + 1})")
+                        if wait_secs > MAX_FLOODWAIT_TOLERATE:
+                            await update_status(status_msg, f"⏳ Telegram rate limit is too high ({wait_secs}s). Please try again later.")
+                            return None
                         await update_status(status_msg, f"⏳ Telegram rate limit — auto-resuming in {wait_secs}s...")
                         await asyncio.sleep(wait_secs + 2)
                     except Exception as e:
@@ -827,6 +859,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                         raise e
                     except Exception as e:
                         error_str = str(e)
+                        if "USER_IS_BLOCKED" in error_str:
+                            logging.warning(f"User {user_id} has blocked the bot — cannot send direct extraction.")
+                            return None
                         if "MEDIA_CAPTION_TOO_LONG" in error_str:
                             # Caption exceeds Telegram's 1024-char limit — retry with blank caption
                             try:
@@ -962,7 +997,17 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 using_user_session = True
                                 channel_id = None
                             except Exception as e:
-                                logging.error(f"Failed to create private channel for user {user_id}: {e}")
+                                error_str = str(e)
+                                if "CHANNELS_TOO_MUCH" in error_str:
+                                    logging.error(f"Failed to create private channel for user {user_id}: CHANNELS_TOO_MUCH")
+                                    await safe_reply(message,
+                                        "❌ **Cannot create download channel.**\n\n"
+                                        "Your Telegram account has joined too many channels/groups. "
+                                        "Please leave some channels from your account and try again.\n\n"
+                                        "Files will be sent to your Saved Messages in the meantime."
+                                    )
+                                else:
+                                    logging.error(f"Failed to create private channel for user {user_id}: {e}")
                                 upload_client = user_client
                                 destination_id = "me"
                                 using_user_session = True
@@ -987,6 +1032,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                         safe_caption = current_msg.text
                     
                     safe_caption = truncate_caption(safe_caption)
+
+                    if getattr(current_msg, "poll", None):
+                        await safe_reply(message, "⚠️ Poll messages cannot be downloaded — skipping.")
+                        continue
 
                     if not getattr(current_msg, "media", None) and type(current_msg).__name__ != "Story":
                         try:
