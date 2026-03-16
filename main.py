@@ -3,12 +3,21 @@ import uvloop
 import logging
 import os
 import sys
+import resource
 from dotenv import load_dotenv
 
 # Set event loop policy FIRST
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 load_dotenv()
+
+# Optimization for 3GB RAM VPS
+try:
+    # Set soft memory limit to 2.7GB to leave room for system on 3GB VPS
+    # Using 2.7GB (2764.8 MB) to be safer than 2.8GB
+    resource.setrlimit(resource.RLIMIT_AS, (2700 * 1024 * 1024, -1))
+except Exception:
+    pass
 
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
