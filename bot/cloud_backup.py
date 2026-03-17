@@ -133,7 +133,7 @@ async def restore_from_github_async():
         logger.error(f"GitHub restore failed: {e}")
         return False
 
-async def periodic_cloud_backup(interval_minutes=10):
+async def periodic_cloud_backup(interval_minutes=60):
     backup_service = os.getenv("CLOUD_BACKUP_SERVICE", "").lower()
     if backup_service != "github": return
     while True:
