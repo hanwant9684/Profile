@@ -4,7 +4,7 @@ import logging
 import aiohttp
 import redis.asyncio as redis
 import json
-from bot.logger import setup_logger, cleanup_loop
+from bot.logger import setup_logger
 from pyrogram import Client
 from dotenv import load_dotenv
 
@@ -70,6 +70,7 @@ def get_smart_download_workers(file_size):
 
 active_downloads = set()
 cancel_flags = set()
+batch_sessions = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states = {}
 
@@ -111,6 +112,6 @@ app = Client(
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
-    max_concurrent_transmissions=20,
-    workers=20
+    max_concurrent_transmissions=10,
+    workers=4
 )
