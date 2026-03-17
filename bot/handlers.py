@@ -224,13 +224,36 @@ async def get_user_client(user_id, session_str):
         no_updates=True,
         max_concurrent_transmissions=4
     )
-    await client.start()
+    try:
+        await client.start()
+    except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
+        logging.error(f"Session for user {user_id} is invalid at startup: {e}")
+        from bot.database import logout_user
+        await logout_user(user_id)
+        raise SessionExpiredError()
     user_clients[user_id] = {"client": client, "last_used": now}
 
     if not _cleanup_task_started:
         asyncio.create_task(cleanup_user_clients())
         _cleanup_task_started = True
     return client
+
+async def verify_user_session(user_id: int, client) -> None:
+    """Do a cheap get_me() to confirm the session is still valid.
+    Raises SessionExpiredError and cleans up if it is not."""
+    try:
+        await client.get_me()
+    except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
+        logging.error(f"Session pre-check failed for user {user_id}: {e}")
+        evicted = user_clients.pop(user_id, None)
+        if evicted:
+            try:
+                await evicted["client"].stop()
+            except Exception:
+                pass
+        from bot.database import logout_user
+        await logout_user(user_id)
+        raise SessionExpiredError()
 
 async def cleanup_user_clients():
     global _cleanup_cycle
@@ -534,6 +557,19 @@ async def batch_handler(client, message):
     done = 0
     skipped = 0
 
+    # One-time session check before the batch loop starts (private links only)
+    if link_type in ("private", "private_topic"):
+        session_str = user.get('phone_session_string') if user else None
+        if not session_str:
+            await batch_status.edit_text("❌ Login is required for private links. Use /login.")
+            return
+        try:
+            _pre_client = await get_user_client(user_id, session_str)
+            await verify_user_session(user_id, _pre_client)
+        except SessionExpiredError:
+            await batch_status.edit_text("❌ Your Telegram session has expired. Please /login again.")
+            return
+
     # Hold the session guard for the entire batch so the cleanup loop
     # never evicts this user's Pyrogram client during inter-item sleeps
     # or FloodWait pauses (where active_sessions would be temporarily clear).
@@ -820,6 +856,13 @@ async def download_handler(client, message, link_override=None, processed_albums
                     if session_str:
                         active_sessions.add(user_id)
                         user_client = await get_user_client(user_id, session_str)
+                        try:
+                            await verify_user_session(user_id, user_client)
+                        except SessionExpiredError:
+                            await update_status(status_msg, "❌ Your Telegram session has expired. Please /login again.")
+                            if link_override is not None:
+                                raise
+                            return None
                 else:
                     user_client = client
 
@@ -1207,8 +1250,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 )
                                 break
                             except (FloodWait, FloodPremiumWait) as e:
-                                logging.warning(f"FloodWait on download: {e.value}s")
-                                await asyncio.sleep(e.value)
+                                wait_secs = e.value
+                                logging.warning(f"FloodWait on download: {wait_secs}s")
+                                await update_status(status_msg, f"⏳ Telegram rate limit hit — pausing for {wait_secs}s and auto-resuming. Use /cancel to stop.")
+                                await asyncio.sleep(wait_secs)
                             except asyncio.TimeoutError:
                                 logging.error(f"Download stuck/timed out (30 min) for user {user_id}, msg {current_msg.id} — aborting")
                                 await update_status(status_msg, "❌ Download timed out — transfer appeared stuck. Please try again.")
@@ -1325,8 +1370,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                             logging.error(f"Upload stuck/timed out (30 min) for user {user_id} — aborting")
                             await update_status(status_msg, "❌ Upload timed out — transfer appeared stuck. Please try again.")
                         elif isinstance(e, (FloodWait, FloodPremiumWait)):
-                            logging.error(f"Download/Upload error: {e}")
-                            await update_status(status_msg, f"⏳ Telegram rate limit hit. Please try again later.")
+                            wait_secs = e.value
+                            logging.warning(f"Download/Upload FloodWait: {wait_secs}s")
+                            await update_status(status_msg, f"⏳ Telegram rate limit hit — please wait {wait_secs}s before trying again.")
                         elif "Can't upload files bigger" in str(e) or "File size" in str(e):
                             logging.error(f"File size error: {e}")
                             await update_status(status_msg, "❌ File is too large (exceeds 2GB limit).")
