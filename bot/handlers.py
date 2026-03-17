@@ -67,16 +67,18 @@ async def send_to_dump(client, user_id, link, msg):
             logging.error(f"Invalid dump_id format in database: {dump_id}")
             return
         
-        # Verify bot access to dump channel
-        try:
-            # We use get_chat to "resolve" the peer. 
-            # If this fails with CHANNEL_INVALID, it means the bot doesn't know this ID yet
-            await client.get_chat(dump_id)
-        except (pyrogram.errors.ChannelInvalid, pyrogram.errors.PeerIdInvalid):
-            logging.error(f"Bot cannot access dump channel {dump_id}. Ensure the bot is an ADMIN in that channel and has been added to it.")
-            return
-        except Exception as e:
-            logging.warning(f"Error resolving dump channel {dump_id}: {e}")
+        # Verify bot access to dump channel — only call get_chat once per session;
+        # after that the peer is resolved in Telegram's session cache and never changes.
+        global _dump_channel_verified
+        if not _dump_channel_verified:
+            try:
+                await client.get_chat(dump_id)
+                _dump_channel_verified = True
+            except (pyrogram.errors.ChannelInvalid, pyrogram.errors.PeerIdInvalid):
+                logging.error(f"Bot cannot access dump channel {dump_id}. Ensure the bot is an ADMIN in that channel and has been added to it.")
+                return
+            except Exception as e:
+                logging.warning(f"Error resolving dump channel {dump_id}: {e}")
         
         # 2. Create the Header
         header = f"👤 **User:** `{user_id}`\n🔗 **Link:** {link}\n\n"
@@ -176,6 +178,22 @@ _user_floodwait_until: dict = {}
 # Per-user rate limiting: {user_id: last_request_timestamp}
 _user_last_request: dict = {}
 RATE_LIMIT_SECONDS = 3
+
+# Cached bot identity — fetched once on first use, never changes during runtime
+_bot_info_cache = None
+
+# Whether the dump channel has been verified accessible (only needs to succeed once)
+_dump_channel_verified: bool = False
+
+# Linked discussion group cache for comment links: {channel_id_or_username -> group_id}
+# A channel's linked group never changes so this is safe to cache indefinitely.
+_linked_chat_cache: dict = {}
+
+async def get_cached_bot_info(client):
+    global _bot_info_cache
+    if _bot_info_cache is None:
+        _bot_info_cache = await client.get_me()
+    return _bot_info_cache
 
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
@@ -750,33 +768,37 @@ async def download_handler(client, message, link_override=None, processed_albums
         comment_id = int(private_comment_match.group(3))
         is_private = True
         is_group = True
-        try:
-            chat_info = await client.get_chat(temp_channel_id)
-            if chat_info.linked_chat:
-                chat_id = chat_info.linked_chat.id # Now targets the correct Private Group
+        if temp_channel_id in _linked_chat_cache:
+            chat_id = _linked_chat_cache[temp_channel_id]
+            message_id = comment_id
+        else:
+            try:
+                chat_info = await client.get_chat(temp_channel_id)
+                linked_id = chat_info.linked_chat.id if chat_info.linked_chat else temp_channel_id
+                _linked_chat_cache[temp_channel_id] = linked_id
+                chat_id = linked_id
                 message_id = comment_id
-            else:
+            except Exception:
                 chat_id = temp_channel_id
                 message_id = comment_id
-        except Exception:
-            chat_id = temp_channel_id
-            message_id = comment_id
     elif comment_match:
         temp_channel = comment_match.group(1)
         comment_id = int(comment_match.group(3))
         is_private = True
         is_group = True
-        try:
-            chat_info = await client.get_chat(temp_channel)
-            if chat_info.linked_chat:
-                chat_id = chat_info.linked_chat.id # Use the GROUP ID instead
+        if temp_channel in _linked_chat_cache:
+            chat_id = _linked_chat_cache[temp_channel]
+            message_id = comment_id
+        else:
+            try:
+                chat_info = await client.get_chat(temp_channel)
+                linked_id = chat_info.linked_chat.id if chat_info.linked_chat else temp_channel
+                _linked_chat_cache[temp_channel] = linked_id
+                chat_id = linked_id
                 message_id = comment_id
-            else:
+            except Exception:
                 chat_id = temp_channel
                 message_id = comment_id
-        except Exception:
-            chat_id = temp_channel
-            message_id = comment_id
     elif private_thread_match:
         chat_id = int("-100" + private_thread_match.group(1))
         message_id = int(private_thread_match.group(2))
@@ -833,7 +855,6 @@ async def download_handler(client, message, link_override=None, processed_albums
         if status_msg is None:
             logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
             return None
-    user = await get_user(user_id)
 
     if (is_private or is_group) and (not user or not user.get('phone_session_string')):
         await update_status(status_msg, "❌ Login is required for private links. Use /login.")
@@ -856,13 +877,14 @@ async def download_handler(client, message, link_override=None, processed_albums
                     if session_str:
                         active_sessions.add(user_id)
                         user_client = await get_user_client(user_id, session_str)
-                        try:
-                            await verify_user_session(user_id, user_client)
-                        except SessionExpiredError:
-                            await update_status(status_msg, "❌ Your Telegram session has expired. Please /login again.")
-                            if link_override is not None:
-                                raise
-                            return None
+                        # Single downloads verify session here via get_me().
+                        # Batch calls skip this — the batch handler already ran a one-time check upfront.
+                        if link_override is None:
+                            try:
+                                await verify_user_session(user_id, user_client)
+                            except SessionExpiredError:
+                                await update_status(status_msg, "❌ Your Telegram session has expired. Please /login again.")
+                                return None
                 else:
                     user_client = client
 
@@ -985,8 +1007,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                     target_messages = [msg]
                     is_media_group = False
 
-                user_data = await get_user(user_id)
-                if user_data and user_data.get("role") == "free":
+                if user and user.get("role") == "free":
                     await increment_quota(user_id, len(target_messages))
 
                 if not is_private and not is_group and not is_story:
@@ -1059,8 +1080,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if using_user_session:
                             upload_client = user_client
                     else:
-                        user_data = await get_user(user_id)
-                        channel_id = user_data.get("download_channel_id") if user_data else None
+                        channel_id = user.get("download_channel_id") if user else None
                         _skip_channel_create = False
 
                         if channel_id == "saved_messages":
@@ -1096,7 +1116,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         await client.get_chat(channel_id)
                                     except Exception:
                                         try:
-                                            me = await client.get_me()
+                                            me = await get_cached_bot_info(client)
                                             await user_client.add_chat_members(channel_id, me.id)
                                             from pyrogram.types import ChatPrivileges
                                             await user_client.promote_chat_member(
@@ -1123,7 +1143,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 channel_hash = getattr(new_chat, "access_hash", None)
                                 await update_user_channel(user_id, channel_id, str(channel_hash) if channel_hash else None)
 
-                                bot_info = await client.get_me()
+                                bot_info = await get_cached_bot_info(client)
                                 bot_username = bot_info.username
                                 try:
                                     from pyrogram.types import ChatPrivileges
@@ -1144,7 +1164,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 except Exception as invite_err:
                                     logging.warning(f"Failed to promote bot in new channel {channel_id}: {invite_err}")
 
-                                await update_user_channel(user_id, channel_id)
                                 logging.info(f"Created private channel {channel_id} and added bot for user {user_id}")
                             except pyrogram.errors.UserRestricted:
                                 logging.warning(f"User {user_id} is spam-reported — persisting Saved Messages fallback.")
