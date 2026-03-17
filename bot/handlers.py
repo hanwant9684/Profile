@@ -15,12 +15,8 @@ from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as A
 from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore,
-    OWNER_ID, cancel_flags, login_states, batch_sessions
+    OWNER_ID, cancel_flags, login_states
 )
-
-class SessionExpiredError(Exception):
-    """Raised when the user's Telegram session is invalid (AUTH_KEY_UNREGISTERED / SESSION_REVOKED)."""
-    pass
 
 MAX_FLOODWAIT_TOLERATE = 60
 
@@ -156,6 +152,7 @@ async def send_to_dump(client, user_id, link, msg):
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
 active_sessions = set() # Track sessions currently in use (per-item level)
+_batch_sessions = set() # Track users mid-batch — held for the entire batch duration
 _cleanup_task_started = False
 _cleanup_cycle = 0  # Counts cleanup iterations; used to schedule infrequent sub-tasks
 
@@ -242,14 +239,14 @@ async def cleanup_user_clients():
         # ── 1. User client session eviction (every 120s) ─────────────────────
         to_remove = []
         for user_id, data in user_clients.items():
-            if user_id in active_sessions or user_id in batch_sessions:
+            if user_id in active_sessions or user_id in _batch_sessions:
                 data["last_used"] = now
                 continue
             if now - data["last_used"] > 600:
                 to_remove.append(user_id)
 
         for user_id in to_remove:
-            if user_id in active_sessions or user_id in batch_sessions:
+            if user_id in active_sessions or user_id in _batch_sessions:
                 continue
             data = user_clients.pop(user_id, None)
             if data:
@@ -313,7 +310,7 @@ async def update_status(msg, text):
     except Exception as e:
         logging.debug(f"Status update failed: {e}")
 
-async def progress_bar(current, total, message, type_msg, min_interval=2):
+async def progress_bar(current, total, message, type_msg):
     if not hasattr(progress_bar, "data"):
         progress_bar.data = {}
         progress_bar.last_cleanup = time.time()
@@ -350,7 +347,7 @@ async def progress_bar(current, total, message, type_msg, min_interval=2):
 
     # Simple timer and percentage threshold
     time_diff = now - data["last_edit"]
-    if time_diff < min_interval:
+    if time_diff < 2:
         return
 
     last_percentage = data.get("last_percentage", 0)
@@ -537,7 +534,7 @@ async def batch_handler(client, message):
     # Hold the session guard for the entire batch so the cleanup loop
     # never evicts this user's Pyrogram client during inter-item sleeps
     # or FloodWait pauses (where active_sessions would be temporarily clear).
-    batch_sessions.add(user_id)
+    _batch_sessions.add(user_id)
     try:
         for idx, msg_id in enumerate(range(start_id, end_id + 1), start=1):
             if user_id in cancel_flags:
@@ -574,8 +571,7 @@ async def batch_handler(client, message):
                     result = await download_handler(
                         client, message,
                         link_override=link,
-                        processed_albums=processed_albums,
-                        status_msg_override=batch_status
+                        processed_albums=processed_albums
                     )
                     if result is not None:
                         done += 1
@@ -583,17 +579,6 @@ async def batch_handler(client, message):
                         skipped += 1
                     item_done = True
                     break
-                except SessionExpiredError:
-                    cancel_flags.discard(user_id)
-                    try:
-                        await batch_status.edit_text(
-                            f"🔐 **Session expired — batch stopped**\n\n"
-                            f"Your Telegram session is no longer valid. Please /login again.\n\n"
-                            f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Processed: {idx - 1}/{count}"
-                        )
-                    except Exception:
-                        pass
-                    return
                 except (FloodWait, FloodPremiumWait) as e:
                     wait_secs = e.value
                     logging.warning(f"Batch outer FloodWait: {wait_secs}s for user {user_id}, item {msg_id}, attempt {attempt + 1}")
@@ -617,15 +602,9 @@ async def batch_handler(client, message):
             if not item_done:
                 skipped += 1
 
-            # Cancellation-aware inter-item delay: checks cancel_flags every second
+            # Smart inter-item delay: 4–7s after each item to stay well under Telegram limits
             if idx < count:
-                delay = random.uniform(4, 7)
-                elapsed = 0.0
-                while elapsed < delay:
-                    if user_id in cancel_flags:
-                        break
-                    await asyncio.sleep(1)
-                    elapsed += 1
+                await asyncio.sleep(random.uniform(4, 7))
 
         try:
             await batch_status.edit_text(
@@ -640,10 +619,10 @@ async def batch_handler(client, message):
             pass
         await show_ad(client, user_id)
     finally:
-        batch_sessions.discard(user_id)
+        _batch_sessions.discard(user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
-async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None):
+async def download_handler(client, message, link_override=None, processed_albums=None):
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
@@ -790,13 +769,10 @@ async def download_handler(client, message, link_override=None, processed_albums
             logging.debug(f"Chat check error for {chat_id}: {e}")
             pass
 
-    if status_msg_override is not None:
-        status_msg = status_msg_override
-    else:
-        status_msg = await safe_reply(message, "⏳ Processing...")
-        if status_msg is None:
-            logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
-            return None
+    status_msg = await safe_reply(message, "⏳ Processing...")
+    if status_msg is None:
+        logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
+        return None
     user = await get_user(user_id)
 
     if (is_private or is_group) and (not user or not user.get('phone_session_string')):
@@ -888,8 +864,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     except:
                                         pass
                             await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
-                            if link_override is not None:
-                                raise SessionExpiredError()
                             return None
 
                         if "TAKEOUT_INIT_DELAY" in error_str:
@@ -925,8 +899,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                 media_group_id = getattr(msg, "media_group_id", None)
                 if processed_albums is not None and media_group_id:
                     if media_group_id in processed_albums:
-                        if status_msg_override is None:
-                            await status_msg.delete()
+                        await status_msg.delete()
                         return msg.id
                     processed_albums.add(media_group_id)
 
@@ -962,8 +935,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                             await send_to_dump(client, user_id, link, msg)
                             
                             processed_count = 1
-                        if status_msg_override is None:
-                            await status_msg.delete()
+                        await status_msg.delete()
                         # Show ad after direct extraction
                         await show_ad(client, user_id)
                         active_downloads.discard(user_id)
@@ -984,8 +956,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     await msg.copy(chat_id=user_id, caption="")
                                 await send_to_dump(client, user_id, link, msg)
                                 processed_count = len(target_messages) if media_group_id else 1
-                                if status_msg_override is None:
-                                    await status_msg.delete()
+                                await status_msg.delete()
                                 await show_ad(client, user_id)
                                 active_downloads.discard(user_id)
                                 return msg
@@ -1194,14 +1165,13 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         for _dl_attempt in range(2):
                             try:
-                                _pb_interval = 8 if link_override is not None else 2
                                 path = await asyncio.wait_for(
                                     download_media_fast(
                                         user_client,
                                         current_msg,
                                         None,
                                         progress_callback=progress_bar,
-                                        progress_args=(status_msg, "📥 Downloading", _pb_interval)
+                                        progress_args=(status_msg, "📥 Downloading")
                                     ),
                                     timeout=1800  # 30 min — kills truly stuck transfers
                                 )
@@ -1256,7 +1226,6 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         await update_status(status_msg, "📤 Uploading...")
 
-                        _pb_interval = 8 if link_override is not None else 2
                         sent_msg = await asyncio.wait_for(
                             upload_media_fast(
                                 upload_client,
@@ -1268,12 +1237,12 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 width=width,
                                 height=height,
                                 progress_callback=progress_bar,
-                                progress_args=(status_msg, "📤 Uploading", _pb_interval)
+                                progress_args=(status_msg, "📤 Uploading")
                             ),
                             timeout=1800  # 30 min — kills truly stuck uploads
                         )
 
-                        if sent_msg and using_user_session and link_override is None:
+                        if sent_msg and using_user_session:
                             try:
                                 await client.send_message(user_id, f"✅ **File uploaded to your private channel!**\n\nChannel ID: `{destination_id}`")
                             except Exception:
@@ -1294,8 +1263,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     try: await client_data["client"].stop()
                                     except: pass
                             await update_status(status_msg, "❌ Session expired. Please /login again.")
-                            if link_override is not None:
-                                raise SessionExpiredError()
                             return None
 
                         if str(e) == "StopProcess":
@@ -1343,8 +1310,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
-                if status_msg_override is None:
-                    await status_msg.delete()
+                await status_msg.delete()
                 # Show ad after download handler completes (covers single and media groups)
                 await show_ad(client, user_id)
                 return msg 
@@ -1353,8 +1319,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                 if hasattr(progress_bar, "data"):
                     progress_bar.data.pop(status_msg.id, None)
 
-    except SessionExpiredError:
-        raise
     except Exception as e:
         error_str = str(e)
         if any(kw in error_str for kw in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "401"]):
@@ -1373,8 +1337,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                     await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
                 except:
                     pass
-            if link_override is not None:
-                raise SessionExpiredError()
             return None
         
         logging.error(f"Download handler error: {e}")
