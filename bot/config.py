@@ -4,7 +4,7 @@ import logging
 import aiohttp
 import redis.asyncio as redis
 import json
-from bot.logger import setup_logger
+from bot.logger import setup_logger, cleanup_loop
 from pyrogram import Client
 from dotenv import load_dotenv
 
@@ -111,6 +111,6 @@ app = Client(
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
-    max_concurrent_transmissions=10,
-    workers=4
+    max_concurrent_transmissions=20,
+    workers=20
 )

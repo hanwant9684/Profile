@@ -1,5 +1,4 @@
 import asyncio
-import gc
 import os
 import time
 import io
@@ -15,7 +14,7 @@ from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as A
 from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore,
-    OWNER_ID, cancel_flags, login_states
+    OWNER_ID, cancel_flags
 )
 
 MAX_FLOODWAIT_TOLERATE = 60
@@ -151,10 +150,8 @@ async def send_to_dump(client, user_id, link, msg):
         
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
-active_sessions = set() # Track sessions currently in use (per-item level)
-_batch_sessions = set() # Track users mid-batch — held for the entire batch duration
+active_sessions = set() # Track sessions currently in use
 _cleanup_task_started = False
-_cleanup_cycle = 0  # Counts cleanup iterations; used to schedule infrequent sub-tasks
 
 # Cache for get_chat results keyed by chat_id to avoid repeated API calls
 # e.g. during a batch of 50 items from the same channel
@@ -179,24 +176,17 @@ async def get_user_client(user_id, session_str):
     now = time.time()
     
     if user_id in user_clients:
-        cached = user_clients[user_id]
-        client = cached["client"]
-        idle_secs = now - cached["last_used"]
-
-        # Telegram silently closes idle TCP sockets after ~60-120s.
-        # is_connected only checks an internal flag — it cannot detect
-        # a server-side close. Evict any client idle for over 90s so the
-        # next call always starts on a freshly opened socket.
-        if idle_secs <= 90 and client.is_connected:
-            cached["last_used"] = now
+        client = user_clients[user_id]["client"]
+        if client.is_connected:
+            user_clients[user_id]["last_used"] = now
             return client
-
-        # Idle too long or already disconnected — tear down and rebuild.
-        try:
-            await client.stop()
-        except Exception:
-            pass
-        del user_clients[user_id]
+        else:
+            # Reconnect or cleanup dead client
+            try:
+                await client.stop()
+            except:
+                pass
+            del user_clients[user_id]
 
     # Evict oldest idle session if cache is full (cap at 50 concurrent sessions)
     MAX_USER_SESSIONS = 50
@@ -219,7 +209,7 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=120,
         no_updates=True,
-        max_concurrent_transmissions=4
+        max_concurrent_transmissions=15
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -230,75 +220,29 @@ async def get_user_client(user_id, session_str):
     return client
 
 async def cleanup_user_clients():
-    global _cleanup_cycle
     while True:
-        await asyncio.sleep(120)
+        await asyncio.sleep(60)
         now = time.time()
-        _cleanup_cycle += 1
-
-        # ── 1. User client session eviction (every 120s) ─────────────────────
         to_remove = []
         for user_id, data in user_clients.items():
-            if user_id in active_sessions or user_id in _batch_sessions:
-                data["last_used"] = now
+            # Don't cleanup if currently in use
+            if user_id in active_sessions:
+                data["last_used"] = now # Refresh last_used
                 continue
-            if now - data["last_used"] > 600:
+                
+            if now - data["last_used"] > 600: # 10 minutes
                 to_remove.append(user_id)
 
         for user_id in to_remove:
-            if user_id in active_sessions or user_id in _batch_sessions:
+            if user_id in active_sessions: # Double check
                 continue
             data = user_clients.pop(user_id, None)
             if data:
+                client = data["client"]
                 try:
-                    await data["client"].stop()
+                    await client.stop()
                 except Exception:
                     pass
-
-        # ── 2. Rate-limit / FloodWait dict TTL eviction (every 120s) ─────────
-        _TTL = 3600
-        for uid in [u for u, ts in _user_last_request.items() if now - ts > _TTL]:
-            _user_last_request.pop(uid, None)
-        for uid in [u for u, dl in _user_floodwait_until.items() if now > dl]:
-            _user_floodwait_until.pop(uid, None)
-
-        # ── 3. Cache size caps (every 120s) ───────────────────────────────────
-        if len(_dest_channel_cache) > 500:
-            for uid in list(_dest_channel_cache.keys())[:250]:
-                _dest_channel_cache.pop(uid, None)
-        if len(_chat_type_cache) > 500:
-            for key in list(_chat_type_cache.keys())[:250]:
-                _chat_type_cache.pop(key, None)
-
-        # ── 4. Login session expiry (every 120s) ──────────────────────────────
-        expired_logins = [
-            uid for uid, state in login_states.items()
-            if now - state.get("timestamp", 0) > 300
-        ]
-        for uid in expired_logins:
-            state = login_states.pop(uid, None)
-            if state and "client" in state:
-                try:
-                    await state["client"].stop()
-                except Exception:
-                    try:
-                        await state["client"].disconnect()
-                    except Exception:
-                        pass
-            try:
-                await app.send_message(uid, "⚠️ Login session expired due to inactivity.")
-            except Exception:
-                pass
-
-        # ── 5. Python GC (every 15 cycles = ~30 min) ─────────────────────────
-        if _cleanup_cycle % 15 == 0:
-            gc.collect()
-            try:
-                import psutil
-                mem = psutil.Process().memory_info().rss / 1024 / 1024
-                logging.info(f"Scheduled GC: current RSS {mem:.1f} MB")
-            except Exception:
-                pass
 
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
 from bot.ads import show_ad
@@ -531,95 +475,88 @@ async def batch_handler(client, message):
     done = 0
     skipped = 0
 
-    # Hold the session guard for the entire batch so the cleanup loop
-    # never evicts this user's Pyrogram client during inter-item sleeps
-    # or FloodWait pauses (where active_sessions would be temporarily clear).
-    _batch_sessions.add(user_id)
-    try:
-        for idx, msg_id in enumerate(range(start_id, end_id + 1), start=1):
-            if user_id in cancel_flags:
-                cancel_flags.discard(user_id)
-                await batch_status.edit_text(
-                    f"🛑 **Batch cancelled**\n\n"
-                    f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Total attempted: {idx - 1}"
-                )
-                return
+    for idx, msg_id in enumerate(range(start_id, end_id + 1), start=1):
+        if user_id in cancel_flags:
+            cancel_flags.discard(user_id)
+            await batch_status.edit_text(
+                f"🛑 **Batch cancelled**\n\n"
+                f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Total attempted: {idx - 1}"
+            )
+            return
 
-            if link_type == "private_topic":
-                link = f"https://t.me/c/{channel_part}/{topic_part}/{msg_id}"
-            elif link_type == "public_topic":
-                link = f"https://t.me/{channel_part}/{topic_part}/{msg_id}"
-            elif link_type == "private":
-                link = f"https://t.me/c/{channel_part}/{msg_id}"
-            else:
-                link = f"https://t.me/{channel_part}/{msg_id}"
+        if link_type == "private_topic":
+            link = f"https://t.me/c/{channel_part}/{topic_part}/{msg_id}"
+        elif link_type == "public_topic":
+            link = f"https://t.me/{channel_part}/{topic_part}/{msg_id}"
+        elif link_type == "private":
+            link = f"https://t.me/c/{channel_part}/{msg_id}"
+        else:
+            link = f"https://t.me/{channel_part}/{msg_id}"
 
-            # Update live status
-            try:
-                await batch_status.edit_text(
-                    f"📥 **Batch in progress** — item {idx}/{count}\n\n"
-                    f"✅ Done: {done} | ❌ Skipped: {skipped}\n"
-                    f"🔗 Processing: `{link}`"
-                )
-            except Exception:
-                pass
-
-            # Retry this item up to 3 times (handles FloodWait inside download_handler)
-            item_done = False
-            for attempt in range(3):
-                try:
-                    result = await download_handler(
-                        client, message,
-                        link_override=link,
-                        processed_albums=processed_albums
-                    )
-                    if result is not None:
-                        done += 1
-                    else:
-                        skipped += 1
-                    item_done = True
-                    break
-                except (FloodWait, FloodPremiumWait) as e:
-                    wait_secs = e.value
-                    logging.warning(f"Batch outer FloodWait: {wait_secs}s for user {user_id}, item {msg_id}, attempt {attempt + 1}")
-                    try:
-                        await batch_status.edit_text(
-                            f"⏳ **Rate limit hit — auto-pausing**\n\n"
-                            f"Waiting {wait_secs}s before retrying item {idx}/{count}...\n"
-                            f"✅ Done: {done} | ❌ Skipped: {skipped}"
-                        )
-                    except Exception:
-                        pass
-                    await asyncio.sleep(wait_secs + 3)
-                except Exception as e:
-                    logging.error(f"Batch item error (link={link}, attempt={attempt + 1}): {e}")
-                    if attempt == 2:
-                        skipped += 1
-                        item_done = True
-                    else:
-                        await asyncio.sleep(3)
-
-            if not item_done:
-                skipped += 1
-
-            # Smart inter-item delay: 4–7s after each item to stay well under Telegram limits
-            if idx < count:
-                await asyncio.sleep(random.uniform(4, 7))
-
+        # Update live status
         try:
             await batch_status.edit_text(
-                f"✅ **Batch complete!**\n\n"
-                f"📋 Total: {count}\n"
-                f"✅ Done: {done}\n"
-                f"❌ Skipped: {skipped}"
+                f"📥 **Batch in progress** — item {idx}/{count}\n\n"
+                f"✅ Done: {done} | ❌ Skipped: {skipped}\n"
+                f"🔗 Processing: `{link}`"
             )
-        except (FloodWait, FloodPremiumWait) as e:
-            logging.warning(f"FloodWait {e.value}s on batch completion edit for user {user_id} — skipping final status update")
         except Exception:
             pass
-        await show_ad(client, user_id)
-    finally:
-        _batch_sessions.discard(user_id)
+
+        # Retry this item up to 3 times (handles FloodWait inside download_handler)
+        item_done = False
+        for attempt in range(3):
+            try:
+                result = await download_handler(
+                    client, message,
+                    link_override=link,
+                    processed_albums=processed_albums
+                )
+                if result is not None:
+                    done += 1
+                else:
+                    skipped += 1
+                item_done = True
+                break
+            except (FloodWait, FloodPremiumWait) as e:
+                wait_secs = e.value
+                logging.warning(f"Batch outer FloodWait: {wait_secs}s for user {user_id}, item {msg_id}, attempt {attempt + 1}")
+                try:
+                    await batch_status.edit_text(
+                        f"⏳ **Rate limit hit — auto-pausing**\n\n"
+                        f"Waiting {wait_secs}s before retrying item {idx}/{count}...\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped}"
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(wait_secs + 3)
+            except Exception as e:
+                logging.error(f"Batch item error (link={link}, attempt={attempt + 1}): {e}")
+                if attempt == 2:
+                    skipped += 1
+                    item_done = True
+                else:
+                    await asyncio.sleep(3)
+
+        if not item_done:
+            skipped += 1
+
+        # Smart inter-item delay: 4–7s after each item to stay well under Telegram limits
+        if idx < count:
+            await asyncio.sleep(random.uniform(4, 7))
+
+    try:
+        await batch_status.edit_text(
+            f"✅ **Batch complete!**\n\n"
+            f"📋 Total: {count}\n"
+            f"✅ Done: {done}\n"
+            f"❌ Skipped: {skipped}"
+        )
+    except (FloodWait, FloodPremiumWait) as e:
+        logging.warning(f"FloodWait {e.value}s on batch completion edit for user {user_id} — skipping final status update")
+    except Exception:
+        pass
+    await show_ad(client, user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
 async def download_handler(client, message, link_override=None, processed_albums=None):
@@ -828,28 +765,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                             return None
                         await update_status(status_msg, f"⏳ Telegram rate limit — auto-resuming in {wait_secs}s...")
                         await asyncio.sleep(wait_secs + 2)
-                    except (ConnectionError, OSError, TimeoutError) as e:
-                        # Stale TCP socket — evict the dead client and reconnect once.
-                        logging.warning(f"TCP error on get_messages for user {user_id} (attempt {_fetch_attempt + 1}): {e}")
-                        stale = user_clients.pop(user_id, None)
-                        if stale:
-                            try:
-                                await stale["client"].stop()
-                            except Exception:
-                                pass
-                        if _fetch_attempt < 3:
-                            session_str = user.get("phone_session_string") if user else None
-                            if session_str:
-                                try:
-                                    user_client = await get_user_client(user_id, session_str)
-                                    await asyncio.sleep(1)
-                                except Exception as reconnect_err:
-                                    logging.error(f"Reconnect failed for user {user_id}: {reconnect_err}")
-                                    await update_status(status_msg, "❌ Connection error. Please try again.")
-                                    return None
-                        else:
-                            await update_status(status_msg, "❌ Connection error after retries. Please try again.")
-                            return None
                     except Exception as e:
                         error_str = str(e)
                         if any(kw in error_str for kw in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "401"]):
@@ -1163,59 +1078,33 @@ async def download_handler(client, message, link_override=None, processed_albums
                             width = getattr(current_msg.document, "width", 0) or 0
                             height = getattr(current_msg.document, "height", 0) or 0
 
-                        for _dl_attempt in range(2):
-                            try:
-                                path = await asyncio.wait_for(
-                                    download_media_fast(
-                                        user_client,
-                                        current_msg,
-                                        None,
-                                        progress_callback=progress_bar,
-                                        progress_args=(status_msg, "📥 Downloading")
-                                    ),
-                                    timeout=1800  # 30 min — kills truly stuck transfers
-                                )
-                                break
-                            except (FloodWait, FloodPremiumWait) as e:
-                                logging.warning(f"FloodWait on download: {e.value}s")
-                                await asyncio.sleep(e.value)
-                            except asyncio.TimeoutError:
-                                logging.error(f"Download stuck/timed out (30 min) for user {user_id}, msg {current_msg.id} — aborting")
-                                await update_status(status_msg, "❌ Download timed out — transfer appeared stuck. Please try again.")
-                                path = None
-                                break
-                            except (ConnectionError, OSError, TimeoutError) as e:
-                                logging.warning(f"TCP error during download for user {user_id} (attempt {_dl_attempt + 1}): {e}")
-                                stale = user_clients.pop(user_id, None)
-                                if stale:
-                                    try:
-                                        await stale["client"].stop()
-                                    except Exception:
-                                        pass
-                                if _dl_attempt < 1:
-                                    session_str_dl = user.get("phone_session_string") if user else None
-                                    if session_str_dl:
-                                        try:
-                                            user_client = await get_user_client(user_id, session_str_dl)
-                                            await asyncio.sleep(1)
-                                        except Exception as reconnect_dl_err:
-                                            logging.error(f"Reconnect after download TCP error failed: {reconnect_dl_err}")
-                                            path = None
-                                            break
-                                else:
-                                    path = None
-                                    break
-                            except (FileReferenceExpired, FileReferenceInvalid) as e:
-                                logging.error(f"File reference expired for message: {e}")
-                                await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
-                                path = None
-                                break
-                            except Exception as e:
-                                if str(e) == "StopProcess":
-                                    raise e
-                                logging.error(f"Download crash: {e}")
-                                path = None
-                                break
+                        try:
+                            path = await download_media_fast(
+                                user_client,
+                                current_msg,
+                                None,
+                                progress_callback=progress_bar,
+                                progress_args=(status_msg, "📥 Downloading")
+                            )
+                        except (FloodWait, FloodPremiumWait) as e:
+                            logging.warning(f"FloodWait on download: {e.value}s")
+                            await asyncio.sleep(e.value)
+                            path = await download_media_fast(
+                                user_client,
+                                current_msg,
+                                None,
+                                progress_callback=progress_bar,
+                                progress_args=(status_msg, "📥 Downloading")
+                            )
+                        except (FileReferenceExpired, FileReferenceInvalid) as e:
+                            logging.error(f"File reference expired for message: {e}")
+                            await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
+                            path = None
+                        except Exception as e:
+                            if str(e) == "StopProcess":
+                                raise e
+                            logging.error(f"Download crash: {e}")
+                            path = None
 
                         if not path or not os.path.exists(path):
                             logging.error(f"Download failed or file missing: {path}")
@@ -1226,20 +1115,17 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         await update_status(status_msg, "📤 Uploading...")
 
-                        sent_msg = await asyncio.wait_for(
-                            upload_media_fast(
-                                upload_client,
-                                destination_id,
-                                path,
-                                caption=safe_caption,
-                                thumb=thumb_path,
-                                duration=duration,
-                                width=width,
-                                height=height,
-                                progress_callback=progress_bar,
-                                progress_args=(status_msg, "📤 Uploading")
-                            ),
-                            timeout=1800  # 30 min — kills truly stuck uploads
+                        sent_msg = await upload_media_fast(
+                            upload_client,
+                            destination_id,
+                            path,
+                            caption=safe_caption,
+                            thumb=thumb_path,
+                            duration=duration,
+                            width=width,
+                            height=height,
+                            progress_callback=progress_bar,
+                            progress_args=(status_msg, "📤 Uploading")
                         )
 
                         if sent_msg and using_user_session:
@@ -1288,10 +1174,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                             await update_status(status_msg, "❌ This media type is not supported for download.")
                             continue
 
-                        if isinstance(e, asyncio.TimeoutError):
-                            logging.error(f"Upload stuck/timed out (30 min) for user {user_id} — aborting")
-                            await update_status(status_msg, "❌ Upload timed out — transfer appeared stuck. Please try again.")
-                        elif isinstance(e, (FloodWait, FloodPremiumWait)):
+                        if isinstance(e, (FloodWait, FloodPremiumWait)):
                             logging.error(f"Download/Upload error: {e}")
                             await update_status(status_msg, f"⏳ Telegram rate limit hit. Please try again later.")
                         elif "Can't upload files bigger" in str(e) or "File size" in str(e):

@@ -1,3 +1,4 @@
+import asyncio
 import time
 from pyrogram import filters
 from pyrogram.client import Client
@@ -103,6 +104,34 @@ async def login_start(client, message):
         "Please send your **Phone Number** in international format (e.g., +1234567890).\n\n"
         "⏳ This session will expire in 5 minutes if no activity is detected."
     )
+
+async def cleanup_expired_logins():
+    while True:
+        try:
+            now = time.time()
+            expired_users = [
+                user_id for user_id, state in login_states.items()
+                if now - state.get("timestamp", 0) > 300  # 5 minutes timeout
+            ]
+            for user_id in expired_users:
+                state = login_states[user_id]
+                if "client" in state:
+                    try:
+                        # Ensure we stop the client properly to release threads
+                        await state["client"].stop()
+                    except:
+                        try:
+                            await state["client"].disconnect()
+                        except:
+                            pass
+                del login_states[user_id]
+                try:
+                    await app.send_message(user_id, "⚠️ Login session expired due to inactivity.")
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+        await asyncio.sleep(60)
 
 @app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "stats", "killall"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
