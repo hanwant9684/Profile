@@ -70,6 +70,7 @@ def get_smart_download_workers(file_size):
 
 active_downloads = set()
 cancel_flags = set()
+batch_sessions = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states = {}
 

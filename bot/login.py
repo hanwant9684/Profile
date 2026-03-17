@@ -237,17 +237,15 @@ async def handle_login_steps(client, message: Message):
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_downloads(client, message):
     user_id = message.from_user.id
-    from bot.config import active_downloads, cancel_flags
-    
-    if user_id in active_downloads:
+    from bot.config import active_downloads, cancel_flags, batch_sessions
+
+    if user_id in active_downloads or user_id in batch_sessions:
         cancel_flags.add(user_id)
-        # We don't discard from active_downloads here, the handler will do it after cleaning up
-        await message.reply("🛑 Download cancellation request sent.")
+        await message.reply("🛑 Cancellation signal sent. The batch/download will stop at the next checkpoint.")
     else:
-        # Just in case the flag was set but not in active_downloads
         if user_id in cancel_flags:
             cancel_flags.discard(user_id)
-        await message.reply("No active downloads to cancel.")
+        await message.reply("No active downloads or batch to cancel.")
 
 @app.on_message(filters.command("cancel_login") & filters.private)
 async def cancel_login(client, message):
