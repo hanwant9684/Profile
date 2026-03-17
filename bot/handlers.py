@@ -1194,13 +1194,14 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         for _dl_attempt in range(2):
                             try:
+                                _pb_interval = 8 if link_override is not None else 2
                                 path = await asyncio.wait_for(
                                     download_media_fast(
                                         user_client,
                                         current_msg,
                                         None,
                                         progress_callback=progress_bar,
-                                        progress_args=(status_msg, "📥 Downloading", 8)
+                                        progress_args=(status_msg, "📥 Downloading", _pb_interval)
                                     ),
                                     timeout=1800  # 30 min — kills truly stuck transfers
                                 )
@@ -1255,6 +1256,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         await update_status(status_msg, "📤 Uploading...")
 
+                        _pb_interval = 8 if link_override is not None else 2
                         sent_msg = await asyncio.wait_for(
                             upload_media_fast(
                                 upload_client,
@@ -1266,7 +1268,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 width=width,
                                 height=height,
                                 progress_callback=progress_bar,
-                                progress_args=(status_msg, "📤 Uploading", 8)
+                                progress_args=(status_msg, "📤 Uploading", _pb_interval)
                             ),
                             timeout=1800  # 30 min — kills truly stuck uploads
                         )
