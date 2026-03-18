@@ -63,9 +63,9 @@ MAX_CONCURRENT_DOWNLOADS = 10
 
 def get_smart_download_workers(file_size):
     if file_size < 100 * 1024 * 1024:
-        return 4
+        return 1
     else:
-        return 10
+        return 4
         
 
 active_downloads = set()
