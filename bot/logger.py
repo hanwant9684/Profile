@@ -1,6 +1,9 @@
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import gc
+import psutil
+import asyncio
 
 logger = logging.getLogger("bot")
 
@@ -25,3 +28,11 @@ def setup_logger():
     logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)
     logging.getLogger("pyrogram.connection.connection").setLevel(logging.ERROR)
 
+async def cleanup_loop():
+    """Periodic RAM and garbage collection cleanup"""
+    while True:
+        await asyncio.sleep(1800) # 30 minutes
+        gc.collect()
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        logging.info(f"Scheduled Cleanup: GC collected. Current RSS: {mem_info.rss / 1024 / 1024:.2f} MB")
