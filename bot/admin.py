@@ -1,11 +1,20 @@
 import asyncio
+import logging
 from pyrogram import filters
+
+async def update_status(msg, text):
+    try:
+        await msg.edit_text(text)
+    except Exception as e:
+        logging.debug(f"Status update failed: {e}")
+
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
-from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count
+from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user, iter_user_ids
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID): return
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"): return
     
     total_users = await get_user_count()
     
@@ -17,7 +26,8 @@ async def stats(client, message):
 
 @app.on_message(filters.command("killall") & filters.private)
 async def kill_all_processes(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID): return
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"): return
     
     from bot.config import cancel_flags
     
@@ -34,7 +44,8 @@ async def kill_all_processes(client, message):
 
 @app.on_message(filters.command("setrole") & filters.private)
 async def setrole(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         await message.reply("⛔ Authorized personnel only.")
         return
         
@@ -75,7 +86,8 @@ async def setrole(client, message):
 
 @app.on_message(filters.command("ban") & filters.private)
 async def ban(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     try:
@@ -87,7 +99,8 @@ async def ban(client, message):
 
 @app.on_message(filters.command("unban") & filters.private)
 async def unban(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     try:
@@ -99,7 +112,8 @@ async def unban(client, message):
 
 @app.on_message(filters.command("set_force_sub") & filters.private)
 async def set_force_sub(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
     
     try:
@@ -111,7 +125,8 @@ async def set_force_sub(client, message):
 
 @app.on_message(filters.command("set_dump") & filters.private)
 async def set_dump(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
     
     try:
@@ -123,7 +138,8 @@ async def set_dump(client, message):
 
 @app.on_message(filters.command("settings") & filters.private)
 async def view_settings(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     fs = await get_setting("force_sub_channel")
@@ -144,7 +160,8 @@ async def view_settings(client, message):
 
 @app.on_message(filters.command("broadcast") & filters.private)
 async def broadcast(client, message):
-    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     if not message.reply_to_message:
@@ -168,89 +185,66 @@ async def broadcast(client, message):
     msg = await message.reply("🚀 Starting broadcast...")
     count = 0
     blocked = 0
-    
+    index = 0
+
     if target_ids:
         # Broadcast to specific users
         for tid in target_ids:
             try:
-                # Convert to int if it's a numeric ID to avoid BOT_METHOD_INVALID
                 target_key = int(tid) if str(tid).strip("-").isdigit() else tid
                 await message.reply_to_message.copy(target_key)
                 count += 1
             except Exception:
                 blocked += 1
             await asyncio.sleep(0.05)
+        await update_status(msg, f"✅ Broadcast complete.\nTotal: {len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
     else:
-        # Broadcast to all users
-        users = await get_all_users()
-        total = len(users)
-        
-        for index, row in enumerate(users):
+        # Paginated broadcast — never loads all users into RAM
+        total = await get_user_count()
+        async for tid in iter_user_ids():
             try:
-                # Get the telegram_id and ensure it's an integer
-                tid = row.get('telegram_id')
-                if tid:
-                    target_key = int(tid) if str(tid).strip("-").isdigit() else tid
-                    await message.reply_to_message.copy(target_key)
-                    count += 1
+                await message.reply_to_message.copy(int(tid))
+                count += 1
             except Exception as e:
                 blocked += 1
-                print(f"[ERROR] Broadcast failed for {row.get('telegram_id')}: {e}")
-            
-            # Periodically update the progress message for transparency
-            if (index + 1) % 50 == 0:
-                try:
-                    await msg.edit_text(f"🚀 Broadcasting...\nProgress: {index + 1}/{total}\nSent: {count}\nFailed: {blocked}")
-                except Exception:
-                    pass
-            
-            # Rate limiting: 20 messages per second (0.05s delay) 
-            # to stay within Telegram's broad limits for bots
+                logging.debug(f"Broadcast failed for {tid}: {e}")
+
+            index += 1
+            if index % 50 == 0:
+                await update_status(msg, f"🚀 Broadcasting...\nProgress: {index}/{total}\nSent: {count}\nFailed: {blocked}")
+
             await asyncio.sleep(0.05)
-    
-    await msg.edit_text(f"✅ Broadcast complete.\nTotal: {total if not target_ids else len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
+
+        await update_status(msg, f"✅ Broadcast complete.\nTotal: {total}\nSent: {count}\nFailed/Blocked: {blocked}")
 
 @app.on_message(filters.command("premium_users") & filters.private, group=-1)
 async def list_premium_users(client, message):
     user_id = message.from_user.id
+    user = await get_user(user_id)
     
-    if OWNER_ID is None or int(user_id) != int(OWNER_ID):
+    if (OWNER_ID is None or int(user_id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
         
     try:
-        all_users = await get_all_users()
-        premium_users = [u for u in all_users if u.get("role") == "premium"]
+        from bot.database import pool
+        from datetime import datetime
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT telegram_id, username, full_name, premium_expiry_date FROM users WHERE role = 'premium' AND (premium_expiry_date IS NULL OR premium_expiry_date >= $1)", datetime.now())
+        premium_users = [dict(row) for row in rows]
         
         if not premium_users:
             await message.reply("No premium users found.")
             return
 
         text = "💎 **Premium Users List**\n\n"
-        for user in premium_users:
-            u_id = user.get("telegram_id")
-            expiry = user.get("premium_expiry_date", "Never")
+        for user_data in premium_users:
+            u_id = user_data.get("telegram_id")
+            expiry = user_data.get("premium_expiry_date", "Never")
             
-            name = "Unknown"
+            name = user_data.get("full_name") or "No Name"
             username_str = ""
-            
-            try:
-                user_key = int(u_id) if str(u_id).strip("-").isdigit() else u_id
-                tg_user = await client.get_users(user_key)
-                
-                name = tg_user.first_name or "No Name"
-                if tg_user.last_name:
-                    name += f" {tg_user.last_name}"
-                
-                if tg_user.username:
-                    username_str = f" (@{tg_user.username})"
-            except Exception as e:
-                name = user.get("first_name") or "Unknown"
-                if user.get("last_name"):
-                    name += f" {user['last_name']}"
-                
-                username = user.get("username")
-                if username:
-                    username_str = f" (@{username})"
+            if user_data.get("username"):
+                username_str = f" (@{user_data['username']})"
                 
             text += f"👤 Name: **{name}**{username_str}\n🆔 ID: `{u_id}`\n📅 Expiry: `{expiry}`\n\n"
         
@@ -263,4 +257,3 @@ async def list_premium_users(client, message):
         await message.reply(f"Error: {e}")
     
     message.stop_propagation()
-
