@@ -196,7 +196,7 @@ async def broadcast(client, message):
                 count += 1
             except Exception:
                 blocked += 1
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)
         await update_status(msg, f"✅ Broadcast complete.\nTotal: {len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
     else:
         # Paginated broadcast — never loads all users into RAM
@@ -210,10 +210,10 @@ async def broadcast(client, message):
                 logging.debug(f"Broadcast failed for {tid}: {e}")
 
             index += 1
-            if index % 20 == 0:
+            if index % 50 == 0:
                 await update_status(msg, f"🚀 Broadcasting...\nProgress: {index}/{total}\nSent: {count}\nFailed: {blocked}")
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)
 
         await update_status(msg, f"✅ Broadcast complete.\nTotal: {total}\nSent: {count}\nFailed/Blocked: {blocked}")
 
