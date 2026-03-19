@@ -1,4 +1,3 @@
-import asyncio
 import time
 from pyrogram import filters
 from pyrogram.client import Client
@@ -104,34 +103,6 @@ async def login_start(client, message):
         "Please send your **Phone Number** in international format (e.g., +1234567890).\n\n"
         "⏳ This session will expire in 5 minutes if no activity is detected."
     )
-
-async def cleanup_expired_logins():
-    while True:
-        try:
-            now = time.time()
-            expired_users = [
-                user_id for user_id, state in login_states.items()
-                if now - state.get("timestamp", 0) > 300  # 5 minutes timeout
-            ]
-            for user_id in expired_users:
-                state = login_states[user_id]
-                if "client" in state:
-                    try:
-                        # Ensure we stop the client properly to release threads
-                        await state["client"].stop()
-                    except:
-                        try:
-                            await state["client"].disconnect()
-                        except:
-                            pass
-                del login_states[user_id]
-                try:
-                    await app.send_message(user_id, "⚠️ Login session expired due to inactivity.")
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"Cleanup error: {e}")
-        await asyncio.sleep(60)
 
 @app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "stats", "killall"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
@@ -252,7 +223,10 @@ async def handle_login_steps(client, message: Message):
 
     except Exception as e:
         logger.error(f"handle_login_steps error: {e}")
-        await message.reply("Error. Login cancelled.")
+        try:
+            await message.reply("Error. Login cancelled.")
+        except Exception as reply_err:
+            logger.warning(f"Could not send login cancellation message: {reply_err}")
         if "client" in state:
             try:
                 await state["client"].disconnect()
@@ -263,17 +237,15 @@ async def handle_login_steps(client, message: Message):
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_downloads(client, message):
     user_id = message.from_user.id
-    from bot.config import active_downloads, cancel_flags
-    
-    if user_id in active_downloads:
+    from bot.config import active_downloads, cancel_flags, batch_sessions
+
+    if user_id in active_downloads or user_id in batch_sessions:
         cancel_flags.add(user_id)
-        # We don't discard from active_downloads here, the handler will do it after cleaning up
-        await message.reply("🛑 Download cancellation request sent.")
+        await message.reply("🛑 Cancellation signal sent. The batch/download will stop at the next checkpoint.")
     else:
-        # Just in case the flag was set but not in active_downloads
         if user_id in cancel_flags:
             cancel_flags.discard(user_id)
-        await message.reply("No active downloads to cancel.")
+        await message.reply("No active downloads or batch to cancel.")
 
 @app.on_message(filters.command("cancel_login") & filters.private)
 async def cancel_login(client, message):

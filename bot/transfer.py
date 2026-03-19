@@ -53,15 +53,6 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
             logging.error(f"File reference expired on attempt {i+1}: {e}")
             raise
         except Exception as e:
-            try:
-                import glob as _glob
-                for tmp in _glob.glob("downloads/*.temp"):
-                    try:
-                        os.remove(tmp)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
             if i == retries - 1:
                 raise e
             logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
@@ -125,7 +116,11 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
 
     try:
         if not client.is_connected:
-            await client.start()
+            try:
+                await client.start()
+            except Exception as start_err:
+                if "already" not in str(start_err).lower():
+                    raise
             
         if isinstance(chat_id, str) and chat_id.lower() == "me":
             target_id = "me"
