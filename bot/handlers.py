@@ -172,7 +172,7 @@ _user_floodwait_until: dict = {}
 
 # Per-user rate limiting: {user_id: last_request_timestamp}
 _user_last_request: dict = {}
-RATE_LIMIT_SECONDS = 3
+RATE_LIMIT_SECONDS = 900
 
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
@@ -301,7 +301,6 @@ async def cleanup_user_clients():
                 pass
 
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
-from bot.ads import show_ad
 from bot.transfer import download_media_fast, upload_media_fast, truncate_caption
 
 async def update_status(msg, text):
@@ -571,7 +570,8 @@ async def batch_handler(client, message):
                     result = await download_handler(
                         client, message,
                         link_override=link,
-                        processed_albums=processed_albums
+                        processed_albums=processed_albums,
+                        status_msg_override=batch_status
                     )
                     if result is not None:
                         done += 1
@@ -617,12 +617,11 @@ async def batch_handler(client, message):
             logging.warning(f"FloodWait {e.value}s on batch completion edit for user {user_id} — skipping final status update")
         except Exception:
             pass
-        await show_ad(client, user_id)
     finally:
         _batch_sessions.discard(user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
-async def download_handler(client, message, link_override=None, processed_albums=None):
+async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None):
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
@@ -647,13 +646,16 @@ async def download_handler(client, message, link_override=None, processed_albums
         logging.info(f"Dropping request from user {user_id} — still in FloodWait cooldown ({remaining}s left)")
         return
 
-    # Rate limiting — only for direct user messages, not internal batch calls
-    if link_override is None:
+    # Rate limiting — only for free users sending direct messages (not batch calls)
+    if link_override is None and (not user or user.get("role", "free") == "free"):
         _now = time.time()
         _last = _user_last_request.get(user_id, 0)
         _wait = RATE_LIMIT_SECONDS - (_now - _last)
         if _wait > 0:
-            await message.reply(f"⏳ Please wait **{_wait:.1f}s** before sending another request.")
+            _wait_mins = int(_wait // 60)
+            _wait_secs = int(_wait % 60)
+            _wait_str = f"{_wait_mins}m {_wait_secs}s" if _wait_mins > 0 else f"{_wait_secs}s"
+            await message.reply(f"⏳ Please wait **{_wait_str}** before sending another request.")
             return
         _user_last_request[user_id] = _now
 
@@ -769,11 +771,13 @@ async def download_handler(client, message, link_override=None, processed_albums
             logging.debug(f"Chat check error for {chat_id}: {e}")
             pass
 
-    status_msg = await safe_reply(message, "⏳ Processing...")
-    if status_msg is None:
-        logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
-        return None
-    user = await get_user(user_id)
+    if status_msg_override is not None:
+        status_msg = status_msg_override
+    else:
+        status_msg = await safe_reply(message, "⏳ Processing...")
+        if status_msg is None:
+            logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
+            return None
 
     if (is_private or is_group) and (not user or not user.get('phone_session_string')):
         await update_status(status_msg, "❌ Login is required for private links. Use /login.")
@@ -899,15 +903,12 @@ async def download_handler(client, message, link_override=None, processed_albums
                 media_group_id = getattr(msg, "media_group_id", None)
                 if processed_albums is not None and media_group_id:
                     if media_group_id in processed_albums:
-                        await status_msg.delete()
+                        # In batch mode, never delete the shared status message
+                        if status_msg_override is None:
+                            await status_msg.delete()
                         return msg.id
                     processed_albums.add(media_group_id)
 
-                can_download, quota_status = await check_and_update_quota(user_id)
-
-                if not can_download:
-                    await update_status(status_msg, f"❌ {quota_status}")
-                    return None
                 if not is_story and getattr(msg, "media_group_id", None):
                     target_messages = await user_client.get_media_group(chat_id, message_id)
                     is_media_group = True
@@ -915,8 +916,13 @@ async def download_handler(client, message, link_override=None, processed_albums
                     target_messages = [msg]
                     is_media_group = False
 
-                user_data = await get_user(user_id)
-                if user_data and user_data.get("role") == "free":
+                can_download, quota_status = await check_and_update_quota(user_id)
+
+                if not can_download:
+                    await update_status(status_msg, f"❌ {quota_status}")
+                    return None
+
+                if user and user.get("role") == "free":
                     await increment_quota(user_id, len(target_messages))
 
                 if not is_private and not is_group and not is_story:
@@ -935,9 +941,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                             await send_to_dump(client, user_id, link, msg)
                             
                             processed_count = 1
-                        await status_msg.delete()
-                        # Show ad after direct extraction
-                        await show_ad(client, user_id)
+                        if status_msg_override is None:
+                            await status_msg.delete()
                         active_downloads.discard(user_id)
                         return msg 
                     except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
@@ -956,8 +961,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     await msg.copy(chat_id=user_id, caption="")
                                 await send_to_dump(client, user_id, link, msg)
                                 processed_count = len(target_messages) if media_group_id else 1
-                                await status_msg.delete()
-                                await show_ad(client, user_id)
+                                if status_msg_override is None:
+                                    await status_msg.delete()
                                 active_downloads.discard(user_id)
                                 return msg
                             except Exception as retry_e:
@@ -987,8 +992,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if using_user_session:
                             upload_client = user_client
                     else:
-                        user_data = await get_user(user_id)
-                        channel_id = user_data.get("download_channel_id") if user_data else None
+                        channel_id = user.get("download_channel_id") if user else None
                         _skip_channel_create = False
 
                         if channel_id == "saved_messages":
@@ -1084,12 +1088,13 @@ async def download_handler(client, message, link_override=None, processed_albums
                             except Exception as e:
                                 error_str = str(e)
                                 if "CHANNELS_TOO_MUCH" in error_str:
-                                    logging.error(f"Failed to create private channel for user {user_id}: CHANNELS_TOO_MUCH")
+                                    logging.warning(f"User {user_id} has too many channels — persisting Saved Messages fallback.")
+                                    await update_user_channel(user_id, "saved_messages")
                                     await safe_reply(message,
-                                        "❌ **Cannot create download channel.**\n\n"
-                                        "Your Telegram account has joined too many channels/groups. "
-                                        "Please leave some channels from your account and try again.\n\n"
-                                        "Files will be sent to your Saved Messages in the meantime."
+                                        "⚠️ **Your account has joined too many channels/groups.**\n\n"
+                                        "Telegram won't let us create a private download channel for you right now. "
+                                        "Your files will be sent to your **Saved Messages** instead.\n\n"
+                                        "You can free up space by leaving some channels, then send /start to reset."
                                     )
                                 else:
                                     logging.error(f"Failed to create private channel for user {user_id}: {e}")
@@ -1242,11 +1247,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                             timeout=1800  # 30 min — kills truly stuck uploads
                         )
 
-                        if sent_msg and using_user_session:
-                            try:
-                                await client.send_message(user_id, f"✅ **File uploaded to your private channel!**\n\nChannel ID: `{destination_id}`")
-                            except Exception:
-                                pass
 
                         if sent_msg:
                             await send_to_dump(client, user_id, link, sent_msg)
@@ -1310,9 +1310,23 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if thumb_path and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
-                await status_msg.delete()
-                # Show ad after download handler completes (covers single and media groups)
-                await show_ad(client, user_id)
+                if status_msg_override is None:
+                    # Confirmation message for single / media-group (never for batch)
+                    try:
+                        if using_user_session:
+                            if destination_id == "me":
+                                conf_text = "✅ File uploaded to your **Saved Messages**!"
+                            else:
+                                conf_text = (
+                                    f"✅ File uploaded to your private channel!\n\n"
+                                    f"**Channel ID:** `{destination_id}`"
+                                )
+                        else:
+                            conf_text = "✅ File forwarded successfully!"
+                        await client.send_message(user_id, conf_text)
+                    except Exception as _conf_err:
+                        logging.debug(f"Confirmation message failed: {_conf_err}")
+                    await status_msg.delete()
                 return msg 
             finally:
                 active_downloads.discard(user_id)

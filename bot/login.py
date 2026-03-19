@@ -14,7 +14,8 @@ async def start(client, message):
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
 
-    from bot.handlers import verify_force_sub
+    from bot.handlers import verify_force_sub, _dest_channel_cache
+    _dest_channel_cache.pop(user_id, None)   # clear cached destination so /start always re-resolves
     is_subbed, channel = await verify_force_sub(client, user_id)
     if not is_subbed:
         channel_url = channel.replace('@', '') if channel else ''
@@ -35,13 +36,6 @@ async def start(client, message):
         if user.get("username") != username or user.get("full_name") != full_name:
             await create_user(user_id, username, full_name)
             user = await get_user(user_id)
-    
-    # Show RichAds on start
-    try:
-        from bot.ads import show_ad
-        await show_ad(client, user_id)
-    except Exception as e:
-        logger.error(f"Error showing RichAds: {e}")
     
     if not user or not user.get('is_agreed_terms'):
         text = (
@@ -65,13 +59,6 @@ async def accept_terms(client, callback_query):
     user_id = callback_query.from_user.id
     await update_user_terms(user_id, True)
     
-    # Show RichAds after accepting terms
-    try:
-        from bot.ads import show_ad
-        await show_ad(client, user_id)
-    except Exception as e:
-        logger.error(f"Error showing RichAds on T&C accept: {e}")
-        
     try:
         await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
     except Exception as e:
