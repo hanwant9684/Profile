@@ -750,7 +750,7 @@ async def download_handler(client, message, link_override=None, processed_albums
             _wait_mins = int(_wait // 60)
             _wait_secs = int(_wait % 60)
             _wait_str = f"{_wait_mins}m {_wait_secs}s" if _wait_mins > 0 else f"{_wait_secs}s"
-            await message.reply(f"⏳ Please wait **{_wait_str}** before sending another request.")
+            await message.reply(f"⏳ Please wait **{_wait_str}** before sending another request. Or /upgrade to Premium for ⛔ No wait Time.")
             return
         _user_last_request[user_id] = _now
 
