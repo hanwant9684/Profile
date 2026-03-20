@@ -47,3 +47,8 @@ outputType = "console"
 
 [agent]
 expertMode = true
+
+[userenv]
+
+[userenv.shared]
+REDIS_URL = "redis://localhost:6379"
