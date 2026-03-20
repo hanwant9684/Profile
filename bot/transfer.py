@@ -1,31 +1,173 @@
 import os
-import logging
+import time
+import uuid
+import shutil
 import asyncio
+import logging
+import mimetypes
 from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
 from pyrogram.errors.exceptions.bad_request_400 import PhotoExtInvalid
 from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
-from bot.config import get_smart_download_workers
+
+# Chunk size used internally by pyrotgfork — must match to keep offset arithmetic correct
+_PYROGRAM_CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+# Minimum file size to bother with parallel download (below this serial is fine)
+_MIN_PARALLEL_SIZE = 5 * 1024 * 1024  # 5 MB
+
+
+async def download_media_parallel(
+    client: Client,
+    message: Message,
+    file_name=None,
+    num_workers: int = 4,
+    progress_callback=None,
+    progress_args=()
+):
+    """
+    Parallel chunk downloader.
+
+    pyrotgfork's download_media fetches 1 MB chunks ONE AT A TIME over a single
+    MTProto connection.  Telegram's DC processes each GetFile RPC in ~250-300 ms,
+    giving a hard ceiling of ~4 MB/s regardless of network speed or
+    max_concurrent_transmissions (that parameter only limits concurrent files,
+    not per-file parallelism).
+
+    This function splits the file into `num_workers` byte ranges and runs them
+    concurrently via asyncio.gather(), so N workers × 4 MB/s = N× throughput.
+    Falls back silently to the standard serial download on any error.
+    """
+    from pyrogram.file_id import FileId
+
+    # --- identify media object and extract size / file_id ---
+    media = (
+        getattr(message, "document", None) or
+        getattr(message, "video", None) or
+        getattr(message, "audio", None) or
+        getattr(message, "voice", None) or
+        getattr(message, "video_note", None) or
+        getattr(message, "animation", None) or
+        getattr(message, "sticker", None)
+    )
+
+    if not media:
+        return await download_media_fast(client, message, file_name, progress_callback, progress_args)
+
+    file_size = getattr(media, "file_size", 0) or 0
+    file_id_str = getattr(media, "file_id", None)
+
+    if not file_id_str or file_size < _MIN_PARALLEL_SIZE:
+        return await download_media_fast(client, message, file_name, progress_callback, progress_args)
+
+    try:
+        file_id_obj = FileId.decode(file_id_str)
+    except Exception as e:
+        logging.warning(f"Parallel download: could not decode file_id ({e}), using serial fallback")
+        return await download_media_fast(client, message, file_name, progress_callback, progress_args)
+
+    # --- determine output path and extension ---
+    original_name = getattr(media, "file_name", "") or ""
+    ext = os.path.splitext(original_name)[-1] if original_name else ""
+    if not ext:
+        mime = getattr(media, "mime_type", "") or ""
+        ext_map = {
+            "video/mp4": ".mp4", "video/x-matroska": ".mkv",
+            "video/quicktime": ".mov", "video/x-msvideo": ".avi",
+            "video/webm": ".webm", "audio/mpeg": ".mp3",
+            "audio/mp4": ".m4a", "audio/ogg": ".ogg",
+            "audio/wav": ".wav", "audio/flac": ".flac",
+            "image/jpeg": ".jpg", "image/png": ".png",
+            "image/webp": ".webp",
+        }
+        ext = ext_map.get(mime) or mimetypes.guess_extension(mime) or ".bin"
+
+    uid = uuid.uuid4().hex[:10]
+    out_path = os.path.join("downloads", f"dl_{uid}{ext}")
+
+    # --- split file into N chunk ranges ---
+    total_chunks = (file_size + _PYROGRAM_CHUNK_SIZE - 1) // _PYROGRAM_CHUNK_SIZE
+    actual_workers = min(num_workers, total_chunks)
+
+    base, rem = divmod(total_chunks, actual_workers)
+    ranges = []  # list of (offset_in_chunks, count_in_chunks)
+    pos = 0
+    for i in range(actual_workers):
+        cnt = base + (1 if i < rem else 0)
+        ranges.append((pos, cnt))
+        pos += cnt
+
+    temp_paths = [os.path.join("downloads", f"dl_{uid}_p{i}.tmp") for i in range(actual_workers)]
+    downloaded = [0] * actual_workers
+    last_report = [time.time()]
+    worker_errors = []
+
+    async def worker(idx, chunk_offset, chunk_limit):
+        try:
+            with open(temp_paths[idx], "wb") as fh:
+                async for chunk in client.get_file(
+                    file_id_obj, file_size, limit=chunk_limit, offset=chunk_offset
+                ):
+                    fh.write(chunk)
+                    downloaded[idx] += len(chunk)
+                    # Shared progress reporting — throttled to once per 2 s
+                    if progress_callback:
+                        now = time.time()
+                        if now - last_report[0] >= 2:
+                            last_report[0] = now
+                            total_dl = min(sum(downloaded), file_size)
+                            if asyncio.iscoroutinefunction(progress_callback):
+                                await progress_callback(total_dl, file_size, *progress_args)
+        except Exception as e:
+            worker_errors.append(e)
+            logging.warning(f"Parallel download worker {idx} failed: {e}")
+
+    try:
+        await asyncio.gather(*[worker(i, off, cnt) for i, (off, cnt) in enumerate(ranges)])
+
+        if worker_errors:
+            raise worker_errors[0]
+
+        # Assemble part files into final output
+        with open(out_path, "wb") as out:
+            for tp in temp_paths:
+                if not os.path.exists(tp):
+                    raise FileNotFoundError(f"Part file missing: {tp}")
+                with open(tp, "rb") as inp:
+                    shutil.copyfileobj(inp, out)
+
+        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            raise ValueError("Assembled file is empty")
+
+        logging.info(
+            f"Parallel download complete: {file_size/1024/1024:.1f} MB "
+            f"across {actual_workers} workers → {out_path}"
+        )
+        return out_path
+
+    except Exception as e:
+        logging.warning(f"Parallel download failed ({e}), falling back to serial download")
+        for p in [out_path] + temp_paths:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        return await download_media_fast(client, message, file_name, progress_callback, progress_args)
+
+    finally:
+        for tp in temp_paths:
+            try:
+                if os.path.exists(tp):
+                    os.remove(tp)
+            except Exception:
+                pass
+
 
 async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
-    """Fast media downloader with FloodWait handling"""
-    file_size = 0
-    if getattr(message, "document", None):
-        file_size = message.document.file_size
-    elif getattr(message, "video", None):
-        file_size = message.video.file_size
-    elif getattr(message, "audio", None):
-        file_size = message.audio.file_size
-    elif getattr(message, "photo", None):
-        file_size = message.photo.sizes[-1].file_size
-    elif type(message).__name__ == "Story":
-        if getattr(message, "video", None):
-            file_size = message.video.file_size
-        elif getattr(message, "photo", None):
-            file_size = message.photo.sizes[-1].file_size
-
+    """Serial media downloader with FloodWait handling (fallback / small files)."""
     retries = 5
     for i in range(retries):
         try:
@@ -58,8 +200,8 @@ async def download_media_fast(client: Client, message: Message, file_name, progr
             logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
             await asyncio.sleep(2 * (i + 1))
 
+
 def truncate_caption(caption, max_length=1024):
-    """Safely truncate caption to Telegram's limit (1024 characters)"""
     if not caption:
         return ""
     caption_str = str(caption)
@@ -67,24 +209,20 @@ def truncate_caption(caption, max_length=1024):
         return caption_str
     return caption_str[:max_length-3] + "..."
 
+
 def check_file_size(file_path, max_size_mib=2000):
-    """Check if file size is within Telegram limits"""
     if not os.path.exists(file_path):
         raise ValueError(f"File not found: {file_path}")
-    
     file_size_bytes = os.path.getsize(file_path)
     file_size_mib = file_size_bytes / (1024 * 1024)
-    
     if file_size_mib > max_size_mib:
         raise ValueError(f"File size ({file_size_mib:.2f} MiB) exceeds Telegram limit of {max_size_mib} MiB")
-    
     if file_size_bytes == 0:
         raise ValueError(f"File is empty: {file_path}")
-    
     return file_size_bytes
 
+
 async def _send_with_floodwait(coro_fn, max_retries=3):
-    """Execute a send coroutine, sleeping through FloodWait up to max_retries times."""
     for attempt in range(max_retries):
         try:
             return await coro_fn()
@@ -96,18 +234,18 @@ async def _send_with_floodwait(coro_fn, max_retries=3):
             else:
                 raise
 
-async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
-    """Upload function with FloodWait retry and PhotoExtInvalid fallback."""
-    safe_caption = truncate_caption(caption)
 
+async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
+    """Upload with FloodWait retry and PhotoExtInvalid fallback."""
+    safe_caption = truncate_caption(caption)
     file_path_lower = file_path.lower()
-    
+
     try:
         check_file_size(file_path)
     except ValueError as e:
         logging.error(f"File validation error: {e}")
         return None
-    
+
     upload_kwargs = {
         "caption": safe_caption,
         "progress": progress_callback,
@@ -121,7 +259,7 @@ async def upload_media_fast(client: Client, chat_id, file_path, caption="", thum
             except Exception as start_err:
                 if "already" not in str(start_err).lower():
                     raise
-            
+
         if isinstance(chat_id, str) and chat_id.lower() == "me":
             target_id = "me"
         else:

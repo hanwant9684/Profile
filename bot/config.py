@@ -61,13 +61,6 @@ async def get_dump_channel_id():
 # Performance Settings
 MAX_CONCURRENT_DOWNLOADS = 10
 
-def get_smart_download_workers(file_size):
-    if file_size < 100 * 1024 * 1024:
-        return 4
-    else:
-        return 10
-        
-
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -111,6 +104,6 @@ app = Client(
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
-    max_concurrent_transmissions=50,
-    workers=25
+    max_concurrent_transmissions=16,
+    workers=8
 )

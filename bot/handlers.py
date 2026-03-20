@@ -219,7 +219,7 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=120,
         no_updates=True,
-        max_concurrent_transmissions=50
+        max_concurrent_transmissions=16
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -301,7 +301,7 @@ async def cleanup_user_clients():
                 pass
 
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
-from bot.transfer import download_media_fast, upload_media_fast, truncate_caption
+from bot.transfer import download_media_fast, download_media_parallel, upload_media_fast, truncate_caption
 
 async def update_status(msg, text):
     try:
@@ -1171,10 +1171,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                         for _dl_attempt in range(2):
                             try:
                                 path = await asyncio.wait_for(
-                                    download_media_fast(
+                                    download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        None,
+                                        num_workers=4,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading")
                                     ),
