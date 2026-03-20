@@ -12,10 +12,10 @@ from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as A
 from pyrogram.errors.exceptions.bad_request_400 import PhotoExtInvalid
 from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
 
-# Chunk size used internally by pyrotgfork — must match to keep offset arithmetic correct
+# Must match pyrotgfork's internal chunk size (client.py line 1153)
 _PYROGRAM_CHUNK_SIZE = 1024 * 1024  # 1 MB
 
-# Minimum file size to bother with parallel download (below this serial is fine)
+# Only use parallel download for files larger than this — smaller files don't benefit
 _MIN_PARALLEL_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
@@ -23,26 +23,35 @@ async def download_media_parallel(
     client: Client,
     message: Message,
     file_name=None,
-    num_workers: int = 4,
+    num_workers: int = 8,
     progress_callback=None,
     progress_args=()
 ):
     """
-    Parallel chunk downloader.
+    Parallel chunk downloader — overcomes pyrotgfork's ~4 MB/s serial ceiling.
 
-    pyrotgfork's download_media fetches 1 MB chunks ONE AT A TIME over a single
-    MTProto connection.  Telegram's DC processes each GetFile RPC in ~250-300 ms,
-    giving a hard ceiling of ~4 MB/s regardless of network speed or
-    max_concurrent_transmissions (that parameter only limits concurrent files,
-    not per-file parallelism).
+    Background:
+      pyrotgfork fetches file chunks ONE at a time (1 MB each) over a single
+      media session.  Each GetFile RPC takes ~250-300 ms at Telegram's DC,
+      giving a hard ceiling of ~4 MB/s per connection regardless of network speed.
 
-    This function splits the file into `num_workers` byte ranges and runs them
-    concurrently via asyncio.gather(), so N workers × 4 MB/s = N× throughput.
-    Falls back silently to the standard serial download on any error.
+      This function splits the file into `num_workers` byte ranges and fetches
+      them CONCURRENTLY via asyncio.gather().  pyrotgfork's Session.invoke()
+      uses per-request msg_id matching and supports multiple in-flight requests
+      on the same TCP connection, so N workers × ~4 MB/s ≈ N× throughput.
+
+      Each user already has their own Client → own media_sessions dict → own
+      TCP connection to Telegram's file DC, so there is zero inter-user
+      contention even with 10 concurrent users.
+
+      Falls back silently to standard serial download on any unrecoverable error.
+
+    Upload note:
+      pyrotgfork's save_file() already uses 3 sessions × 4 workers (12 streams)
+      for files > 10 MB — upload is already optimally parallelised in the library.
     """
     from pyrogram.file_id import FileId
 
-    # --- identify media object and extract size / file_id ---
     media = (
         getattr(message, "document", None) or
         getattr(message, "video", None) or
@@ -68,7 +77,7 @@ async def download_media_parallel(
         logging.warning(f"Parallel download: could not decode file_id ({e}), using serial fallback")
         return await download_media_fast(client, message, file_name, progress_callback, progress_args)
 
-    # --- determine output path and extension ---
+    # Determine output file extension from original filename, then MIME type
     original_name = getattr(media, "file_name", "") or ""
     ext = os.path.splitext(original_name)[-1] if original_name else ""
     if not ext:
@@ -87,12 +96,12 @@ async def download_media_parallel(
     uid = uuid.uuid4().hex[:10]
     out_path = os.path.join("downloads", f"dl_{uid}{ext}")
 
-    # --- split file into N chunk ranges ---
+    # Split file into N chunk ranges
     total_chunks = (file_size + _PYROGRAM_CHUNK_SIZE - 1) // _PYROGRAM_CHUNK_SIZE
     actual_workers = min(num_workers, total_chunks)
 
     base, rem = divmod(total_chunks, actual_workers)
-    ranges = []  # list of (offset_in_chunks, count_in_chunks)
+    ranges = []  # (offset_in_chunks, count_in_chunks)
     pos = 0
     for i in range(actual_workers):
         cnt = base + (1 if i < rem else 0)
@@ -102,53 +111,84 @@ async def download_media_parallel(
     temp_paths = [os.path.join("downloads", f"dl_{uid}_p{i}.tmp") for i in range(actual_workers)]
     downloaded = [0] * actual_workers
     last_report = [time.time()]
-    worker_errors = []
+    failed = [False]
 
     async def worker(idx, chunk_offset, chunk_limit):
-        try:
-            with open(temp_paths[idx], "wb") as fh:
-                async for chunk in client.get_file(
-                    file_id_obj, file_size, limit=chunk_limit, offset=chunk_offset
-                ):
-                    fh.write(chunk)
-                    downloaded[idx] += len(chunk)
-                    # Shared progress reporting — throttled to once per 2 s
-                    if progress_callback:
-                        now = time.time()
-                        if now - last_report[0] >= 2:
-                            last_report[0] = now
-                            total_dl = min(sum(downloaded), file_size)
-                            if asyncio.iscoroutinefunction(progress_callback):
-                                await progress_callback(total_dl, file_size, *progress_args)
-        except Exception as e:
-            worker_errors.append(e)
-            logging.warning(f"Parallel download worker {idx} failed: {e}")
+        """Fetch one byte-range with FloodWait retry support."""
+        for attempt in range(3):
+            try:
+                # Clear any partial data from a previous attempt
+                open(temp_paths[idx], "wb").close()
+                with open(temp_paths[idx], "wb") as fh:
+                    async for chunk in client.get_file(
+                        file_id_obj, file_size,
+                        limit=chunk_limit,
+                        offset=chunk_offset
+                    ):
+                        fh.write(chunk)
+                        downloaded[idx] += len(chunk)
+                        if progress_callback and not failed[0]:
+                            now = time.time()
+                            if now - last_report[0] >= 2:
+                                last_report[0] = now
+                                total_dl = min(sum(downloaded), file_size)
+                                if asyncio.iscoroutinefunction(progress_callback):
+                                    await progress_callback(total_dl, file_size, *progress_args)
+                return  # success
+
+            except (FloodWait, FloodPremiumWait) as e:
+                wait = e.value
+                logging.warning(f"Parallel worker {idx} FloodWait {wait}s (attempt {attempt+1}/3)")
+                if attempt < 2:
+                    downloaded[idx] = 0
+                    await asyncio.sleep(wait)
+                else:
+                    failed[0] = True
+                    raise
+
+            except (FileReferenceExpired, FileReferenceInvalid):
+                failed[0] = True
+                raise
+
+            except Exception as e:
+                if attempt < 2:
+                    logging.warning(f"Parallel worker {idx} error (attempt {attempt+1}): {e}, retrying")
+                    downloaded[idx] = 0
+                    await asyncio.sleep(1 * (attempt + 1))
+                else:
+                    failed[0] = True
+                    raise
 
     try:
         await asyncio.gather(*[worker(i, off, cnt) for i, (off, cnt) in enumerate(ranges)])
 
-        if worker_errors:
-            raise worker_errors[0]
+        if failed[0]:
+            raise RuntimeError("One or more parallel workers failed after retries")
 
-        # Assemble part files into final output
+        # Final progress update at 100%
+        if progress_callback:
+            if asyncio.iscoroutinefunction(progress_callback):
+                await progress_callback(file_size, file_size, *progress_args)
+
+        # Assemble part files in order
         with open(out_path, "wb") as out:
             for tp in temp_paths:
                 if not os.path.exists(tp):
-                    raise FileNotFoundError(f"Part file missing: {tp}")
+                    raise FileNotFoundError(f"Part missing: {tp}")
                 with open(tp, "rb") as inp:
                     shutil.copyfileobj(inp, out)
 
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        actual_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+        if actual_size == 0:
             raise ValueError("Assembled file is empty")
 
         logging.info(
-            f"Parallel download complete: {file_size/1024/1024:.1f} MB "
-            f"across {actual_workers} workers → {out_path}"
+            f"Parallel download: {file_size/1048576:.1f} MB in {actual_workers} workers → {out_path}"
         )
         return out_path
 
     except Exception as e:
-        logging.warning(f"Parallel download failed ({e}), falling back to serial download")
+        logging.warning(f"Parallel download failed ({type(e).__name__}: {e}), falling back to serial")
         for p in [out_path] + temp_paths:
             try:
                 if os.path.exists(p):
@@ -166,8 +206,14 @@ async def download_media_parallel(
                 pass
 
 
-async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
-    """Serial media downloader with FloodWait handling (fallback / small files)."""
+async def download_media_fast(
+    client: Client,
+    message: Message,
+    file_name,
+    progress_callback=None,
+    progress_args=()
+):
+    """Serial fallback downloader — used for small files and on parallel error."""
     retries = 5
     for i in range(retries):
         try:
@@ -207,7 +253,7 @@ def truncate_caption(caption, max_length=1024):
     caption_str = str(caption)
     if len(caption_str) <= max_length:
         return caption_str
-    return caption_str[:max_length-3] + "..."
+    return caption_str[:max_length - 3] + "..."
 
 
 def check_file_size(file_path, max_size_mib=2000):
@@ -235,8 +281,22 @@ async def _send_with_floodwait(coro_fn, max_retries=3):
                 raise
 
 
-async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
-    """Upload with FloodWait retry and PhotoExtInvalid fallback."""
+async def upload_media_fast(
+    client: Client,
+    chat_id,
+    file_path,
+    caption="",
+    thumb=None,
+    progress_callback=None,
+    progress_args=(),
+    **kwargs
+):
+    """
+    Upload with FloodWait retry and PhotoExtInvalid fallback.
+
+    Note: pyrotgfork's save_file() already uses 3 sessions × 4 workers (12 parallel
+    streams) for files > 10 MB — no additional parallelism needed here.
+    """
     safe_caption = truncate_caption(caption)
     file_path_lower = file_path.lower()
 
