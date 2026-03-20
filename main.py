@@ -73,7 +73,16 @@ async def main():
             await asyncio.sleep(5)
             try:
                 me = await app.get_me()
-                print(f"✅ Bot is running on DC {me.dc_id}")
+                # app.storage.dc_id() is the REAL auth DC — where all MTProto traffic goes.
+                # me.dc_id is only the DC of the bot's profile photo (can differ or be None).
+                auth_dc = await app.storage.dc_id()
+                dc_locations = {1: "USA/Miami", 2: "Amsterdam", 3: "USA/Miami", 4: "Amsterdam", 5: "Singapore"}
+                auth_dc_loc = dc_locations.get(auth_dc, "Unknown")
+                photo_dc = me.dc_id
+                photo_dc_loc = dc_locations.get(photo_dc, "Unknown") if photo_dc else None
+                print(f"✅ Bot auth session: DC{auth_dc} ({auth_dc_loc}) — all API/MTProto traffic goes here")
+                if photo_dc:
+                    print(f"ℹ️  Bot profile photo: DC{photo_dc} ({photo_dc_loc}) — photo storage only, not the session")
             except Exception as e:
                 logging.debug(f"DC Check Error: {e}")
 

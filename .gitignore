@@ -4,15 +4,3 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
-
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-*.egg
-.eggs/
-*.db
-.env
-.pythonlibs/
-downloads/
