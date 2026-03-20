@@ -113,34 +113,40 @@ async def send_to_dump(client, user_id, link, msg):
                 if user_client:
                     await user_client.send_message(dump_id, header + "⚠️ Album above)")
         else:
-            # For single files
+            # For single files — prefer send_cached_media (zero re-upload) when a file_id is available
+            file_id = None
+            if msg.media:
+                for attr in ("document", "video", "audio", "voice", "video_note", "animation", "sticker", "photo"):
+                    media_obj = getattr(msg, attr, None)
+                    if media_obj:
+                        fid = getattr(media_obj, "file_id", None)
+                        if not fid and attr == "photo" and isinstance(media_obj, list) and media_obj:
+                            fid = getattr(media_obj[-1], "file_id", None)
+                        if fid:
+                            file_id = fid
+                            break
+
             try:
-                if msg.media:
-                    await client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+                if file_id:
+                    await client.send_cached_media(dump_id, file_id, caption=full_caption)
                 elif msg.text:
-                    # It's JUST text
                     await client.send_message(dump_id, full_caption)
                 elif type(msg).__name__ == "Story":
-                    # For stories, copy_message might fail if bot isn't the owner or has no access
-                    # But we try anyway or send the caption if it's just media we can't copy
                     await client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
                 else:
                     logging.warning(f"Skipping dump for message {msg.id} as it has no media or text")
             except Exception as e:
-                logging.error(f"Main bot copy_message failed: {e}")
+                logging.error(f"Main bot dump failed: {e}")
                 if "MESSAGE_ID_INVALID" in str(e) or "EMPTY" in str(e) or "MESSAGE_EMPTY" in str(e):
-                    await update_status(status_msg, "❌ The message you requested appears to be empty or unavailable.")
                     return
-                # Fallback: try with user_client
                 user_client = user_clients.get(user_id, {}).get("client")
                 if user_client:
-                    logging.info(f"Trying copy_message with user client for user {user_id}")
-                    if msg.media:
-                        await user_client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
+                    logging.info(f"Trying dump with user client for user {user_id}")
+                    if file_id:
+                        await user_client.send_cached_media(dump_id, file_id, caption=full_caption)
                     elif msg.text:
                         await user_client.send_message(dump_id, full_caption)
                     else:
-                        # Story or other
                         await user_client.copy_message(dump_id, msg.chat.id, msg.id, caption=full_caption)
                 else:
                     raise
@@ -220,6 +226,9 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=120,
         no_updates=True,
+        takeout=True,
+        no_joined_notifications=True,
+        max_message_cache_size=100,
         max_concurrent_transmissions=32
     )
     await client.start()
@@ -360,7 +369,7 @@ def _format_time(seconds):
     return f"{secs}s"
 
 
-async def progress_bar(current, total, message, type_msg):
+async def progress_bar(current, total, message, type_msg, show_complete=True):
     """
     Progress bar with three improvements over the original:
 
@@ -455,7 +464,8 @@ async def progress_bar(current, total, message, type_msg):
 
     if current >= total:
         progress_bar.data.pop(msg_id, None)
-        await update_status(message, f"✅ **{type_msg} complete** — `{_format_size(total)}`")
+        if show_complete:
+            await update_status(message, f"✅ **{type_msg} complete** — `{_format_size(total)}`")
     else:
         data["last_edit"] = now
         await update_status(message, text)
@@ -470,9 +480,10 @@ async def verify_force_sub(client, user_id):
         channel = f"@{channel}"
 
     try:
+        from pyrogram import enums as _enums
         member = await client.get_chat_member(channel, user_id)
-        if member.status in ["left", "kicked"]:
-             return False, channel
+        if member.status in (_enums.ChatMemberStatus.LEFT, _enums.ChatMemberStatus.BANNED):
+            return False, channel
         return True, None
     except (pyrogram.errors.exceptions.forbidden_403.ChatWriteForbidden, pyrogram.errors.exceptions.bad_request_400.ChatAdminRequired):
         logging.error(f"User {user_id} is spamreported or bot lacks permissions to check force sub.")
@@ -589,6 +600,30 @@ async def batch_handler(client, message):
     done = 0
     skipped = 0
 
+    # ── Batch pre-fetch: get all messages in one API call instead of N calls ──
+    # This turns N serial get_messages(replies=0) calls into a single batched call,
+    # which is the biggest latency win for batch mode.
+    prefetched_msgs: dict = {}
+    session_str_batch = user.get("phone_session_string") if user else None
+    if session_str_batch:
+        if link_type in ("private", "private_topic"):
+            _batch_chat_id = int("-100" + channel_part)
+        else:
+            _batch_chat_id = channel_part
+        try:
+            _batch_client = await get_user_client(user_id, session_str_batch)
+            _all_ids = list(range(start_id, end_id + 1))
+            _fetched = await _batch_client.get_messages(_batch_chat_id, _all_ids, replies=0)
+            if not isinstance(_fetched, list):
+                _fetched = [_fetched]
+            for _m in _fetched:
+                if _m and getattr(_m, "id", None):
+                    prefetched_msgs[_m.id] = _m
+            logging.info(f"Batch pre-fetch: {len(prefetched_msgs)}/{count} messages fetched for user {user_id}")
+        except Exception as _pf_err:
+            logging.warning(f"Batch pre-fetch failed (falling back to per-item fetch): {_pf_err}")
+            prefetched_msgs = {}
+
     # Hold the session guard for the entire batch so the cleanup loop
     # never evicts this user's Pyrogram client during inter-item sleeps
     # or FloodWait pauses (where active_sessions would be temporarily clear).
@@ -630,7 +665,8 @@ async def batch_handler(client, message):
                         client, message,
                         link_override=link,
                         processed_albums=processed_albums,
-                        status_msg_override=batch_status
+                        status_msg_override=batch_status,
+                        prefetched_msgs=prefetched_msgs
                     )
                     if result is not None:
                         done += 1
@@ -680,7 +716,7 @@ async def batch_handler(client, message):
         _batch_sessions.discard(user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
-async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None):
+async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None):
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
@@ -876,12 +912,17 @@ async def download_handler(client, message, link_override=None, processed_albums
                         return None
 
                 msg = None
+                # Use batch pre-fetched message if available — avoids one get_messages API call
+                if not is_story and prefetched_msgs and message_id in prefetched_msgs:
+                    msg = prefetched_msgs[message_id]
                 for _fetch_attempt in range(4):
+                    if msg is not None:
+                        break
                     try:
                         if is_story:
                             msg = await user_client.get_stories(chat_id, message_id)
                         else:
-                            msg = await user_client.get_messages(chat_id, message_id)
+                            msg = await user_client.get_messages(chat_id, message_id, replies=0)
                         break
                     except (FloodWait, FloodPremiumWait) as e:
                         wait_secs = e.value
@@ -1205,27 +1246,35 @@ async def download_handler(client, message, link_override=None, processed_albums
                     try:
                         if hasattr(current_msg, "video") and current_msg.video and getattr(current_msg.video, "thumbs", None):
                             try:
-                                thumb_path = await user_client.download_media(current_msg.video.thumbs[-1])
+                                thumb_path = await user_client.download_media(current_msg.video.thumbs[-1], in_memory=True)
                             except Exception as e:
                                 logging.debug(f"Thumb download error: {e}")
                         elif hasattr(current_msg, "document") and current_msg.document and getattr(current_msg.document, "thumbs", None):
                             try:
-                                thumb_path = await user_client.download_media(current_msg.document.thumbs[-1])
+                                thumb_path = await user_client.download_media(current_msg.document.thumbs[-1], in_memory=True)
                             except Exception as e:
                                 logging.debug(f"Thumb download error: {e}")
 
                         duration = 0
                         width = 0
                         height = 0
+                        orig_file_name = None
+                        has_spoiler = None
 
                         if hasattr(current_msg, "video") and current_msg.video:
                             duration = getattr(current_msg.video, "duration", 0) or 0
                             width = getattr(current_msg.video, "width", 0) or 0
                             height = getattr(current_msg.video, "height", 0) or 0
-                        elif hasattr(current_msg, "document") and current_msg.document and current_msg.document.mime_type and current_msg.document.mime_type.startswith("video/"):
-                            duration = getattr(current_msg.document, "duration", 0) or 0
-                            width = getattr(current_msg.document, "width", 0) or 0
-                            height = getattr(current_msg.document, "height", 0) or 0
+                            orig_file_name = getattr(current_msg.video, "file_name", None)
+                        elif hasattr(current_msg, "document") and current_msg.document:
+                            orig_file_name = getattr(current_msg.document, "file_name", None)
+                            if current_msg.document.mime_type and current_msg.document.mime_type.startswith("video/"):
+                                duration = getattr(current_msg.document, "duration", 0) or 0
+                                width = getattr(current_msg.document, "width", 0) or 0
+                                height = getattr(current_msg.document, "height", 0) or 0
+                        elif hasattr(current_msg, "audio") and current_msg.audio:
+                            orig_file_name = getattr(current_msg.audio, "file_name", None)
+                        has_spoiler = getattr(current_msg, "has_media_spoiler", None)
 
                         for _dl_attempt in range(2):
                             try:
@@ -1233,9 +1282,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=8,
+                                        num_workers=16,
                                         progress_callback=progress_bar,
-                                        progress_args=(status_msg, "📥 Downloading")
+                                        progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
                                     timeout=1800  # 30 min — kills truly stuck transfers
                                 )
@@ -1300,8 +1349,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 duration=duration,
                                 width=width,
                                 height=height,
+                                file_name=orig_file_name,
+                                has_spoiler=has_spoiler,
                                 progress_callback=progress_bar,
-                                progress_args=(status_msg, "📤 Uploading")
+                                progress_args=(status_msg, "📤 Uploading", status_msg_override is None)
                             ),
                             timeout=1800  # 30 min — kills truly stuck uploads
                         )
@@ -1332,7 +1383,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         if os.path.exists(p): os.remove(p)
                                 elif os.path.exists(path):
                                     os.remove(path)
-                            if thumb_path and os.path.exists(thumb_path):
+                            if thumb_path and isinstance(thumb_path, str) and os.path.exists(thumb_path):
                                 os.remove(thumb_path)
                             await update_status(status_msg, "🛑 Process cancelled.")
                             return None
@@ -1366,7 +1417,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     if os.path.exists(p): os.remove(p)
                             elif os.path.exists(path):
                                 os.remove(path)
-                        if thumb_path and os.path.exists(thumb_path):
+                        if thumb_path and isinstance(thumb_path, str) and os.path.exists(thumb_path):
                             os.remove(thumb_path)
 
                 if status_msg_override is None:

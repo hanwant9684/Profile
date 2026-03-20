@@ -23,7 +23,7 @@ async def download_media_parallel(
     client: Client,
     message: Message,
     file_name=None,
-    num_workers: int = 8,
+    num_workers: int = 16,
     progress_callback=None,
     progress_args=()
 ):
@@ -287,6 +287,8 @@ async def upload_media_fast(
     file_path,
     caption="",
     thumb=None,
+    file_name=None,
+    has_spoiler=None,
     progress_callback=None,
     progress_args=(),
     **kwargs
@@ -331,6 +333,10 @@ async def upload_media_fast(
         if file_path_lower.endswith((".mp4", ".mkv", ".mov", ".avi")):
             upload_kwargs.update(kwargs)
             upload_kwargs["thumb"] = thumb
+            if file_name:
+                upload_kwargs["file_name"] = file_name
+            if has_spoiler is not None:
+                upload_kwargs["has_spoiler"] = has_spoiler
             if file_path_lower.endswith(".gif"):
                 return await _send_with_floodwait(
                     lambda: client.send_animation(target_id, file_path, **upload_kwargs)
@@ -346,24 +352,33 @@ async def upload_media_fast(
                     lambda: client.send_voice(target_id, file_path, **upload_kwargs)
                 )
             upload_kwargs["thumb"] = thumb
+            if file_name:
+                upload_kwargs["file_name"] = file_name
             return await _send_with_floodwait(
                 lambda: client.send_audio(target_id, file_path, **upload_kwargs)
             )
 
         elif file_path_lower.endswith((".jpg", ".jpeg", ".png", ".webp")):
             try:
+                if has_spoiler is not None:
+                    upload_kwargs["has_spoiler"] = has_spoiler
                 return await _send_with_floodwait(
                     lambda: client.send_photo(target_id, file_path, **upload_kwargs)
                 )
             except PhotoExtInvalid:
                 logging.warning(f"PhotoExtInvalid for {file_path} — falling back to send_document")
                 doc_kwargs = dict(upload_kwargs)
+                doc_kwargs.pop("has_spoiler", None)
                 doc_kwargs["thumb"] = thumb
+                if file_name:
+                    doc_kwargs["file_name"] = file_name
                 return await _send_with_floodwait(
                     lambda: client.send_document(target_id, file_path, **doc_kwargs)
                 )
 
         upload_kwargs["thumb"] = thumb
+        if file_name:
+            upload_kwargs["file_name"] = file_name
         return await _send_with_floodwait(
             lambda: client.send_document(target_id, file_path, **upload_kwargs)
         )

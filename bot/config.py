@@ -97,13 +97,15 @@ AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
 # Update client with higher max_concurrent_transmissions
 app = Client(
-    "bot_session", 
-    api_id=API_ID, 
-    api_hash=API_HASH, 
+    "bot_session",
+    api_id=API_ID,
+    api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
+    skip_updates=True,
+    fetch_replies=0,
     max_concurrent_transmissions=32,
     workers=8
 )
