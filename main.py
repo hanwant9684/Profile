@@ -12,7 +12,9 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 load_dotenv()
 
 try:
-    resource.setrlimit(resource.RLIMIT_AS, (3700 * 1024 * 1024, -1))
+    # Cap virtual memory at 6 GB — wide enough to prevent false OOM on a 4 GB VPS
+    # (virtual address space includes shared libs + mmap and far exceeds physical RAM usage)
+    resource.setrlimit(resource.RLIMIT_AS, (6 * 1024 * 1024 * 1024, -1))
 except Exception:
     pass
     
