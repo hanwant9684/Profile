@@ -59,7 +59,7 @@ async def get_dump_channel_id():
     return os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-MAX_CONCURRENT_DOWNLOADS = 10
+MAX_CONCURRENT_DOWNLOADS = 10  # ↑ SCALE: increase to 20 for 20 concurrent users
 
 active_downloads = set()
 cancel_flags = set()
@@ -95,15 +95,17 @@ AD_DAILY_LIMIT_PREMIUM = int(os.environ.get("AD_DAILY_LIMIT_PREMIUM", 5))
 AD_DAILY_LIMIT = AD_DAILY_LIMIT_FREE # Legacy fallback
 AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
-# Update client with higher max_concurrent_transmissions
+# BOT CLIENT — handles incoming messages, sends replies, uploads files to users
 app = Client(
-    "bot_session", 
-    api_id=API_ID, 
-    api_hash=API_HASH, 
+    "bot_session",
+    api_id=API_ID,
+    api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     in_memory=True,
-    sleep_threshold=120,
+    sleep_threshold=120,        # auto-handle FloodWaits up to 120s silently
     no_updates=False,
-    max_concurrent_transmissions=32,
-    workers=8
+    skip_updates=True,
+    fetch_replies=0,
+    max_concurrent_transmissions=20,   # BOT CLIENT: parallel upload streams to Telegram; safe range 4-12
+    workers=20.                        # ↑ SCALE: increase to 20 for 20 concurrent users
 )
