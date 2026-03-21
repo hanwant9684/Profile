@@ -1,14 +1,8 @@
 import asyncio
 import logging
 from pyrogram import filters
-
-async def update_status(msg, text):
-    try:
-        await msg.edit_text(text)
-    except Exception as e:
-        logging.debug(f"Status update failed: {e}")
-
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
+from bot.handlers import update_status
 from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user, iter_user_ids
 
 @app.on_message(filters.command("stats") & filters.private)
