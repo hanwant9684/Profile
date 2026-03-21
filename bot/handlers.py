@@ -181,6 +181,13 @@ _user_floodwait_until: dict = {}
 _user_last_request: dict = {}
 RATE_LIMIT_SECONDS = 900
 
+# Force-subscribe cache: {user_id: expires_at_timestamp}
+# Caches confirmed subscribers for 5 minutes so /start doesn't hit
+# get_chat_member on Telegram every single time. Only positive results
+# are cached — non-members always re-check so they can rejoin and retry.
+_force_sub_verified: dict = {}
+_FORCE_SUB_CACHE_TTL = 300  # 5 minutes
+
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
     now = time.time()
@@ -192,9 +199,9 @@ async def get_user_client(user_id, session_str):
 
         # Telegram silently closes idle TCP sockets after ~60-120s.
         # is_connected only checks an internal flag — it cannot detect
-        # a server-side close. Evict any client idle for over 90s so the
+        # a server-side close. Evict any client idle for over 300s so the
         # next call always starts on a freshly opened socket.
-        if idle_secs <= 90 and client.is_connected:
+        if idle_secs <= 300 and client.is_connected:
             cached["last_used"] = now
             return client
 
@@ -229,7 +236,7 @@ async def get_user_client(user_id, session_str):
         takeout=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
-        max_concurrent_transmissions=20
+        max_concurrent_transmissions=4   # USER CLIENT: per-user download streams; safe range 2-6
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -479,17 +486,26 @@ async def verify_force_sub(client, user_id):
     if not channel.startswith("@") and not channel.startswith("-100"):
         channel = f"@{channel}"
 
+    # Return cached result if the user was verified as subscribed recently.
+    # Only positive results are cached — non-members always re-check Telegram
+    # so they can join the channel and immediately retry without waiting.
+    now = time.time()
+    if _force_sub_verified.get(user_id, 0) > now:
+        return True, None
+
     try:
         from pyrogram import enums as _enums
         member = await client.get_chat_member(channel, user_id)
         if member.status in (_enums.ChatMemberStatus.LEFT, _enums.ChatMemberStatus.BANNED):
             return False, channel
+        # Confirmed subscriber — cache for 5 minutes to skip future API calls
+        _force_sub_verified[user_id] = now + _FORCE_SUB_CACHE_TTL
         return True, None
     except (pyrogram.errors.exceptions.forbidden_403.ChatWriteForbidden, pyrogram.errors.exceptions.bad_request_400.ChatAdminRequired):
         logging.error(f"User {user_id} is spamreported or bot lacks permissions to check force sub.")
         return False, None
     except pyrogram.errors.UserNotParticipant:
-        # This is expected if they haven't joined yet, no need to log as error
+        # Expected if they haven't joined yet — do not cache so retry works immediately
         return False, channel
     except Exception as e:
         logging.error(f"Force sub verification failed: {e}")
@@ -666,7 +682,8 @@ async def batch_handler(client, message):
                         link_override=link,
                         processed_albums=processed_albums,
                         status_msg_override=batch_status,
-                        prefetched_msgs=prefetched_msgs
+                        prefetched_msgs=prefetched_msgs,
+                        user_override=user
                     )
                     if result is not None:
                         done += 1
@@ -716,19 +733,30 @@ async def batch_handler(client, message):
         _batch_sessions.discard(user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
-async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None):
+async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None, user_override=None):
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
     link = link_override or message.text.strip()
 
+    # ?single tells Telegram's app to show only one file from an album,
+    # but our bot should download the full media group. Strip it so the
+    # link falls through to normal public/private parsing with chat-type
+    # detection and user-session selection intact.
+    if "?single" in link:
+        link = re.sub(r'\?single\b[^&]*', '', link).rstrip('?&')
+
     from bot.database import create_user
-    user = await get_user(user_id)
-    if not user:
-        user = await create_user(user_id, username, full_name)
-    elif user.get("username") != username or user.get("full_name") != full_name:
-        await create_user(user_id, username, full_name)
+    if user_override is not None:
+        # Caller (e.g. batch_handler) already loaded the user — skip the DB round-trip
+        user = user_override
+    else:
         user = await get_user(user_id)
+        if not user:
+            user = await create_user(user_id, username, full_name)
+        elif user.get("username") != username or user.get("full_name") != full_name:
+            await create_user(user_id, username, full_name)
+            user = await get_user(user_id)
 
     if user and user.get("role") == "banned":
         await message.reply("❌ **You are banned from using this bot.**")
@@ -765,8 +793,6 @@ async def download_handler(client, message, link_override=None, processed_albums
     private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
     story_match = re.search(r"t\.me/([^/]+)/s/(\d+)", link)
     private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", link)
-    single_match = re.search(r"t\.me/([^/]+)/(\d+)\?single", link)
-    private_single_match = re.search(r"t\.me/c/(\d+)/(\d+)\?single", link)
     thread_match = re.search(r"t\.me/([^/]+)/(\d+)\?thread=(\d+)", link)
     private_thread_match = re.search(r"t\.me/c/(\d+)/(\d+)\?thread=(\d+)", link)
 
@@ -825,13 +851,6 @@ async def download_handler(client, message, link_override=None, processed_albums
     elif thread_match:
         chat_id = thread_match.group(1)
         message_id = int(thread_match.group(2))
-    elif private_single_match:
-        chat_id = int("-100" + private_single_match.group(1))
-        message_id = int(private_single_match.group(2))
-        is_private = True
-    elif single_match:
-        chat_id = single_match.group(1)
-        message_id = int(single_match.group(2))
     elif topic_match:
         chat_id = int("-100" + topic_match.group(1))
         message_id = int(topic_match.group(3))
@@ -1010,8 +1029,22 @@ async def download_handler(client, message, link_override=None, processed_albums
                     processed_albums.add(media_group_id)
 
                 if not is_story and getattr(msg, "media_group_id", None):
-                    target_messages = await user_client.get_media_group(chat_id, message_id)
-                    is_media_group = True
+                    try:
+                        for _mg_attempt in range(3):
+                            try:
+                                target_messages = await user_client.get_media_group(chat_id, message_id)
+                                is_media_group = True
+                                break
+                            except (FloodWait, FloodPremiumWait) as e:
+                                logging.warning(f"FloodWait {e.value}s on get_media_group (attempt {_mg_attempt + 1})")
+                                if _mg_attempt < 2:
+                                    await asyncio.sleep(e.value + 1)
+                                else:
+                                    raise
+                    except Exception as _mg_err:
+                        logging.warning(f"get_media_group failed ({_mg_err}) — falling back to single message")
+                        target_messages = [msg]
+                        is_media_group = False
                 else:
                     target_messages = [msg]
                     is_media_group = False
@@ -1023,7 +1056,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                     return None
 
                 if user and user.get("role") == "free":
-                    await increment_quota(user_id, len(target_messages))
+                    await increment_quota(user_id, len(target_messages), user=user)
 
                 if not is_private and not is_group and not is_story:
                     try:
@@ -1282,7 +1315,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=16,
+                                        num_workers=4,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
