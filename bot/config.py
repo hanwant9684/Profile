@@ -104,6 +104,6 @@ app = Client(
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
-    max_concurrent_transmissions=32,
+    max_concurrent_transmissions=16,
     workers=8
 )

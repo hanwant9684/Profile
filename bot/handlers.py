@@ -6,7 +6,6 @@ import io
 import aiofiles
 import re
 import logging
-from collections import deque
 import pyrogram
 from pyrogram import filters, Client
 from pyrogram.client import Client as ClientObject
@@ -220,7 +219,7 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=120,
         no_updates=True,
-        max_concurrent_transmissions=32
+        max_concurrent_transmissions=16
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -305,77 +304,12 @@ from bot.database import get_user, check_and_update_quota, increment_quota, get_
 from bot.transfer import download_media_fast, download_media_parallel, upload_media_fast, truncate_caption
 
 async def update_status(msg, text):
-    """
-    Edit a status message with three key optimisations:
-      1. Skip the API call entirely when text is identical to what was last sent
-         (avoids wasted RTT and MESSAGE_NOT_MODIFIED errors).
-      2. On FloodWait, back off and retry once instead of dropping the update.
-      3. Silently ignore MESSAGE_NOT_MODIFIED even if dedup misses it.
-    """
-    if not msg:
-        return
-
-    cache = getattr(update_status, "_cache", None)
-    if cache is None:
-        update_status._cache = {}
-        cache = update_status._cache
-
-    if cache.get(msg.id) == text:
-        return  # identical — no API call needed
-
     try:
         await msg.edit_text(text)
-        cache[msg.id] = text
-    except (FloodWait, FloodPremiumWait) as e:
-        wait = min(e.value, 8)
-        logging.debug(f"edit_text FloodWait {e.value}s — backing off {wait}s")
-        await asyncio.sleep(wait)
-        try:
-            await msg.edit_text(text)
-            cache[msg.id] = text
-        except Exception:
-            pass
     except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
-            logging.debug(f"Status update failed: {e}")
-
-
-def _format_size(size):
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size < 1024.0:
-            return f"{size:.2f} {unit}"
-        size /= 1024.0
-    return f"{size:.2f} TB"
-
-
-def _format_time(seconds):
-    if seconds <= 0:
-        return "0s"
-    minutes, secs = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}h {minutes}m {secs}s"
-    if minutes > 0:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
-
+        logging.debug(f"Status update failed: {e}")
 
 async def progress_bar(current, total, message, type_msg):
-    """
-    Progress bar with three improvements over the original:
-
-    1. Rolling speed window (last 8 seconds of samples) instead of
-       average-since-start.  Gives accurate real-time speed/ETA even
-       when the transfer ramps up mid-way (e.g. parallel downloader).
-
-    2. Adaptive update interval:
-         • ≤ 20 MB  → update every 1.5 s  (fast files — users see movement)
-         • > 20 MB  → update every 2.5 s  (large files — reduce API spam)
-       Combined with update_status deduplication, this generates the
-       minimum number of actual Telegram API calls.
-
-    3. 20-step progress bar instead of 10 — each block = 5% instead of 10%.
-    """
     if not hasattr(progress_bar, "data"):
         progress_bar.data = {}
         progress_bar.last_cleanup = time.time()
@@ -397,65 +331,72 @@ async def progress_bar(current, total, message, type_msg):
         return
 
     now = time.time()
-    msg_id = message.id
 
+    msg_id = message.id
     if msg_id not in progress_bar.data:
         progress_bar.data[msg_id] = {
+            "last_val": 0,
+            "last_time": now,
             "start_time": now,
-            "last_edit": 0,
-            "samples": deque(maxlen=40),  # (timestamp, bytes_received)
+            "last_edit": 0
         }
 
     data = progress_bar.data[msg_id]
-
-    # Record sample every call — used for rolling-window speed
-    data["samples"].append((now, current))
-
-    # Adaptive throttle
-    update_interval = 1.5 if total <= 20 * 1024 * 1024 else 2.5
-    if now - data["last_edit"] < update_interval and current < total:
-        return
-
     percentage = current * 100 / total
 
-    # Rolling speed: bytes transferred in the last 8 seconds
-    rolling_speed = 0.0
-    samples = data["samples"]
-    if len(samples) >= 2:
-        window_start = now - 8.0
-        old = None
-        for s in samples:
-            if s[0] >= window_start:
-                old = s
-                break
-        if old and (now - old[0]) > 0.3:
-            dt = now - old[0]
-            db = current - old[1]
-            if db > 0:
-                rolling_speed = db / dt
+    # Simple timer and percentage threshold
+    time_diff = now - data["last_edit"]
+    if time_diff < 2:
+        return
 
-    # Fallback to overall average when rolling window is too thin
-    if rolling_speed <= 0:
-        elapsed = now - data["start_time"]
-        rolling_speed = current / elapsed if elapsed > 0 else 0
+    last_percentage = data.get("last_percentage", 0)
+    percentage_diff = percentage - last_percentage
 
-    eta = (total - current) / rolling_speed if rolling_speed > 0 else 0
+    data["last_percentage"] = percentage
+    elapsed_time = now - data["start_time"]
+    if elapsed_time > 0:
+        speed = current / elapsed_time
+    else:
+        speed = 0
 
-    bar_len = 20
-    filled = int(percentage / 100 * bar_len)
-    bar = "█" * filled + "░" * (bar_len - filled)
+    if speed > 0:
+        remaining_bytes = total - current
+        eta = remaining_bytes / speed
+    else:
+        eta = 0
+
+    def format_size(size):
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} TB"
+
+    def format_time(seconds):
+        if seconds <= 0: return "0s"
+        minutes, seconds = divmod(int(seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0: return f"{hours}h {minutes}m {seconds}s"
+        if minutes > 0: return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
+    speed_str = format_size(speed) + "/s"
+    eta_str = format_time(eta)
+
+    completed = int(percentage / 10)
+    bar = "█" * completed + "░" * (10 - completed)
 
     text = (
         f"**{type_msg}**\n"
-        f"`[{bar}]` **{percentage:.1f}%**\n"
-        f"⚡ **Speed:** `{_format_size(rolling_speed)}/s`\n"
-        f"⏳ **ETA:** `{_format_time(eta)}`\n"
-        f"📦 `{_format_size(current)} / {_format_size(total)}`"
+        f"[{bar}] {percentage:.1f}%\n"
+        f"🚀 **Speed:** `{speed_str}`\n"
+        f"⏳ **ETA:** `{eta_str}`\n"
+        f"📦 **Size:** `{format_size(current)} / {format_size(total)}`"
     )
 
-    if current >= total:
+    if current == total:
         progress_bar.data.pop(msg_id, None)
-        await update_status(message, f"✅ **{type_msg} complete** — `{_format_size(total)}`")
+        await update_status(message, f"**{type_msg} Completed!**\n📦 **Total Size:** `{format_size(total)}`")
     else:
         data["last_edit"] = now
         await update_status(message, text)
@@ -1233,7 +1174,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=8,
+                                        num_workers=4,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading")
                                     ),
