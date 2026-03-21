@@ -61,14 +61,32 @@ async def init_db():
             logger.error("DATABASE_URL is not set")
             return
 
-        from bot.cloud_backup import restore_from_github_async
-        await restore_from_github_async()
+        # Only restore from GitHub backup if the database has no existing data.
+        # Restoring on every startup overwrites live data with an hour-old backup.
+        should_restore = False
+        try:
+            _probe = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=1, command_timeout=10)
+            async with _probe.acquire() as _conn:
+                _exists = await _conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users')"
+                )
+            await _probe.close()
+            should_restore = not _exists
+        except Exception:
+            should_restore = True
+
+        if should_restore:
+            from bot.cloud_backup import restore_from_github_async
+            await restore_from_github_async()
+        else:
+            logger.info("Database already initialized — skipping GitHub restore")
 
         pool = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=3,
-            max_size=10,
+            max_size=15,
             command_timeout=30,
+            max_inactive_connection_lifetime=60,
             statement_cache_size=100,
         )
 
@@ -289,9 +307,10 @@ async def ban_user(user_id, is_banned=True):
         logger.error(f"Error banning user {user_id}: {e}")
 
 
-async def check_and_update_quota(user_id):
+async def check_and_update_quota(user_id, user=None):
     try:
-        user = await get_user(user_id)
+        if user is None:
+            user = await get_user(user_id)
         if not user:
             return False, "User not found."
 
@@ -346,9 +365,10 @@ async def check_and_update_quota(user_id):
         return False, "Database error."
 
 
-async def increment_quota(user_id, count=1):
+async def increment_quota(user_id, count=1, user=None):
     try:
-        user = await get_user(user_id)
+        if user is None:
+            user = await get_user(user_id)
         if not user or user.get("role") != 'free':
             return
 
@@ -501,7 +521,7 @@ async def iter_user_ids(batch_size: int = 500):
 
 async def get_user_count():
     try:
-        async with pool.acquire() as conn:
+        async with pool.acquire(timeout=5.0) as conn:
             return await conn.fetchval('SELECT COUNT(*) FROM users')
     except Exception as e:
         logger.error(f"Error getting user count: {e}")

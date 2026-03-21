@@ -19,11 +19,35 @@ _PYROGRAM_CHUNK_SIZE = 1024 * 1024  # 1 MB
 _MIN_PARALLEL_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
+async def _refresh_file_id(client: Client, message: Message):
+    """Re-fetch the message from Telegram to get a fresh file reference."""
+    try:
+        fresh = await client.get_messages(message.chat.id, message.id)
+        if fresh:
+            media = (
+                getattr(fresh, "document", None) or
+                getattr(fresh, "video", None) or
+                getattr(fresh, "audio", None) or
+                getattr(fresh, "voice", None) or
+                getattr(fresh, "video_note", None) or
+                getattr(fresh, "animation", None) or
+                getattr(fresh, "sticker", None)
+            )
+            if media:
+                new_file_id_str = getattr(media, "file_id", None)
+                if new_file_id_str:
+                    from pyrogram.file_id import FileId
+                    return FileId.decode(new_file_id_str)
+    except Exception as e:
+        logging.warning(f"Failed to refresh file reference: {e}")
+    return None
+
+
 async def download_media_parallel(
     client: Client,
     message: Message,
     file_name=None,
-    num_workers: int = 16,
+    num_workers: int = 20,
     progress_callback=None,
     progress_args=()
 ):
@@ -113,15 +137,20 @@ async def download_media_parallel(
     last_report = [time.time()]
     failed = [False]
 
+    # Shared mutable file_id_ref so workers can use a refreshed reference
+    file_id_ref = [file_id_obj]
+    # Lock to prevent multiple workers refreshing simultaneously
+    refresh_lock = asyncio.Lock()
+
     async def worker(idx, chunk_offset, chunk_limit):
-        """Fetch one byte-range with FloodWait retry support."""
+        """Fetch one byte-range with FloodWait and FileReferenceExpired retry support."""
         for attempt in range(3):
             try:
                 # Clear any partial data from a previous attempt
                 open(temp_paths[idx], "wb").close()
                 with open(temp_paths[idx], "wb") as fh:
                     async for chunk in client.get_file(
-                        file_id_obj, file_size,
+                        file_id_ref[0], file_size,
                         limit=chunk_limit,
                         offset=chunk_offset
                     ):
@@ -147,10 +176,28 @@ async def download_media_parallel(
                     raise
 
             except (FileReferenceExpired, FileReferenceInvalid):
-                failed[0] = True
-                raise
+                # Only one worker should refresh; others will reuse the new ref
+                async with refresh_lock:
+                    # Check if another worker already refreshed while we waited
+                    if file_id_ref[0] is file_id_obj and attempt == 0:
+                        logging.info(f"Worker {idx} refreshing file reference (attempt {attempt+1})")
+                        new_fid = await _refresh_file_id(client, message)
+                        if new_fid:
+                            file_id_ref[0] = new_fid
+                        else:
+                            failed[0] = True
+                            raise
+                downloaded[idx] = 0
+                if attempt >= 2:
+                    failed[0] = True
+                    raise
+                await asyncio.sleep(1)
 
             except Exception as e:
+                # StopProcess must propagate immediately — never retry
+                if str(e) == "StopProcess":
+                    failed[0] = True
+                    raise
                 if attempt < 2:
                     logging.warning(f"Parallel worker {idx} error (attempt {attempt+1}): {e}, retrying")
                     downloaded[idx] = 0
@@ -188,6 +235,15 @@ async def download_media_parallel(
         return out_path
 
     except Exception as e:
+        # StopProcess must propagate — do not swallow it into serial fallback
+        if str(e) == "StopProcess":
+            for p in [out_path] + temp_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            raise
         logging.warning(f"Parallel download failed ({type(e).__name__}: {e}), falling back to serial")
         for p in [out_path] + temp_paths:
             try:
@@ -215,10 +271,11 @@ async def download_media_fast(
 ):
     """Serial fallback downloader — used for small files and on parallel error."""
     retries = 5
+    current_message = message
     for i in range(retries):
         try:
             path = await client.download_media(
-                message,
+                current_message,
                 file_name=file_name or "downloads/",
                 progress=progress_callback if progress_callback else None,
                 progress_args=progress_args
@@ -238,9 +295,27 @@ async def download_media_fast(
             logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
             await asyncio.sleep(e.value)
         except (FileReferenceExpired, FileReferenceInvalid) as e:
-            logging.error(f"File reference expired on attempt {i+1}: {e}")
-            raise
+            logging.warning(f"File reference expired on attempt {i+1}, refreshing...")
+            if i < retries - 1:
+                refreshed = await _refresh_file_id(client, message)
+                if refreshed:
+                    # Re-fetch the full message object for download_media
+                    try:
+                        current_message = await client.get_messages(message.chat.id, message.id)
+                        if not current_message:
+                            current_message = message
+                    except Exception:
+                        current_message = message
+                    await asyncio.sleep(1)
+                else:
+                    logging.error(f"Could not refresh file reference: {e}")
+                    raise
+            else:
+                logging.error(f"File reference expired after {retries} attempts: {e}")
+                raise
         except Exception as e:
+            if str(e) == "StopProcess":
+                raise
             if i == retries - 1:
                 raise e
             logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")

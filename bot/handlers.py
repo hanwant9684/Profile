@@ -181,6 +181,11 @@ _user_floodwait_until: dict = {}
 _user_last_request: dict = {}
 RATE_LIMIT_SECONDS = 900
 
+# Per-user force-sub membership cache: {user_id: (is_subbed, channel, expires_at)}
+# Avoids a live get_chat_member() Telegram API call on every download.
+_force_sub_cache: dict = {}
+FORCE_SUB_CACHE_TTL = 300  # 5 minutes
+
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
     now = time.time()
@@ -192,9 +197,9 @@ async def get_user_client(user_id, session_str):
 
         # Telegram silently closes idle TCP sockets after ~60-120s.
         # is_connected only checks an internal flag — it cannot detect
-        # a server-side close. Evict any client idle for over 90s so the
+        # a server-side close. Evict any client idle for over 180s so the
         # next call always starts on a freshly opened socket.
-        if idle_secs <= 90 and client.is_connected:
+        if idle_secs <= 180 and client.is_connected:
             cached["last_used"] = now
             return client
 
@@ -226,10 +231,9 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=120,
         no_updates=True,
-        takeout=True,
         no_joined_notifications=True,
-        max_message_cache_size=100,
-        max_concurrent_transmissions=32
+        max_message_cache_size=500,
+        max_concurrent_transmissions=64
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -265,12 +269,14 @@ async def cleanup_user_clients():
                 except Exception:
                     pass
 
-        # ── 2. Rate-limit / FloodWait dict TTL eviction (every 120s) ─────────
+        # ── 2. Rate-limit / FloodWait / force-sub TTL eviction (every 120s) ───
         _TTL = 3600
         for uid in [u for u, ts in _user_last_request.items() if now - ts > _TTL]:
             _user_last_request.pop(uid, None)
         for uid in [u for u, dl in _user_floodwait_until.items() if now > dl]:
             _user_floodwait_until.pop(uid, None)
+        for uid in [u for u, v in _force_sub_cache.items() if now > v[2]]:
+            _force_sub_cache.pop(uid, None)
 
         # ── 3. Cache size caps (every 120s) ───────────────────────────────────
         if len(_dest_channel_cache) > 500:
@@ -310,7 +316,7 @@ async def cleanup_user_clients():
             except Exception:
                 pass
 
-from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
+from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, update_user_channel
 from bot.transfer import download_media_fast, download_media_parallel, upload_media_fast, truncate_caption
 
 async def update_status(msg, text):
@@ -328,6 +334,11 @@ async def update_status(msg, text):
     if cache is None:
         update_status._cache = {}
         cache = update_status._cache
+
+    # Prevent unbounded growth — evict oldest half when over limit
+    if len(cache) > 2000:
+        for k in list(cache.keys())[:1000]:
+            cache.pop(k, None)
 
     if cache.get(msg.id) == text:
         return  # identical — no API call needed
@@ -479,17 +490,27 @@ async def verify_force_sub(client, user_id):
     if not channel.startswith("@") and not channel.startswith("-100"):
         channel = f"@{channel}"
 
+    # Serve from cache if still fresh — skip live Telegram API call
+    now = time.time()
+    cached = _force_sub_cache.get(user_id)
+    if cached:
+        is_subbed, cached_channel, expires_at = cached
+        if now < expires_at and cached_channel == channel:
+            return is_subbed, (None if is_subbed else channel)
+
     try:
         from pyrogram import enums as _enums
         member = await client.get_chat_member(channel, user_id)
         if member.status in (_enums.ChatMemberStatus.LEFT, _enums.ChatMemberStatus.BANNED):
+            _force_sub_cache[user_id] = (False, channel, now + FORCE_SUB_CACHE_TTL)
             return False, channel
+        _force_sub_cache[user_id] = (True, channel, now + FORCE_SUB_CACHE_TTL)
         return True, None
     except (pyrogram.errors.exceptions.forbidden_403.ChatWriteForbidden, pyrogram.errors.exceptions.bad_request_400.ChatAdminRequired):
         logging.error(f"User {user_id} is spamreported or bot lacks permissions to check force sub.")
         return False, None
     except pyrogram.errors.UserNotParticipant:
-        # This is expected if they haven't joined yet, no need to log as error
+        _force_sub_cache[user_id] = (False, channel, now + FORCE_SUB_CACHE_TTL)
         return False, channel
     except Exception as e:
         logging.error(f"Force sub verification failed: {e}")
@@ -727,8 +748,11 @@ async def download_handler(client, message, link_override=None, processed_albums
     if not user:
         user = await create_user(user_id, username, full_name)
     elif user.get("username") != username or user.get("full_name") != full_name:
-        await create_user(user_id, username, full_name)
-        user = await get_user(user_id)
+        # Update profile in background — no need to block the request on a DB write
+        asyncio.create_task(create_user(user_id, username, full_name))
+        user = dict(user)
+        user["username"] = username
+        user["full_name"] = full_name
 
     if user and user.get("role") == "banned":
         await message.reply("❌ **You are banned from using this bot.**")
@@ -754,8 +778,20 @@ async def download_handler(client, message, link_override=None, processed_albums
             return
         _user_last_request[user_id] = _now
 
+    # Send status immediately — before any API calls so the user sees feedback right away
+    if status_msg_override is not None:
+        status_msg = status_msg_override
+    else:
+        status_msg = await safe_reply(message, "⏳ Processing...")
+        if status_msg is None:
+            logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
+            return None
+
     chat_id = None
     message_id = None
+
+    # Strip ?single — treat it identically to the plain link (downloads the full album).
+    link = link.replace("?single", "")
 
     private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
     public_match = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", link)
@@ -865,14 +901,6 @@ async def download_handler(client, message, link_override=None, processed_albums
         except Exception as e:
             logging.debug(f"Chat check error for {chat_id}: {e}")
             pass
-
-    if status_msg_override is not None:
-        status_msg = status_msg_override
-    else:
-        status_msg = await safe_reply(message, "⏳ Processing...")
-        if status_msg is None:
-            logging.error(f"Could not send processing message to user {user_id} — FloodWait too long")
-            return None
 
     if (is_private or is_group) and (not user or not user.get('phone_session_string')):
         await update_status(status_msg, "❌ Login is required for private links. Use /login.")
@@ -1016,14 +1044,14 @@ async def download_handler(client, message, link_override=None, processed_albums
                     target_messages = [msg]
                     is_media_group = False
 
-                can_download, quota_status = await check_and_update_quota(user_id)
+                can_download, quota_status = await check_and_update_quota(user_id, user=user)
 
                 if not can_download:
                     await update_status(status_msg, f"❌ {quota_status}")
                     return None
 
                 if user and user.get("role") == "free":
-                    await increment_quota(user_id, len(target_messages))
+                    await increment_quota(user_id, len(target_messages), user=user)
 
                 if not is_private and not is_group and not is_story:
                     try:
@@ -1276,13 +1304,24 @@ async def download_handler(client, message, link_override=None, processed_albums
                             orig_file_name = getattr(current_msg.audio, "file_name", None)
                         has_spoiler = getattr(current_msg, "has_media_spoiler", None)
 
+                        # Show download status immediately — before first progress callback fires
+                        _media_obj = (
+                            getattr(current_msg, "document", None) or
+                            getattr(current_msg, "video", None) or
+                            getattr(current_msg, "audio", None)
+                        )
+                        _file_size_str = ""
+                        if _media_obj and getattr(_media_obj, "file_size", None):
+                            _file_size_str = f" ({_format_size(_media_obj.file_size)})"
+                        await update_status(status_msg, f"📥 Downloading{_file_size_str}...")
+
                         for _dl_attempt in range(2):
                             try:
                                 path = await asyncio.wait_for(
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=16,
+                                        num_workers=20,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
