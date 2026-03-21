@@ -229,7 +229,7 @@ async def get_user_client(user_id, session_str):
         takeout=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
-        max_concurrent_transmissions=32
+        max_concurrent_transmissions=20
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
