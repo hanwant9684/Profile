@@ -266,16 +266,6 @@ async def logout(client, message):
                 pass
 
     if user and user.get('phone_session_string'):
-        # Evict the in-memory user client so the old session isn't reused
-        from bot.handlers import user_clients, _force_sub_cache
-        cached_client_data = user_clients.pop(user_id, None)
-        if cached_client_data:
-            try:
-                await cached_client_data["client"].stop()
-            except Exception:
-                pass
-        _force_sub_cache.pop(user_id, None)
-
         try:
             from pyrogram import Client
             from bot.config import API_ID, API_HASH
@@ -288,6 +278,7 @@ async def logout(client, message):
             )
             await temp_client.start()
             await temp_client.log_out()
+
         except Exception:
             pass
             

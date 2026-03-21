@@ -106,6 +106,6 @@ app = Client(
     no_updates=False,
     skip_updates=True,
     fetch_replies=0,
-    max_concurrent_transmissions=64,
-    workers=16
+    max_concurrent_transmissions=32,
+    workers=8
 )

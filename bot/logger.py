@@ -8,7 +8,7 @@ def setup_logger():
     log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     log_file = "bot_logs.txt"
 
-    file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=3)
+    file_handler = RotatingFileHandler(log_file, maxBytes=1*1024*1024, backupCount=1)
     file_handler.setFormatter(log_formatter)
     file_handler.setLevel(logging.INFO)
 
@@ -24,4 +24,4 @@ def setup_logger():
     # Suppress specific noisy logs
     logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)
     logging.getLogger("pyrogram.connection.connection").setLevel(logging.ERROR)
-    logging.getLogger("pyrogram.client").setLevel(logging.ERROR)
+
