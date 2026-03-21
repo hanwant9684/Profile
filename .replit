@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "web", "postgresql-16", "python-3.11"]
+modules = ["web", "postgresql-16", "python-3.11"]
 run = "npm run dev"
 hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
 
@@ -38,12 +38,17 @@ args = "Start Bot"
 name = "Start Bot"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
 
-[workflows.workflow.metadata]
-outputType = "console"
-
 [agent]
 expertMode = true
+
+[userenv]
+
+[userenv.shared]
+REDIS_URL = "redis://localhost:6379"

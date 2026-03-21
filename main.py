@@ -38,7 +38,24 @@ async def main():
     # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
     from bot.database import init_db
-    import bot.transfer 
+    import bot.transfer
+
+    # ── Expand crypto_executor from 1 → 4 threads ────────────────────────────
+    # pyrotgfork ships with ThreadPoolExecutor(1) for ALL AES-IGE decryption
+    # across every session (bot + all user media sessions).  With 6 parallel
+    # download workers, 6 x 1 MB chunks arrive near-simultaneously and queue
+    # serially behind that one thread: decrypt c0 → c1 → … → c5.  All 6
+    # workers stall waiting for their chunk, then fire the next GetFile
+    # simultaneously — the pattern repeats and shows as speed oscillation.
+    # 4 threads lets 4 chunks decrypt in parallel, cutting the backlog to one
+    # batch of ~2 ms instead of six sequential ~2 ms operations.
+    # Safe because mtproto.unpack() and aes.ctr256 work on independent buffers;
+    # different sessions never share the same cipher state.
+    import pyrogram
+    from concurrent.futures.thread import ThreadPoolExecutor as _TPE
+    pyrogram.crypto_executor.shutdown(wait=False)
+    pyrogram.crypto_executor = _TPE(4, thread_name_prefix="CryptoWorker")
+    print("✅ crypto_executor: 1 thread → 4 threads (parallel chunk decryption)")
 
     # Import all modules to register handlers
     import bot.login
@@ -73,7 +90,16 @@ async def main():
             await asyncio.sleep(5)
             try:
                 me = await app.get_me()
-                print(f"✅ Bot is running on DC {me.dc_id}")
+                # app.storage.dc_id() is the REAL auth DC — where all MTProto traffic goes.
+                # me.dc_id is only the DC of the bot's profile photo (can differ or be None).
+                auth_dc = await app.storage.dc_id()
+                dc_locations = {1: "USA/Miami", 2: "Amsterdam", 3: "USA/Miami", 4: "Amsterdam", 5: "Singapore"}
+                auth_dc_loc = dc_locations.get(auth_dc, "Unknown")
+                photo_dc = me.dc_id
+                photo_dc_loc = dc_locations.get(photo_dc, "Unknown") if photo_dc else None
+                print(f"✅ Bot auth session: DC{auth_dc} ({auth_dc_loc}) — all API/MTProto traffic goes here")
+                if photo_dc:
+                    print(f"ℹ️  Bot profile photo: DC{photo_dc} ({photo_dc_loc}) — photo storage only, not the session")
             except Exception as e:
                 logging.debug(f"DC Check Error: {e}")
 
