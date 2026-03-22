@@ -1,8 +1,14 @@
 import asyncio
 import logging
 from pyrogram import filters
+
+async def update_status(msg, text):
+    try:
+        await msg.edit_text(text)
+    except Exception as e:
+        logging.debug(f"Status update failed: {e}")
+
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
-from bot.handlers import update_status
 from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user, iter_user_ids
 
 @app.on_message(filters.command("stats") & filters.private)
@@ -190,7 +196,7 @@ async def broadcast(client, message):
                 count += 1
             except Exception:
                 blocked += 1
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)
         await update_status(msg, f"✅ Broadcast complete.\nTotal: {len(target_ids)}\nSent: {count}\nFailed/Blocked: {blocked}")
     else:
         # Paginated broadcast — never loads all users into RAM
@@ -204,10 +210,10 @@ async def broadcast(client, message):
                 logging.debug(f"Broadcast failed for {tid}: {e}")
 
             index += 1
-            if index % 20 == 0:
+            if index % 50 == 0:
                 await update_status(msg, f"🚀 Broadcasting...\nProgress: {index}/{total}\nSent: {count}\nFailed: {blocked}")
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)
 
         await update_status(msg, f"✅ Broadcast complete.\nTotal: {total}\nSent: {count}\nFailed/Blocked: {blocked}")
 
