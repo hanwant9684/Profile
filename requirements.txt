@@ -10,3 +10,15 @@ pyyaml
 redis
 tgcrypto
 uvloop
+aiofiles
+aiohttp
+asyncpg
+certifi
+flask
+psutil
+pyrotgfork
+python-dotenv
+pyyaml
+redis
+tgcrypto
+uvloop
