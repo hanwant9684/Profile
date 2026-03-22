@@ -4,7 +4,7 @@ import logging
 import aiohttp
 import redis.asyncio as redis
 import json
-from bot.logger import setup_logger
+from bot.logger import setup_logger, cleanup_loop
 from pyrogram import Client
 from dotenv import load_dotenv
 
@@ -61,6 +61,13 @@ async def get_dump_channel_id():
 # Performance Settings
 MAX_CONCURRENT_DOWNLOADS = 10
 
+def get_smart_download_workers(file_size):
+    if file_size < 100 * 1024 * 1024:
+        return 4
+    else:
+        return 10
+        
+
 active_downloads = set()
 cancel_flags = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -97,15 +104,13 @@ AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
 # Update client with higher max_concurrent_transmissions
 app = Client(
-    "bot_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
+    "bot_session", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
     in_memory=True,
     sleep_threshold=120,
     no_updates=False,
-    skip_updates=True,
-    fetch_replies=0,
     max_concurrent_transmissions=20,
-    workers=10
+    workers=20
 )

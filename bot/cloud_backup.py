@@ -1,11 +1,11 @@
 import os
 import logging
 import asyncio
+import aiohttp
 import base64
 import json
 from datetime import datetime
 import subprocess
-from bot.config import get_shared_session
 
 logger = logging.getLogger(__name__)
 
@@ -49,32 +49,34 @@ async def backup_to_github_async():
         data = {"message": f"Automated PostgreSQL backup - {timestamp}", "content": content}
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
-        session = await get_shared_session()
-        async with session.put(url, json=data, headers=headers) as response:
-            if response.status == 201:
-                logger.info(f"Uploaded PostgreSQL backup to GitHub: {file_path}")
-                try:
-                    list_url = f"https://api.github.com/repos/{repo}/contents/backups"
-                    async with session.get(list_url, headers=headers) as list_resp:
-                        if list_resp.status == 200:
-                            backups = await list_resp.json()
-                            if len(backups) > 2:
-                                backups.sort(key=lambda x: x['name'], reverse=True)
-                                for old_backup in backups[2:]:
-                                    del_url = f"https://api.github.com/repos/{repo}/contents/{old_backup['path']}"
-                                    del_data = {
-                                        "message": f"Deleting old backup: {old_backup['name']}",
-                                        "sha": old_backup['sha']
-                                    }
-                                    async with session.delete(del_url, json=del_data, headers=headers) as del_resp:
-                                        if del_resp.status == 200:
-                                            logger.info(f"Deleted old backup: {old_backup['name']}")
-                except Exception as e:
-                    logger.error(f"Failed to clean up old backups: {e}")
-                return True
-            else:
-                logger.error(f"GitHub upload failed: {response.status}")
-                return False
+        async with aiohttp.ClientSession() as session:
+            async with session.put(url, json=data, headers=headers) as response:
+                if response.status == 201:
+                    logger.info(f"Uploaded PostgreSQL backup to GitHub: {file_path}")
+                    # Keep only 2 latest files
+                    try:
+                        list_url = f"https://api.github.com/repos/{repo}/contents/backups"
+                        async with session.get(list_url, headers=headers) as list_resp:
+                            if list_resp.status == 200:
+                                backups = await list_resp.json()
+                                if len(backups) > 2:
+                                    # Sort by name (which has timestamp) and delete older ones
+                                    backups.sort(key=lambda x: x['name'], reverse=True)
+                                    for old_backup in backups[2:]:
+                                        del_url = f"https://api.github.com/repos/{repo}/contents/{old_backup['path']}"
+                                        del_data = {
+                                            "message": f"Deleting old backup: {old_backup['name']}",
+                                            "sha": old_backup['sha']
+                                        }
+                                        async with session.delete(del_url, json=del_data, headers=headers) as del_resp:
+                                            if del_resp.status == 200:
+                                                logger.info(f"Deleted old backup: {old_backup['name']}")
+                    except Exception as e:
+                        logger.error(f"Failed to clean up old backups: {e}")
+                    return True
+                else:
+                    logger.error(f"GitHub upload failed: {response.status}")
+                    return False
     except Exception as e:
         logger.error(f"GitHub backup failed: {e}")
         return False
@@ -91,19 +93,19 @@ async def restore_from_github_async():
 
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
         
-        session = await get_shared_session()
-        list_url = f"https://api.github.com/repos/{repo}/contents/backups"
-        async with session.get(list_url, headers=headers) as response:
-            if response.status != 200: return False
-            backups = await response.json()
-
-        if not backups: return False
-        latest = sorted(backups, key=lambda x: x['name'], reverse=True)[0]
-        download_url = latest['download_url']
-
-        async with session.get(download_url, headers=headers) as response:
-            if response.status != 200: return False
-            backup_content = await response.read()
+        async with aiohttp.ClientSession() as session:
+            list_url = f"https://api.github.com/repos/{repo}/contents/backups"
+            async with session.get(list_url, headers=headers) as response:
+                if response.status != 200: return False
+                backups = await response.json()
+            
+            if not backups: return False
+            latest = sorted(backups, key=lambda x: x['name'], reverse=True)[0]
+            download_url = latest['download_url']
+            
+            async with session.get(download_url, headers=headers) as response:
+                if response.status != 200: return False
+                backup_content = await response.read()
 
         temp_path = "temp_restore.sql"
         try:
@@ -131,7 +133,7 @@ async def restore_from_github_async():
         logger.error(f"GitHub restore failed: {e}")
         return False
 
-async def periodic_cloud_backup(interval_minutes=60):
+async def periodic_cloud_backup(interval_minutes=10):
     backup_service = os.getenv("CLOUD_BACKUP_SERVICE", "").lower()
     if backup_service != "github": return
     while True:
