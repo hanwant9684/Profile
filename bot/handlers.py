@@ -1282,7 +1282,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=8,
+                                        num_workers=2,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
