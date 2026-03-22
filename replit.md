@@ -7,7 +7,7 @@ A Telegram bot built with Python that enables users to download content from Tel
 ## Quick Setup (New Replit Import)
 
 When importing to a new Replit:
-1. Dependencies auto-install from `pyproject.toml`
+1. Dependencies are installed via pip from `requirements.txt`
 2. Add required secrets in the Secrets tab (see below)
 3. Click Run
 
@@ -33,28 +33,29 @@ Add these in Replit Secrets tab:
 
 Preferred communication style: Simple, everyday language.
 
-## Recent Changes
-
-- **2026-01-29**: Added GitHub cloud backup integration for SQLite database (auto-restore on restart, periodic backups every 10 minutes, backup on critical changes)
-- **2026-01-29**: Migrated database from MongoDB to SQLite for simplicity and portability. No external database setup required.
-
 ## System Architecture
 
 ### Bot Framework
-- **Framework**: Kurigram (Pyrogram fork) for Telegram Bot API interaction
+- **Framework**: Kurigram (Pyrogram fork) via `pyrotgfork` for Telegram Bot API interaction
 - **Entry Point**: `main.py` initializes the database and starts the bot
 - **Modular Design**: Handlers are split across multiple files and imported to register with the bot client
 
 ### Module Structure
 | Module | Purpose |
 |--------|---------|
-| `config.py` | Environment variables, bot client initialization, global state (semaphores, active downloads) |
-| `database.py` | SQLite database connection and user/settings CRUD operations |
-| `handlers.py` | Main download link processing and force-subscribe verification |
-| `login.py` | User onboarding, terms acceptance, and Telegram session authentication |
-| `admin.py` | Owner-only commands for stats, user management, and process control |
-| `info.py` | User info and quota display commands |
-| `cloud_backup.py` | GitHub cloud backup - auto restore on startup, periodic backups, critical change backups |
+| `bot/config.py` | Environment variables, bot client initialization, global state (semaphores, active downloads) |
+| `bot/database.py` | SQLite database connection and user/settings CRUD operations |
+| `bot/handlers.py` | Main download link processing and force-subscribe verification |
+| `bot/login.py` | User onboarding, terms acceptance, and Telegram session authentication |
+| `bot/admin.py` | Owner-only commands for stats, user management, and process control |
+| `bot/info.py` | User info and quota display commands |
+| `bot/cloud_backup.py` | GitHub cloud backup - auto restore on startup, periodic backups, critical change backups |
+| `bot/ads.py` | Advertisement handling |
+| `bot/transfer.py` | File transfer logic |
+| `bot/logger.py` | Logging configuration |
+
+### Workflow
+- **Start Bot** — runs `python main.py` (console output)
 
 ### Concurrency Control
 - Global semaphore limits concurrent downloads to 4 (`MAX_CONCURRENT_DOWNLOADS`)
@@ -69,7 +70,7 @@ Preferred communication style: Simple, everyday language.
 
 ### Download Features
 - **Media Group Support**: When a link points to a message in a media group, ALL files in that group are automatically downloaded with a single link
-- **Quota-Aware Downloading**: Free users are limited by their remaining daily quota. If a media group has more files than remaining quota, only partial download occurs with an upgrade prompt
+- **Quota-Aware Downloading**: Free users are limited by their remaining daily quota
 - **Video Streaming**: Videos are uploaded with proper thumbnail, duration, width/height for streaming playback
 - **Progress Tracking**: Real-time progress bars show download/upload status for each file
 
@@ -81,28 +82,15 @@ Users table stores:
 
 Settings table stores key-value pairs (e.g., `force_sub_channel`)
 
-## VPS Backup Guide
-
-To keep your data safe on a VPS, follow these practices:
-
-### 1. PostgreSQL Backup (Main Data)
-The most critical data is in your PostgreSQL database.
-- **Automated Dump**: Set up a cron job to run `pg_dump` daily.
-  ```bash
-  pg_dump $DATABASE_URL > backup_$(date +%F).sql
-  ```
-- **Off-site Storage**: Move these `.sql` files to a secure cloud storage (like Google Drive or S3) automatically.
-
-### 2. Redis Connection (Cache)
-- The "Connection Refused" error usually means Redis isn't running on the target machine.
-- **Permanent Fix**: Ensure the Redis server is started on your VPS.
-  ```bash
-  sudo systemctl enable redis
-  sudo systemctl start redis
-  ```
-- **Fallback**: The bot is now updated to automatically skip Redis and use only the main database if Redis is unavailable, so it won't crash.
-
-### 3. File Persistence
-- All media files are handled on-the-fly or stored in the `downloads/` folder during processing.
-- The bot cleans the `downloads/` folder on startup to save space. No critical data is stored there permanently.
-
+## Dependencies (Python)
+- `pyrotgfork` — Pyrogram fork (Kurigram) for Telegram
+- `aiofiles`, `aiohttp` — async file/HTTP operations
+- `asyncpg` — async PostgreSQL client
+- `certifi` — SSL certificates
+- `flask` — web server for health checks
+- `psutil` — system/process utilities
+- `python-dotenv` — environment variable loading
+- `pyyaml` — YAML parsing
+- `redis` — Redis client
+- `tgcrypto` — fast crypto for Telegram
+- `uvloop` — fast event loop
