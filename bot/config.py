@@ -106,6 +106,6 @@ app = Client(
     no_updates=False,
     skip_updates=True,
     fetch_replies=0,
-    max_concurrent_transmissions=20,   # BOT CLIENT: parallel upload streams to Telegram; safe range 4-12
-    workers=20                        # ↑ SCALE: increase to 20 for 20 concurrent users
+    max_concurrent_transmissions=8,   # BOT CLIENT: parallel upload streams to Telegram; safe range 4-12
+    workers=10                         # ↑ SCALE: increase to 20 for 20 concurrent users
 )
