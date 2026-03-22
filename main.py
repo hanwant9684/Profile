@@ -3,12 +3,21 @@ import uvloop
 import logging
 import os
 import sys
+import resource
 from dotenv import load_dotenv
 
 # Set event loop policy FIRST
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 load_dotenv()
+
+# Optimization for 3GB RAM VPS
+try:
+    # Set soft memory limit to 2.7GB to leave room for system on 3GB VPS
+    # Using 2.7GB (2764.8 MB) to be safer than 2.8GB
+    resource.setrlimit(resource.RLIMIT_AS, (2700 * 1024 * 1024, -1))
+except Exception:
+    pass
 
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
@@ -38,6 +47,8 @@ async def main():
     # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
     from bot.database import init_db
+    from bot.login import cleanup_expired_logins
+    from bot.logger import cleanup_loop
     import bot.transfer 
 
     # Import all modules to register handlers
@@ -48,6 +59,10 @@ async def main():
 
     print("Initializing database...")
     await init_db()
+
+    # Ensure shared session is initialized
+    from bot.config import get_shared_session
+    await get_shared_session()
 
     # Check for TgCrypto and debug crypto speed
     try:
@@ -65,6 +80,8 @@ async def main():
         
     from bot.cloud_backup import periodic_cloud_backup
     asyncio.create_task(periodic_cloud_backup())
+    asyncio.create_task(cleanup_expired_logins())
+    asyncio.create_task(cleanup_loop())
     
     print("Starting bot...")
     if app:
@@ -73,16 +90,7 @@ async def main():
             await asyncio.sleep(5)
             try:
                 me = await app.get_me()
-                # app.storage.dc_id() is the REAL auth DC — where all MTProto traffic goes.
-                # me.dc_id is only the DC of the bot's profile photo (can differ or be None).
-                auth_dc = await app.storage.dc_id()
-                dc_locations = {1: "USA/Miami", 2: "Amsterdam", 3: "USA/Miami", 4: "Amsterdam", 5: "Singapore"}
-                auth_dc_loc = dc_locations.get(auth_dc, "Unknown")
-                photo_dc = me.dc_id
-                photo_dc_loc = dc_locations.get(photo_dc, "Unknown") if photo_dc else None
-                print(f"✅ Bot auth session: DC{auth_dc} ({auth_dc_loc}) — all API/MTProto traffic goes here")
-                if photo_dc:
-                    print(f"ℹ️  Bot profile photo: DC{photo_dc} ({photo_dc_loc}) — photo storage only, not the session")
+                print(f"✅ Bot is running on DC {me.dc_id}")
             except Exception as e:
                 logging.debug(f"DC Check Error: {e}")
 
@@ -98,6 +106,12 @@ async def main():
     else:
         print("Bot app not initialized due to missing config. Exiting.")
     
+    # Cleanup global session
+    from bot.config import shared_session
+    if shared_session and not shared_session.closed:
+        await shared_session.close()
+        print("Global aiohttp session closed.")
+
     # Stop Redis server on exit
     print("🛑 Stopping Redis server...")
     import subprocess
