@@ -67,7 +67,7 @@ async def init_db():
         pool = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=3,
-            max_size=10,
+            max_size=10,         # ↑ SCALE: increase to 20 for 20 concurrent users
             command_timeout=30,
             statement_cache_size=100,
         )
@@ -346,9 +346,10 @@ async def check_and_update_quota(user_id):
         return False, "Database error."
 
 
-async def increment_quota(user_id, count=1):
+async def increment_quota(user_id, count=1, user=None):
     try:
-        user = await get_user(user_id)
+        if user is None:
+            user = await get_user(user_id)
         if not user or user.get("role") != 'free':
             return
 

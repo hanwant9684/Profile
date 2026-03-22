@@ -156,12 +156,48 @@ async def send_to_dump(client, user_id, link, msg):
     except Exception as e:
         logging.error(f"Dump failed: {e}")
         
+# ── pyrotgfork task budget per client ─────────────────────────────────────────
+# BOT CLIENT (app):
+#   • 1  network_task  — TCP recv loop; decrypts packets; wakes pending invoke() futures
+#   • 1  ping_task     — PingDelayDisconnect every 5 s (session.PING_INTERVAL)
+#   • 1  updates_watchdog_task — every 15 min calls GetState if no update seen
+#   • N  handler_worker_tasks — N = workers (10); drain updates_queue concurrently
+# USER CLIENT (no_updates=True → dispatcher is never started):
+#   • 1  network_task  — main session TCP recv
+#   • 1  ping_task     — main session keepalive
+#   • 1  network_task  — media session TCP recv (created on first download)
+#   • 1  ping_task     — media session keepalive
+# OUR OWN TASKS:
+#   • periodic_cloud_backup  — background loop, every 60 min                 BG
+#   • cleanup_user_clients   — background loop, every 120 s                  BG
+#   • check_dc_later         — one-shot 5 s after start                      BG
+#   • _progress_reporter()   — one per active download, fires every 2.5 s    BG
+#   • send_to_dump()         — fire-and-forget via _fire_dump(); was await    BG ✓
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
 active_sessions = set() # Track sessions currently in use (per-item level)
 _batch_sessions = set() # Track users mid-batch — held for the entire batch duration
 _cleanup_task_started = False
 _cleanup_cycle = 0  # Counts cleanup iterations; used to schedule infrequent sub-tasks
+
+# Keeps strong references to fire-and-forget dump tasks so the GC cannot
+# collect them before they finish.  The done-callback removes each task
+# automatically once it completes.
+_dump_tasks: set = set()
+
+def _fire_dump(coro) -> None:
+    """Schedule a send_to_dump coroutine as a background task.
+
+    Dump is intentionally fire-and-forget: the user should receive their
+    file immediately, without waiting for the dump channel write to complete.
+    We hold a strong reference in _dump_tasks so CPython's GC does not
+    destroy the task mid-flight (asyncio only keeps a weak reference).
+    """
+    task = asyncio.create_task(coro)
+    _dump_tasks.add(task)
+    task.add_done_callback(_dump_tasks.discard)
 
 # Cache for get_chat results keyed by chat_id to avoid repeated API calls
 # e.g. during a batch of 50 items from the same channel
@@ -181,6 +217,13 @@ _user_floodwait_until: dict = {}
 _user_last_request: dict = {}
 RATE_LIMIT_SECONDS = 900
 
+# Force-subscribe cache: {user_id: expires_at_timestamp}
+# Caches confirmed subscribers for 5 minutes so /start doesn't hit
+# get_chat_member on Telegram every single time. Only positive results
+# are cached — non-members always re-check so they can rejoin and retry.
+_force_sub_verified: dict = {}
+_FORCE_SUB_CACHE_TTL = 300  # 5 minutes
+
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
     now = time.time()
@@ -192,9 +235,9 @@ async def get_user_client(user_id, session_str):
 
         # Telegram silently closes idle TCP sockets after ~60-120s.
         # is_connected only checks an internal flag — it cannot detect
-        # a server-side close. Evict any client idle for over 90s so the
+        # a server-side close. Evict any client idle for over 300s so the
         # next call always starts on a freshly opened socket.
-        if idle_secs <= 90 and client.is_connected:
+        if idle_secs <= 300 and client.is_connected:
             cached["last_used"] = now
             return client
 
@@ -229,7 +272,7 @@ async def get_user_client(user_id, session_str):
         takeout=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
-        max_concurrent_transmissions=4
+        max_concurrent_transmissions=2   # USER CLIENT: must match num_workers in download_media_parallel
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -301,8 +344,11 @@ async def cleanup_user_clients():
                 pass
 
         # ── 5. Python GC (every 15 cycles = ~30 min) ─────────────────────────
+        # gc.collect() is synchronous C-level work that can block the event
+        # loop for tens of ms on large heaps.  Push it to the thread-pool so
+        # the event loop stays free to process other coroutines while GC runs.
         if _cleanup_cycle % 15 == 0:
-            gc.collect()
+            await asyncio.get_event_loop().run_in_executor(None, gc.collect)
             try:
                 import psutil
                 mem = psutil.Process().memory_info().rss / 1024 / 1024
@@ -479,17 +525,26 @@ async def verify_force_sub(client, user_id):
     if not channel.startswith("@") and not channel.startswith("-100"):
         channel = f"@{channel}"
 
+    # Return cached result if the user was verified as subscribed recently.
+    # Only positive results are cached — non-members always re-check Telegram
+    # so they can join the channel and immediately retry without waiting.
+    now = time.time()
+    if _force_sub_verified.get(user_id, 0) > now:
+        return True, None
+
     try:
         from pyrogram import enums as _enums
         member = await client.get_chat_member(channel, user_id)
         if member.status in (_enums.ChatMemberStatus.LEFT, _enums.ChatMemberStatus.BANNED):
             return False, channel
+        # Confirmed subscriber — cache for 5 minutes to skip future API calls
+        _force_sub_verified[user_id] = now + _FORCE_SUB_CACHE_TTL
         return True, None
     except (pyrogram.errors.exceptions.forbidden_403.ChatWriteForbidden, pyrogram.errors.exceptions.bad_request_400.ChatAdminRequired):
         logging.error(f"User {user_id} is spamreported or bot lacks permissions to check force sub.")
         return False, None
     except pyrogram.errors.UserNotParticipant:
-        # This is expected if they haven't joined yet, no need to log as error
+        # Expected if they haven't joined yet — do not cache so retry works immediately
         return False, channel
     except Exception as e:
         logging.error(f"Force sub verification failed: {e}")
@@ -666,7 +721,8 @@ async def batch_handler(client, message):
                         link_override=link,
                         processed_albums=processed_albums,
                         status_msg_override=batch_status,
-                        prefetched_msgs=prefetched_msgs
+                        prefetched_msgs=prefetched_msgs,
+                        user_override=user
                     )
                     if result is not None:
                         done += 1
@@ -716,19 +772,30 @@ async def batch_handler(client, message):
         _batch_sessions.discard(user_id)
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
-async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None):
+async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None, user_override=None):
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
     link = link_override or message.text.strip()
 
+    # ?single tells Telegram's app to show only one file from an album,
+    # but our bot should download the full media group. Strip it so the
+    # link falls through to normal public/private parsing with chat-type
+    # detection and user-session selection intact.
+    if "?single" in link:
+        link = re.sub(r'\?single\b[^&]*', '', link).rstrip('?&')
+
     from bot.database import create_user
-    user = await get_user(user_id)
-    if not user:
-        user = await create_user(user_id, username, full_name)
-    elif user.get("username") != username or user.get("full_name") != full_name:
-        await create_user(user_id, username, full_name)
+    if user_override is not None:
+        # Caller (e.g. batch_handler) already loaded the user — skip the DB round-trip
+        user = user_override
+    else:
         user = await get_user(user_id)
+        if not user:
+            user = await create_user(user_id, username, full_name)
+        elif user.get("username") != username or user.get("full_name") != full_name:
+            await create_user(user_id, username, full_name)
+            user = await get_user(user_id)
 
     if user and user.get("role") == "banned":
         await message.reply("❌ **You are banned from using this bot.**")
@@ -765,8 +832,6 @@ async def download_handler(client, message, link_override=None, processed_albums
     private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
     story_match = re.search(r"t\.me/([^/]+)/s/(\d+)", link)
     private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", link)
-    single_match = re.search(r"t\.me/([^/]+)/(\d+)\?single", link)
-    private_single_match = re.search(r"t\.me/c/(\d+)/(\d+)\?single", link)
     thread_match = re.search(r"t\.me/([^/]+)/(\d+)\?thread=(\d+)", link)
     private_thread_match = re.search(r"t\.me/c/(\d+)/(\d+)\?thread=(\d+)", link)
 
@@ -825,13 +890,6 @@ async def download_handler(client, message, link_override=None, processed_albums
     elif thread_match:
         chat_id = thread_match.group(1)
         message_id = int(thread_match.group(2))
-    elif private_single_match:
-        chat_id = int("-100" + private_single_match.group(1))
-        message_id = int(private_single_match.group(2))
-        is_private = True
-    elif single_match:
-        chat_id = single_match.group(1)
-        message_id = int(single_match.group(2))
     elif topic_match:
         chat_id = int("-100" + topic_match.group(1))
         message_id = int(topic_match.group(3))
@@ -1010,8 +1068,22 @@ async def download_handler(client, message, link_override=None, processed_albums
                     processed_albums.add(media_group_id)
 
                 if not is_story and getattr(msg, "media_group_id", None):
-                    target_messages = await user_client.get_media_group(chat_id, message_id)
-                    is_media_group = True
+                    try:
+                        for _mg_attempt in range(3):
+                            try:
+                                target_messages = await user_client.get_media_group(chat_id, message_id)
+                                is_media_group = True
+                                break
+                            except (FloodWait, FloodPremiumWait) as e:
+                                logging.warning(f"FloodWait {e.value}s on get_media_group (attempt {_mg_attempt + 1})")
+                                if _mg_attempt < 2:
+                                    await asyncio.sleep(e.value + 1)
+                                else:
+                                    raise
+                    except Exception as _mg_err:
+                        logging.warning(f"get_media_group failed ({_mg_err}) — falling back to single message")
+                        target_messages = [msg]
+                        is_media_group = False
                 else:
                     target_messages = [msg]
                     is_media_group = False
@@ -1023,7 +1095,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                     return None
 
                 if user and user.get("role") == "free":
-                    await increment_quota(user_id, len(target_messages))
+                    await increment_quota(user_id, len(target_messages), user=user)
 
                 if not is_private and not is_group and not is_story:
                     try:
@@ -1031,14 +1103,11 @@ async def download_handler(client, message, link_override=None, processed_albums
                         media_group_id = getattr(msg, "media_group_id", None)
                         if media_group_id:
                             await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id)
-                            #Dumo Copy
-                            await send_to_dump(client, user_id, link, msg)
-                            
+                            _fire_dump(send_to_dump(client, user_id, link, msg))
                             processed_count = len(target_messages)
                         else:
                             await msg.copy(chat_id=user_id)
-                            #Dump Copy
-                            await send_to_dump(client, user_id, link, msg)
+                            _fire_dump(send_to_dump(client, user_id, link, msg))
                             
                             processed_count = 1
                         if status_msg_override is None:
@@ -1059,7 +1128,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     msgs = await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=message_id, captions="")
                                 else:
                                     await msg.copy(chat_id=user_id, caption="")
-                                await send_to_dump(client, user_id, link, msg)
+                                _fire_dump(send_to_dump(client, user_id, link, msg))
                                 processed_count = len(target_messages) if media_group_id else 1
                                 if status_msg_override is None:
                                     await status_msg.delete()
@@ -1236,7 +1305,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     await user_client.send_message(text_dest, safe_caption)
                                 except Exception as e:
                                     logging.error(f"Text upload to private channel failed: {e}")
-                            await send_to_dump(client, user_id, link, current_msg)
+                            _fire_dump(send_to_dump(client, user_id, link, current_msg))
                             processed_count += 1
                             continue
                         except Exception as e:
@@ -1282,7 +1351,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=4,
+                                        num_workers=2,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
@@ -1319,8 +1388,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     path = None
                                     break
                             except (FileReferenceExpired, FileReferenceInvalid) as e:
-                                logging.error(f"File reference expired for message: {e}")
-                                await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
+                                # All refresh retries (in transfer.py) exhausted — genuine failure
+                                logging.error(f"File reference could not be refreshed after all retries: {e}")
+                                await update_status(status_msg, "❌ Download failed — Telegram could not serve this file after multiple retries. Please try again in a moment.")
                                 path = None
                                 break
                             except Exception as e:
@@ -1359,7 +1429,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
 
                         if sent_msg:
-                            await send_to_dump(client, user_id, link, sent_msg)
+                            _fire_dump(send_to_dump(client, user_id, link, sent_msg))
 
                         processed_count += 1
                     except Exception as e:
