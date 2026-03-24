@@ -378,7 +378,7 @@ async def _send_with_floodwait(coro_fn, max_retries=3):
             wait = e.value
             logging.warning(f"Upload FloodWait {wait}s (attempt {attempt+1}/{max_retries})")
             if attempt < max_retries - 1:
-                await asyncio.sleep(min(wait, 60))
+                await asyncio.sleep(wait)
             else:
                 raise
 

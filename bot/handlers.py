@@ -240,7 +240,7 @@ async def get_user_client(user_id, session_str):
         no_updates=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
-        max_concurrent_transmissions=8
+        max_concurrent_transmissions=16
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -548,6 +548,14 @@ async def batch_handler(client, message):
     start_link = parts[1]
     end_link = parts[2]
 
+    # Story links: t.me/c/CHANNEL/s/ID  or  t.me/USERNAME/s/ID
+    # Must be checked first — the /s/ segment is not digits so it won't collide with
+    # any plain-message pattern, but checking early keeps the logic explicit.
+    start_private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", start_link)
+    end_private_story_match   = re.search(r"t\.me/c/(\d+)/s/(\d+)", end_link)
+    start_public_story_match  = re.search(r"t\.me/(?!c/)([^/]+)/s/(\d+)", start_link)
+    end_public_story_match    = re.search(r"t\.me/(?!c/)([^/]+)/s/(\d+)", end_link)
+
     # Topic links: t.me/c/CHANNEL/TOPIC/MSG  — must be checked before the plain 2-segment pattern
     start_topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", start_link)
     end_topic_match   = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", end_link)
@@ -561,7 +569,21 @@ async def batch_handler(client, message):
     end_match   = re.search(r"t\.me/c/(\d+)/(\d+)", end_link)   or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
 
     # Determine link type and extract the correct message ID from each link
-    if start_topic_match and end_topic_match:
+    if start_private_story_match and end_private_story_match:
+        # Private story: t.me/c/CHANNEL/s/ID
+        link_type    = "private_story"
+        channel_part = start_private_story_match.group(1)
+        topic_part   = None
+        start_id = int(start_private_story_match.group(2))
+        end_id   = int(end_private_story_match.group(2))
+    elif start_public_story_match and end_public_story_match:
+        # Public story: t.me/USERNAME/s/ID
+        link_type    = "public_story"
+        channel_part = start_public_story_match.group(1)
+        topic_part   = None
+        start_id = int(start_public_story_match.group(2))
+        end_id   = int(end_public_story_match.group(2))
+    elif start_topic_match and end_topic_match:
         # Private topic: t.me/c/CHANNEL/TOPIC/MSG
         link_type = "private_topic"
         channel_part = start_topic_match.group(1)
@@ -614,9 +636,10 @@ async def batch_handler(client, message):
     # ── Batch pre-fetch: get all messages in one API call instead of N calls ──
     # This turns N serial get_messages(replies=0) calls into a single batched call,
     # which is the biggest latency win for batch mode.
+    # Stories are excluded — they must be fetched individually via get_stories().
     prefetched_msgs: dict = {}
     session_str_batch = user.get("phone_session_string") if user else None
-    if session_str_batch:
+    if session_str_batch and link_type not in ("public_story", "private_story"):
         if link_type in ("private", "private_topic"):
             _batch_chat_id = int("-100" + channel_part)
         else:
@@ -649,7 +672,11 @@ async def batch_handler(client, message):
                 )
                 return
 
-            if link_type == "private_topic":
+            if link_type == "private_story":
+                link = f"https://t.me/c/{channel_part}/s/{msg_id}"
+            elif link_type == "public_story":
+                link = f"https://t.me/{channel_part}/s/{msg_id}"
+            elif link_type == "private_topic":
                 link = f"https://t.me/c/{channel_part}/{topic_part}/{msg_id}"
             elif link_type == "public_topic":
                 link = f"https://t.me/{channel_part}/{topic_part}/{msg_id}"
@@ -1187,10 +1214,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 except Exception as invite_err:
                                     logging.warning(f"Failed to promote bot in new channel {channel_id}: {invite_err}")
 
-                                await update_user_channel(user_id, channel_id)
                                 logging.info(f"Created private channel {channel_id} and added bot for user {user_id}")
-                            except pyrogram.errors.UserRestricted:
-                                logging.warning(f"User {user_id} is spam-reported — persisting Saved Messages fallback.")
+                            except (pyrogram.errors.UserRestricted, pyrogram.errors.PeerFlood):
+                                logging.warning(f"User {user_id} is spam-reported/restricted — persisting Saved Messages fallback.")
                                 await update_user_channel(user_id, "saved_messages")
                                 upload_client = user_client
                                 destination_id = "me"

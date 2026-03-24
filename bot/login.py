@@ -255,7 +255,11 @@ async def cancel_login(client, message):
 async def logout(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-    
+
+    # Clear the in-memory destination cache so a fresh login re-resolves cleanly
+    from bot.handlers import _dest_channel_cache
+    _dest_channel_cache.pop(user_id, None)
+
     # Clear any active login session
     if user_id in login_states:
         state = login_states.pop(user_id, None)

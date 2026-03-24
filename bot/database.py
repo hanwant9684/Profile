@@ -221,10 +221,12 @@ async def save_session_string(user_id, session_string):
 async def logout_user(user_id):
     try:
         async with pool.acquire() as conn:
-            await conn.execute('UPDATE users SET phone_session_string = NULL, updated_at = $1 WHERE telegram_id = $2',
-                               datetime.now(), int(user_id))
+            await conn.execute(
+                'UPDATE users SET phone_session_string = NULL, download_channel_id = NULL, download_channel_hash = NULL, updated_at = $1 WHERE telegram_id = $2',
+                datetime.now(), int(user_id)
+            )
         await _redis_del(f"user:{user_id}")
-        logger.info(f"User {user_id} logged out")
+        logger.info(f"User {user_id} logged out and channel data cleared")
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
 
