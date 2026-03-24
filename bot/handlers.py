@@ -3,6 +3,7 @@ import gc
 import os
 import time
 import io
+import sqlite3
 import aiofiles
 import re
 import logging
@@ -13,7 +14,11 @@ from pyrogram.client import Client as ClientObject
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
 from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
-from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
+from pyrogram.errors.exceptions.bad_request_400 import (
+    FileReferenceExpired,
+    FileReferenceInvalid,
+    AuthBytesInvalid,
+)
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore,
     OWNER_ID, cancel_flags, login_states
@@ -198,6 +203,13 @@ async def get_user_client(user_id, session_str):
             cached["last_used"] = now
             return client
 
+        # Never evict a session that has active parallel workers running —
+        # stopping the client closes its SQLite storage, causing
+        # sqlite3.ProgrammingError in any in-flight get_file() calls.
+        if user_id in active_sessions or user_id in _batch_sessions:
+            cached["last_used"] = now
+            return client
+
         # Idle too long or already disconnected — tear down and rebuild.
         try:
             await client.stop()
@@ -226,7 +238,6 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=120,
         no_updates=True,
-        takeout=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
         max_concurrent_transmissions=8
@@ -1323,6 +1334,29 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
                                 path = None
                                 break
+                            except (sqlite3.ProgrammingError, AuthBytesInvalid) as e:
+                                # Session storage was closed or cross-DC auth is stale —
+                                # evict the dead client and reconnect once before giving up.
+                                logging.warning(f"Session error during download for user {user_id} ({type(e).__name__}), reconnecting")
+                                stale = user_clients.pop(user_id, None)
+                                if stale:
+                                    try:
+                                        await stale["client"].stop()
+                                    except Exception:
+                                        pass
+                                if _dl_attempt < 1:
+                                    session_str_dl = user.get("phone_session_string") if user else None
+                                    if session_str_dl:
+                                        try:
+                                            user_client = await get_user_client(user_id, session_str_dl)
+                                            await asyncio.sleep(1)
+                                        except Exception as reconnect_dl_err:
+                                            logging.error(f"Reconnect after session error failed: {reconnect_dl_err}")
+                                            path = None
+                                            break
+                                else:
+                                    path = None
+                                    break
                             except Exception as e:
                                 if str(e) == "StopProcess":
                                     raise e
@@ -1391,6 +1425,25 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if isinstance(e, AttributeError) or "'NoneType' object has no attribute 'write'" in error_str:
                             # Upload reference lost (usually after a cancelled/interrupted save_file)
                             logging.error(f"Upload state corrupted (skipping item): {e}")
+                            continue
+
+                        # Session torn down mid-upload (NoneType iterable / TCPTransport closed).
+                        # Evict the dead client so the next request gets a fresh one.
+                        _is_upload_session_err = (
+                            isinstance(e, (sqlite3.ProgrammingError, AuthBytesInvalid))
+                            or (isinstance(e, OSError) and (
+                                ("NoneType" in error_str and "iterable" in error_str)
+                                or ("TCPTransport" in error_str and "closed=True" in error_str)
+                            ))
+                        )
+                        if _is_upload_session_err:
+                            logging.warning(f"Upload session error for user {user_id} ({type(e).__name__}): {e} — evicting client")
+                            stale = user_clients.pop(user_id, None)
+                            if stale:
+                                try:
+                                    await stale["client"].stop()
+                                except Exception:
+                                    pass
                             continue
 
                         if "Unknown media" in error_str or "unknown media" in error_str.lower():
