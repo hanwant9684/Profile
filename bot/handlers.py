@@ -11,7 +11,7 @@ from collections import deque
 import pyrogram
 from pyrogram import filters, Client
 from pyrogram.client import Client as ClientObject
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions, WebPage
 from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
 from pyrogram.errors.exceptions.bad_request_400 import (
@@ -25,6 +25,24 @@ from bot.config import (
 )
 
 MAX_FLOODWAIT_TOLERATE = 60
+
+# Rate-limit get_messages calls made through the shared bot client (public links).
+# All users share the same bot account → one burst can trigger a server-side
+# FloodWait that blocks ALL users simultaneously. The lock serialises these
+# calls and the sleep keeps the rate well under Telegram's threshold.
+_bot_client_lock = asyncio.Lock()
+_BOT_FETCH_DELAY = 1.2  # seconds to sleep after each bot-client get_messages call
+
+async def _get_messages_rate_limited(client_to_use, bot_client, chat_id, message_id):
+    """Wrap get_messages so bot-client calls are serialised and rate-limited.
+    User-client calls pass through with no delay — each user has their own
+    Telegram account with its own independent rate-limit quota."""
+    if client_to_use is bot_client:
+        async with _bot_client_lock:
+            result = await client_to_use.get_messages(chat_id, message_id, replies=0)
+            await asyncio.sleep(_BOT_FETCH_DELAY)
+            return result
+    return await client_to_use.get_messages(chat_id, message_id, replies=0)
 
 async def safe_reply(message, text, **kwargs):
     """Reply with automatic retry on short FloodWaits. Returns None on long waits.
@@ -1000,7 +1018,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         if is_story:
                             msg = await user_client.get_stories(chat_id, message_id)
                         else:
-                            msg = await user_client.get_messages(chat_id, message_id, replies=0)
+                            msg = await _get_messages_rate_limited(user_client, client, chat_id, message_id)
                         break
                     except (FloodWait, FloodPremiumWait) as e:
                         wait_secs = e.value
@@ -1307,6 +1325,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await safe_reply(message, "⚠️ Poll messages cannot be downloaded — skipping.")
                         continue
 
+                    if isinstance(getattr(current_msg, "media", None), WebPage):
+                        await update_status(status_msg, "❌ This link points to a web preview — there is no downloadable file attached.")
+                        continue
+
                     if not getattr(current_msg, "media", None) and type(current_msg).__name__ != "Story":
                         try:
                             await client.send_message(user_id, safe_caption)
@@ -1399,10 +1421,19 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     path = None
                                     break
                             except (FileReferenceExpired, FileReferenceInvalid) as e:
-                                logging.error(f"File reference expired for message: {e}")
-                                await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
-                                path = None
-                                break
+                                if _dl_attempt < 1:
+                                    logging.warning(f"File reference expired — re-fetching message {current_msg.id} for a fresh reference")
+                                    try:
+                                        refreshed = await user_client.get_messages(chat_id, current_msg.id, replies=0)
+                                        if refreshed and getattr(refreshed, "id", None):
+                                            current_msg = refreshed
+                                    except Exception as _ref_err:
+                                        logging.warning(f"Message re-fetch failed: {_ref_err}")
+                                else:
+                                    logging.error(f"File reference still expired after re-fetch: {e}")
+                                    await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
+                                    path = None
+                                    break
                             except (sqlite3.ProgrammingError, AuthBytesInvalid) as e:
                                 # Session storage was closed or cross-DC auth is stale —
                                 # evict the dead client and reconnect once before giving up.
