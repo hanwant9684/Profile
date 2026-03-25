@@ -277,6 +277,18 @@ async def download_media_parallel(
         raise
 
     except Exception as e:
+        # User cancellation — re-raise immediately so handlers.py catches StopProcess.
+        # Falling through to serial would call the progress callback again, causing
+        # pyrotgfork to log a noisy ERROR before handlers.py ever sees the exception.
+        if str(e) == "StopProcess":
+            for p in [out_path] + temp_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            raise
+
         # Session-fatal errors: re-raise so handlers.py can reconnect the client
         # rather than attempting a serial download with the same dead session.
         if _is_session_fatal(e):

@@ -21,7 +21,7 @@ from pyrogram.errors.exceptions.bad_request_400 import (
 )
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore,
-    OWNER_ID, cancel_flags, login_states
+    OWNER_ID, cancel_flags, batch_cancel_flags, login_states
 )
 
 MAX_FLOODWAIT_TOLERATE = 60
@@ -165,6 +165,7 @@ async def send_to_dump(client, user_id, link, msg):
 user_clients = {}
 active_sessions = set() # Track sessions currently in use (per-item level)
 _batch_sessions = set() # Track users mid-batch — held for the entire batch duration
+_batch_session_error_flags = set() # Set when a fatal session error occurs mid-batch; signals the batch loop to abort
 _cleanup_task_started = False
 _cleanup_cycle = 0  # Counts cleanup iterations; used to schedule infrequent sub-tasks
 
@@ -623,7 +624,7 @@ async def batch_handler(client, message):
         f"🚀 **Batch started** — {count} item(s)\n\n"
         f"⏳ Progress: 0/{count}\n"
         f"✅ Done: 0 | ❌ Skipped: 0\n\n"
-        f"ℹ️ If Telegram rate-limits are hit, the bot will pause and auto-resume. Use /cancel to stop."
+        f"ℹ️ Rate-limits auto-pause and resume. /cancel = stop current item only · /cancelbatch = stop entire batch"
     )
     if batch_status is None:
         logging.error(f"Could not send batch status message to user {user_id} — FloodWait too long")
@@ -664,8 +665,8 @@ async def batch_handler(client, message):
     _batch_sessions.add(user_id)
     try:
         for idx, msg_id in enumerate(range(start_id, end_id + 1), start=1):
-            if user_id in cancel_flags:
-                cancel_flags.discard(user_id)
+            if user_id in batch_cancel_flags:
+                batch_cancel_flags.discard(user_id)
                 await batch_status.edit_text(
                     f"🛑 **Batch cancelled**\n\n"
                     f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Total attempted: {idx - 1}"
@@ -735,6 +736,21 @@ async def batch_handler(client, message):
             if not item_done:
                 skipped += 1
 
+            # Abort the whole batch immediately on fatal session error — every remaining
+            # item would hit the same "please login" failure, so there's no point continuing.
+            if user_id in _batch_session_error_flags:
+                _batch_session_error_flags.discard(user_id)
+                try:
+                    await batch_status.edit_text(
+                        f"🔐 **Session Error — Batch Stopped**\n\n"
+                        f"Your Telegram session was removed or expired mid-batch.\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Remaining: {count - idx}\n\n"
+                        f"Please log in again with /login and retry the batch."
+                    )
+                except Exception:
+                    pass
+                return
+
             # Smart inter-item delay: 4–7s after each item to stay well under Telegram limits
             if idx < count:
                 await asyncio.sleep(random.uniform(4, 7))
@@ -752,6 +768,30 @@ async def batch_handler(client, message):
             pass
     finally:
         _batch_sessions.discard(user_id)
+        batch_cancel_flags.discard(user_id)
+
+@app.on_message(filters.command("cancel") & filters.private)
+async def cancel_handler(client, message):
+    """Cancel the current single download item only.
+    Works whether the download is standalone or part of a batch.
+    The batch itself continues with the next item after cancellation.
+    Use /cancelbatch to stop the entire batch."""
+    user_id = message.from_user.id
+    if user_id in active_downloads or user_id in active_sessions:
+        cancel_flags.add(user_id)
+        await message.reply("🛑 Cancelling current download... Please wait.")
+    else:
+        await message.reply("ℹ️ No active download to cancel.")
+
+@app.on_message(filters.command("cancelbatch") & filters.private)
+async def cancelbatch_handler(client, message):
+    """Cancel the entire batch — stops the loop after the current item finishes."""
+    user_id = message.from_user.id
+    if user_id in _batch_sessions:
+        batch_cancel_flags.add(user_id)
+        await message.reply("🛑 Batch cancellation requested. The current item will finish, then the batch will stop.")
+    else:
+        await message.reply("ℹ️ No active batch to cancel.")
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
 async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None):
@@ -1005,6 +1045,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         await client_data["client"].stop()
                                     except:
                                         pass
+                            # Signal the batch loop to abort so remaining items don't all hit the same error
+                            if user_id in _batch_sessions:
+                                _batch_session_error_flags.add(user_id)
                             await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
                             return None
 
@@ -1535,6 +1578,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await client_data["client"].stop()
                     except:
                         pass
+            # Signal the batch loop to abort so remaining items don't all hit the same error
+            if user_id in _batch_sessions:
+                _batch_session_error_flags.add(user_id)
             if 'status_msg' in locals():
                 try:
                     await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
