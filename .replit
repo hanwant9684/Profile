@@ -36,4 +36,3 @@ externalPort = 80
 [userenv]
 
 [userenv.shared]
-REDIS_URL = "redis://localhost:6379"
