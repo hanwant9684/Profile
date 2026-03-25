@@ -1388,14 +1388,14 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
-                                    timeout=1800  # 30 min — kills truly stuck transfers
+                                    timeout=2700  # 45 min — kills truly stuck transfers
                                 )
                                 break
                             except (FloodWait, FloodPremiumWait) as e:
                                 logging.warning(f"FloodWait on download: {e.value}s")
                                 await asyncio.sleep(e.value)
                             except asyncio.TimeoutError:
-                                logging.error(f"Download stuck/timed out (30 min) for user {user_id}, msg {current_msg.id} — aborting")
+                                logging.error(f"Download stuck/timed out (45 min) for user {user_id}, msg {current_msg.id} — aborting")
                                 await update_status(status_msg, "❌ Download timed out — transfer appeared stuck. Please try again.")
                                 path = None
                                 break
@@ -1488,7 +1488,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 progress_callback=progress_bar,
                                 progress_args=(status_msg, "📤 Uploading", status_msg_override is None)
                             ),
-                            timeout=1800  # 30 min — kills truly stuck uploads
+                            timeout=2700  # 45 min — kills truly stuck uploads
                         )
 
 
@@ -1552,7 +1552,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                             continue
 
                         if isinstance(e, asyncio.TimeoutError):
-                            logging.error(f"Upload stuck/timed out (30 min) for user {user_id} — aborting")
+                            logging.error(f"Upload stuck/timed out (45 min) for user {user_id} — aborting")
                             await update_status(status_msg, "❌ Upload timed out — transfer appeared stuck. Please try again.")
                         elif isinstance(e, (FloodWait, FloodPremiumWait)):
                             logging.error(f"Download/Upload error: {e}")
