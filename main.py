@@ -3,6 +3,7 @@ import uvloop
 import logging
 import os
 import sys
+import sqlite3
 from dotenv import load_dotenv
 
 # Set event loop policy FIRST
@@ -13,6 +14,17 @@ load_dotenv()
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 async def main():
+    # Suppress sqlite3.ProgrammingError noise from Pyrogram's Session.restart()
+    # background task when a user client is evicted while a reconnect is in-flight.
+    # These errors are harmless — the client is being torn down on purpose.
+    def _asyncio_exception_handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, sqlite3.ProgrammingError) and "closed database" in str(exc):
+            return  # harmless noise — swallow silently
+        loop.default_exception_handler(context)
+
+    asyncio.get_event_loop().set_exception_handler(_asyncio_exception_handler)
+
     # Start Redis server on Replit if not already running
     import subprocess
     try:
