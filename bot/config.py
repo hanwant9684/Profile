@@ -62,7 +62,8 @@ async def get_dump_channel_id():
 MAX_CONCURRENT_DOWNLOADS = 10
 
 active_downloads = set()
-cancel_flags = set()
+cancel_flags = set()       # Cancels the current single download item (used by /cancel)
+batch_cancel_flags = set() # Cancels the entire batch loop (used by /cancelbatch)
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states = {}
 
