@@ -91,7 +91,7 @@ async def login_start(client, message):
         "⏳ This session will expire in 5 minutes if no activity is detected."
     )
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "stats", "killall"]) & ~filters.regex(r"https://t\.me/"))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "stats", "killall"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
@@ -255,22 +255,7 @@ async def cancel_login(client, message):
 async def logout(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-
-    # Clear the in-memory destination cache so a fresh login re-resolves cleanly
-    from bot.handlers import _dest_channel_cache, user_clients
-    _dest_channel_cache.pop(user_id, None)
-
-    # Evict the cached Pyrogram client — the session is about to be revoked,
-    # so any cached client object will be dead. Without this, the next download
-    # after re-login would pick up the dead client (idle < 90s, is_connected=True)
-    # and immediately fail with AUTH_KEY_UNREGISTERED before the user can use the bot.
-    stale = user_clients.pop(user_id, None)
-    if stale:
-        try:
-            await stale["client"].stop()
-        except Exception:
-            pass
-
+    
     # Clear any active login session
     if user_id in login_states:
         state = login_states.pop(user_id, None)

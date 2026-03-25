@@ -5,17 +5,12 @@ import shutil
 import asyncio
 import logging
 import mimetypes
-import sqlite3
 from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
-from pyrogram.errors.exceptions.bad_request_400 import (
-    PhotoExtInvalid,
-    FileReferenceExpired,
-    FileReferenceInvalid,
-    AuthBytesInvalid,
-)
+from pyrogram.errors.exceptions.bad_request_400 import PhotoExtInvalid
+from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
 
 # Must match pyrotgfork's internal chunk size (client.py line 1153)
 _PYROGRAM_CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -28,7 +23,7 @@ async def download_media_parallel(
     client: Client,
     message: Message,
     file_name=None,
-    num_workers: int = 4,
+    num_workers: int = 16,
     progress_callback=None,
     progress_args=()
 ):
@@ -119,19 +114,10 @@ async def download_media_parallel(
     failed = [False]
 
     async def worker(idx, chunk_offset, chunk_limit):
-        """Fetch one byte-range with per-error retry policy.
-
-        Error classification (determined from VPS log analysis):
-          FATAL  — session/reference is dead; retrying would only flood logs.
-                   Set failed[0], raise immediately.
-          RETRY  — transient; back-off and retry up to 3 attempts.
-        """
+        """Fetch one byte-range with FloodWait retry support."""
         for attempt in range(3):
-            # Exit immediately if another worker already failed fatally.
-            if failed[0]:
-                raise RuntimeError("Aborting — another worker already failed")
-
             try:
+                # Clear any partial data from a previous attempt
                 open(temp_paths[idx], "wb").close()
                 with open(temp_paths[idx], "wb") as fh:
                     async for chunk in client.get_file(
@@ -151,7 +137,6 @@ async def download_media_parallel(
                 return  # success
 
             except (FloodWait, FloodPremiumWait) as e:
-                # RETRY: Telegram rate limit — transient, honour the wait.
                 wait = e.value
                 logging.warning(f"Parallel worker {idx} FloodWait {wait}s (attempt {attempt+1}/3)")
                 if attempt < 2:
@@ -162,80 +147,17 @@ async def download_media_parallel(
                     raise
 
             except (FileReferenceExpired, FileReferenceInvalid):
-                # FATAL: file reference is stale across all workers; no point retrying.
-                # The caller will fall back to serial download which re-fetches the message.
                 failed[0] = True
-                raise
-
-            except AuthBytesInvalid:
-                # FATAL: exported auth for the file DC is invalid — session is dead or
-                # cross-DC auth export failed.  Clear the cached media session so the
-                # next call creates a fresh one with new exported auth.
-                failed[0] = True
-                try:
-                    client.media_sessions.clear()
-                except Exception:
-                    pass
-                raise
-
-            except sqlite3.ProgrammingError:
-                # FATAL: the client's in-memory SQLite storage was closed while this
-                # worker was still calling get_file() — the parent session was evicted.
-                failed[0] = True
-                logging.warning(f"Parallel worker {idx}: client SQLite storage closed (session evicted mid-download)")
                 raise
 
             except Exception as e:
-                error_str = str(e)
-
-                # FATAL: StopProcess is intentional user cancellation — don't retry.
-                if error_str == "StopProcess":
-                    failed[0] = True
-                    raise
-
-                # FATAL: "Value after * must be an iterable, not NoneType" — the
-                # Pyrogram Session's internal connection state is None because the
-                # session was torn down between the start of get_file() and this
-                # await.  Retrying against the dead session only floods the logs.
-                if "NoneType" in error_str and (
-                    "iterable" in error_str or "* must be" in error_str
-                ):
-                    failed[0] = True
-                    logging.warning(f"Parallel worker {idx}: session connection torn down mid-transfer")
-                    raise
-
-                # FATAL: TCP transport explicitly closed — same root cause as above.
-                if "TCPTransport" in error_str and "closed=True" in error_str:
-                    failed[0] = True
-                    logging.warning(f"Parallel worker {idx}: TCP transport closed mid-transfer")
-                    raise
-
-                # RETRY: generic transient error (network hiccup, DC timeout, etc.)
                 if attempt < 2:
-                    logging.warning(f"Parallel worker {idx} error (attempt {attempt+1}/3): {e}, retrying")
+                    logging.warning(f"Parallel worker {idx} error (attempt {attempt+1}): {e}, retrying")
                     downloaded[idx] = 0
                     await asyncio.sleep(1 * (attempt + 1))
                 else:
                     failed[0] = True
                     raise
-
-    def _is_session_fatal(exc: BaseException) -> bool:
-        """Return True for errors caused by a dead/evicted session.
-
-        These errors will recur on serial fallback with the same client, so we
-        re-raise them directly instead of attempting a pointless serial retry.
-        """
-        if isinstance(exc, sqlite3.ProgrammingError):
-            return True
-        if isinstance(exc, AuthBytesInvalid):
-            return True
-        if isinstance(exc, OSError):
-            s = str(exc)
-            if "NoneType" in s and ("iterable" in s or "* must be" in s):
-                return True
-            if "TCPTransport" in s and "closed=True" in s:
-                return True
-        return False
 
     try:
         await asyncio.gather(*[worker(i, off, cnt) for i, (off, cnt) in enumerate(ranges)])
@@ -265,43 +187,7 @@ async def download_media_parallel(
         )
         return out_path
 
-    except (FileReferenceExpired, FileReferenceInvalid):
-        # Stale file reference — re-raise so handlers.py can tell the user to
-        # resend the link (re-fetching the message gives a fresh reference).
-        for p in [out_path] + temp_paths:
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
-        raise
-
     except Exception as e:
-        # User cancellation — re-raise immediately so handlers.py catches StopProcess.
-        # Falling through to serial would call the progress callback again, causing
-        # pyrotgfork to log a noisy ERROR before handlers.py ever sees the exception.
-        if str(e) == "StopProcess":
-            for p in [out_path] + temp_paths:
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                except Exception:
-                    pass
-            raise
-
-        # Session-fatal errors: re-raise so handlers.py can reconnect the client
-        # rather than attempting a serial download with the same dead session.
-        if _is_session_fatal(e):
-            logging.warning(f"Parallel download: session fatal error ({type(e).__name__}: {e}), re-raising to caller")
-            for p in [out_path] + temp_paths:
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                except Exception:
-                    pass
-            raise
-
-        # Transient / recoverable error — fall back to serial download.
         logging.warning(f"Parallel download failed ({type(e).__name__}: {e}), falling back to serial")
         for p in [out_path] + temp_paths:
             try:
@@ -390,7 +276,7 @@ async def _send_with_floodwait(coro_fn, max_retries=3):
             wait = e.value
             logging.warning(f"Upload FloodWait {wait}s (attempt {attempt+1}/{max_retries})")
             if attempt < max_retries - 1:
-                await asyncio.sleep(wait)
+                await asyncio.sleep(min(wait, 60))
             else:
                 raise
 

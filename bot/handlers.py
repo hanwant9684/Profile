@@ -3,7 +3,6 @@ import gc
 import os
 import time
 import io
-import sqlite3
 import aiofiles
 import re
 import logging
@@ -14,14 +13,10 @@ from pyrogram.client import Client as ClientObject
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, LinkPreviewOptions
 from pyrogram.errors import AuthKeyUnregistered, FloodWait, FloodPremiumWait, SessionRevoked
 from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
-from pyrogram.errors.exceptions.bad_request_400 import (
-    FileReferenceExpired,
-    FileReferenceInvalid,
-    AuthBytesInvalid,
-)
+from pyrogram.errors.exceptions.bad_request_400 import FileReferenceExpired, FileReferenceInvalid
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore,
-    OWNER_ID, cancel_flags, batch_cancel_flags, login_states
+    OWNER_ID, cancel_flags, login_states
 )
 
 MAX_FLOODWAIT_TOLERATE = 60
@@ -165,7 +160,6 @@ async def send_to_dump(client, user_id, link, msg):
 user_clients = {}
 active_sessions = set() # Track sessions currently in use (per-item level)
 _batch_sessions = set() # Track users mid-batch — held for the entire batch duration
-_batch_session_error_flags = set() # Set when a fatal session error occurs mid-batch; signals the batch loop to abort
 _cleanup_task_started = False
 _cleanup_cycle = 0  # Counts cleanup iterations; used to schedule infrequent sub-tasks
 
@@ -204,13 +198,6 @@ async def get_user_client(user_id, session_str):
             cached["last_used"] = now
             return client
 
-        # Never evict a session that has active parallel workers running —
-        # stopping the client closes its SQLite storage, causing
-        # sqlite3.ProgrammingError in any in-flight get_file() calls.
-        if user_id in active_sessions or user_id in _batch_sessions:
-            cached["last_used"] = now
-            return client
-
         # Idle too long or already disconnected — tear down and rebuild.
         try:
             await client.stop()
@@ -239,9 +226,10 @@ async def get_user_client(user_id, session_str):
         in_memory=True,
         sleep_threshold=120,
         no_updates=True,
+        takeout=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
-        max_concurrent_transmissions=4
+        max_concurrent_transmissions=8
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -549,14 +537,6 @@ async def batch_handler(client, message):
     start_link = parts[1]
     end_link = parts[2]
 
-    # Story links: t.me/c/CHANNEL/s/ID  or  t.me/USERNAME/s/ID
-    # Must be checked first — the /s/ segment is not digits so it won't collide with
-    # any plain-message pattern, but checking early keeps the logic explicit.
-    start_private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", start_link)
-    end_private_story_match   = re.search(r"t\.me/c/(\d+)/s/(\d+)", end_link)
-    start_public_story_match  = re.search(r"t\.me/(?!c/)([^/]+)/s/(\d+)", start_link)
-    end_public_story_match    = re.search(r"t\.me/(?!c/)([^/]+)/s/(\d+)", end_link)
-
     # Topic links: t.me/c/CHANNEL/TOPIC/MSG  — must be checked before the plain 2-segment pattern
     start_topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", start_link)
     end_topic_match   = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", end_link)
@@ -570,21 +550,7 @@ async def batch_handler(client, message):
     end_match   = re.search(r"t\.me/c/(\d+)/(\d+)", end_link)   or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
 
     # Determine link type and extract the correct message ID from each link
-    if start_private_story_match and end_private_story_match:
-        # Private story: t.me/c/CHANNEL/s/ID
-        link_type    = "private_story"
-        channel_part = start_private_story_match.group(1)
-        topic_part   = None
-        start_id = int(start_private_story_match.group(2))
-        end_id   = int(end_private_story_match.group(2))
-    elif start_public_story_match and end_public_story_match:
-        # Public story: t.me/USERNAME/s/ID
-        link_type    = "public_story"
-        channel_part = start_public_story_match.group(1)
-        topic_part   = None
-        start_id = int(start_public_story_match.group(2))
-        end_id   = int(end_public_story_match.group(2))
-    elif start_topic_match and end_topic_match:
+    if start_topic_match and end_topic_match:
         # Private topic: t.me/c/CHANNEL/TOPIC/MSG
         link_type = "private_topic"
         channel_part = start_topic_match.group(1)
@@ -624,7 +590,7 @@ async def batch_handler(client, message):
         f"🚀 **Batch started** — {count} item(s)\n\n"
         f"⏳ Progress: 0/{count}\n"
         f"✅ Done: 0 | ❌ Skipped: 0\n\n"
-        f"ℹ️ Rate-limits auto-pause and resume. /cancel = stop current item only · /cancelbatch = stop entire batch"
+        f"ℹ️ If Telegram rate-limits are hit, the bot will pause and auto-resume. Use /cancel to stop."
     )
     if batch_status is None:
         logging.error(f"Could not send batch status message to user {user_id} — FloodWait too long")
@@ -637,10 +603,9 @@ async def batch_handler(client, message):
     # ── Batch pre-fetch: get all messages in one API call instead of N calls ──
     # This turns N serial get_messages(replies=0) calls into a single batched call,
     # which is the biggest latency win for batch mode.
-    # Stories are excluded — they must be fetched individually via get_stories().
     prefetched_msgs: dict = {}
     session_str_batch = user.get("phone_session_string") if user else None
-    if session_str_batch and link_type not in ("public_story", "private_story"):
+    if session_str_batch:
         if link_type in ("private", "private_topic"):
             _batch_chat_id = int("-100" + channel_part)
         else:
@@ -665,19 +630,15 @@ async def batch_handler(client, message):
     _batch_sessions.add(user_id)
     try:
         for idx, msg_id in enumerate(range(start_id, end_id + 1), start=1):
-            if user_id in batch_cancel_flags:
-                batch_cancel_flags.discard(user_id)
+            if user_id in cancel_flags:
+                cancel_flags.discard(user_id)
                 await batch_status.edit_text(
                     f"🛑 **Batch cancelled**\n\n"
                     f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Total attempted: {idx - 1}"
                 )
                 return
 
-            if link_type == "private_story":
-                link = f"https://t.me/c/{channel_part}/s/{msg_id}"
-            elif link_type == "public_story":
-                link = f"https://t.me/{channel_part}/s/{msg_id}"
-            elif link_type == "private_topic":
+            if link_type == "private_topic":
                 link = f"https://t.me/c/{channel_part}/{topic_part}/{msg_id}"
             elif link_type == "public_topic":
                 link = f"https://t.me/{channel_part}/{topic_part}/{msg_id}"
@@ -736,21 +697,6 @@ async def batch_handler(client, message):
             if not item_done:
                 skipped += 1
 
-            # Abort the whole batch immediately on fatal session error — every remaining
-            # item would hit the same "please login" failure, so there's no point continuing.
-            if user_id in _batch_session_error_flags:
-                _batch_session_error_flags.discard(user_id)
-                try:
-                    await batch_status.edit_text(
-                        f"🔐 **Session Error — Batch Stopped**\n\n"
-                        f"Your Telegram session was removed or expired mid-batch.\n"
-                        f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Remaining: {count - idx}\n\n"
-                        f"Please log in again with /login and retry the batch."
-                    )
-                except Exception:
-                    pass
-                return
-
             # Smart inter-item delay: 4–7s after each item to stay well under Telegram limits
             if idx < count:
                 await asyncio.sleep(random.uniform(4, 7))
@@ -768,30 +714,6 @@ async def batch_handler(client, message):
             pass
     finally:
         _batch_sessions.discard(user_id)
-        batch_cancel_flags.discard(user_id)
-
-@app.on_message(filters.command("cancel") & filters.private)
-async def cancel_handler(client, message):
-    """Cancel the current single download item only.
-    Works whether the download is standalone or part of a batch.
-    The batch itself continues with the next item after cancellation.
-    Use /cancelbatch to stop the entire batch."""
-    user_id = message.from_user.id
-    if user_id in active_downloads or user_id in active_sessions:
-        cancel_flags.add(user_id)
-        await message.reply("🛑 Cancelling current download... Please wait.")
-    else:
-        await message.reply("ℹ️ No active download to cancel.")
-
-@app.on_message(filters.command("cancelbatch") & filters.private)
-async def cancelbatch_handler(client, message):
-    """Cancel the entire batch — stops the loop after the current item finishes."""
-    user_id = message.from_user.id
-    if user_id in _batch_sessions:
-        batch_cancel_flags.add(user_id)
-        await message.reply("🛑 Batch cancellation requested. The current item will finish, then the batch will stop.")
-    else:
-        await message.reply("ℹ️ No active batch to cancel.")
 
 @app.on_message(filters.regex(r"https://t\.me/") & filters.private)
 async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None):
@@ -1045,9 +967,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         await client_data["client"].stop()
                                     except:
                                         pass
-                            # Signal the batch loop to abort so remaining items don't all hit the same error
-                            if user_id in _batch_sessions:
-                                _batch_session_error_flags.add(user_id)
                             await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
                             return None
 
@@ -1257,9 +1176,10 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 except Exception as invite_err:
                                     logging.warning(f"Failed to promote bot in new channel {channel_id}: {invite_err}")
 
+                                await update_user_channel(user_id, channel_id)
                                 logging.info(f"Created private channel {channel_id} and added bot for user {user_id}")
-                            except (pyrogram.errors.UserRestricted, pyrogram.errors.PeerFlood):
-                                logging.warning(f"User {user_id} is spam-reported/restricted — persisting Saved Messages fallback.")
+                            except pyrogram.errors.UserRestricted:
+                                logging.warning(f"User {user_id} is spam-reported — persisting Saved Messages fallback.")
                                 await update_user_channel(user_id, "saved_messages")
                                 upload_client = user_client
                                 destination_id = "me"
@@ -1362,7 +1282,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=4,
+                                        num_workers=8,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
@@ -1403,29 +1323,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 await update_status(status_msg, "❌ This file's link has expired. Please send the original Telegram link again.")
                                 path = None
                                 break
-                            except (sqlite3.ProgrammingError, AuthBytesInvalid) as e:
-                                # Session storage was closed or cross-DC auth is stale —
-                                # evict the dead client and reconnect once before giving up.
-                                logging.warning(f"Session error during download for user {user_id} ({type(e).__name__}), reconnecting")
-                                stale = user_clients.pop(user_id, None)
-                                if stale:
-                                    try:
-                                        await stale["client"].stop()
-                                    except Exception:
-                                        pass
-                                if _dl_attempt < 1:
-                                    session_str_dl = user.get("phone_session_string") if user else None
-                                    if session_str_dl:
-                                        try:
-                                            user_client = await get_user_client(user_id, session_str_dl)
-                                            await asyncio.sleep(1)
-                                        except Exception as reconnect_dl_err:
-                                            logging.error(f"Reconnect after session error failed: {reconnect_dl_err}")
-                                            path = None
-                                            break
-                                else:
-                                    path = None
-                                    break
                             except Exception as e:
                                 if str(e) == "StopProcess":
                                     raise e
@@ -1496,25 +1393,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                             logging.error(f"Upload state corrupted (skipping item): {e}")
                             continue
 
-                        # Session torn down mid-upload (NoneType iterable / TCPTransport closed).
-                        # Evict the dead client so the next request gets a fresh one.
-                        _is_upload_session_err = (
-                            isinstance(e, (sqlite3.ProgrammingError, AuthBytesInvalid))
-                            or (isinstance(e, OSError) and (
-                                ("NoneType" in error_str and "iterable" in error_str)
-                                or ("TCPTransport" in error_str and "closed=True" in error_str)
-                            ))
-                        )
-                        if _is_upload_session_err:
-                            logging.warning(f"Upload session error for user {user_id} ({type(e).__name__}): {e} — evicting client")
-                            stale = user_clients.pop(user_id, None)
-                            if stale:
-                                try:
-                                    await stale["client"].stop()
-                                except Exception:
-                                    pass
-                            continue
-
                         if "Unknown media" in error_str or "unknown media" in error_str.lower():
                             logging.warning(f"Unsupported media type for user {user_id}: {e}")
                             await update_status(status_msg, "❌ This media type is not supported for download.")
@@ -1578,9 +1456,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await client_data["client"].stop()
                     except:
                         pass
-            # Signal the batch loop to abort so remaining items don't all hit the same error
-            if user_id in _batch_sessions:
-                _batch_session_error_flags.add(user_id)
             if 'status_msg' in locals():
                 try:
                     await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
