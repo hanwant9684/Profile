@@ -341,7 +341,7 @@ async def cleanup_user_clients():
                 pass
 
 from bot.database import get_user, check_and_update_quota, increment_quota, get_setting, get_remaining_quota, update_user_channel
-from bot.transfer import download_media_fast, download_media_parallel, upload_media_fast, truncate_caption
+from bot.transfer import download_media_fast, download_media_parallel, upload_media_fast, truncate_caption, _FileRefSwallowedByPyrogram
 
 async def update_status(msg, text):
     """
@@ -1420,7 +1420,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 else:
                                     path = None
                                     break
-                            except (FileReferenceExpired, FileReferenceInvalid) as e:
+                            except (FileReferenceExpired, FileReferenceInvalid, _FileRefSwallowedByPyrogram) as e:
                                 if _dl_attempt < 1:
                                     logging.warning(f"File reference expired — re-fetching message {current_msg.id} for a fresh reference")
                                     try:

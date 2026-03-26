@@ -106,7 +106,7 @@ async def handle_login_steps(client, message: Message):
             phone_number = message.text.strip().replace(" ", "")
 
             if not phone_number.startswith("+") or not phone_number[1:].isdigit():
-                await message.reply("❌ **Invalid Format.** Please send in international format (e.g., +1234567890).")
+                await message.reply("❌ **Invalid Format.** Please send in international format (e.g.,for USA +1234567890).")
                 return
                 
             try:
@@ -134,7 +134,7 @@ async def handle_login_steps(client, message: Message):
             state["phone_code_hash"] = sent_code.phone_code_hash
             state["step"] = "CODE"
             
-            await message.reply("OTP Code sent to your Telegram account. Send it here (e.g. `1 2 3 4 5`).")
+            await message.reply("OTP Code sent to your Telegram account. Send it here (e.g. if otp is '12345' send here like `1 2 3 4 5`).")
 
         elif step == "CODE":
             state["timestamp"] = time.time()

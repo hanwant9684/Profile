@@ -25,6 +25,25 @@ _PYROGRAM_CHUNK_SIZE = 1024 * 1024  # 1 MB
 _MIN_PARALLEL_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
+class _FileRefSwallowedByPyrogram(Exception):
+    """Surrogate for FileReferenceExpired raised when pyrotgfork's get_file()
+    silently swallows the error.
+
+    Root cause (pyrotgfork client.py lines 1319-1322):
+        except pyrogram.StopTransmission:
+            raise
+        except Exception as e:
+            log.exception(e)   # logs but does NOT re-raise
+
+    When FileReferenceExpired hits that catch, the async generator exits without
+    yielding a single byte.  Our workers see no exception — they just write empty
+    temp files.  We detect the empty file and raise this sentinel so the refresh
+    path in handlers.py fires correctly instead of retrying with the same stale
+    reference five times.
+    """
+    pass
+
+
 async def download_media_parallel(
     client: Client,
     message: Message,
@@ -149,6 +168,24 @@ async def download_media_parallel(
                                 total_dl = min(sum(downloaded), file_size)
                                 if asyncio.iscoroutinefunction(progress_callback):
                                     await progress_callback(total_dl, file_size, *progress_args)
+                # ── Detect pyrotgfork silently swallowing FileReferenceExpired ──────
+                # pyrotgfork's get_file() wraps all errors in a bare
+                #   `except Exception as e: log.exception(e)`
+                # with NO re-raise (client.py lines 1319-1322).  When
+                # FileReferenceExpired hits that handler the async generator
+                # exits without yielding a single byte, so the temp file is
+                # 0 bytes even though no exception reaches this worker.
+                temp_size = (
+                    os.path.getsize(temp_paths[idx])
+                    if os.path.exists(temp_paths[idx]) else 0
+                )
+                if file_size > 0 and temp_size == 0:
+                    failed[0] = True
+                    raise _FileRefSwallowedByPyrogram(
+                        f"Worker {idx}: get_file() yielded no data for a "
+                        f"{file_size}-byte file — pyrotgfork swallowed "
+                        f"FileReferenceExpired"
+                    )
                 return  # success
 
             except (FloodWait, FloodPremiumWait) as e:
@@ -162,9 +199,9 @@ async def download_media_parallel(
                     failed[0] = True
                     raise
 
-            except (FileReferenceExpired, FileReferenceInvalid):
-                # FATAL: file reference is stale across all workers; no point retrying.
-                # The caller will fall back to serial download which re-fetches the message.
+            except (FileReferenceExpired, FileReferenceInvalid, _FileRefSwallowedByPyrogram):
+                # FATAL: file reference is stale (or pyrotgfork swallowed the
+                # error and the same stale reference would just fail again).
                 failed[0] = True
                 raise
 
@@ -266,9 +303,9 @@ async def download_media_parallel(
         )
         return out_path
 
-    except (FileReferenceExpired, FileReferenceInvalid):
-        # Stale file reference — re-raise so handlers.py can tell the user to
-        # resend the link (re-fetching the message gives a fresh reference).
+    except (FileReferenceExpired, FileReferenceInvalid, _FileRefSwallowedByPyrogram):
+        # Stale file reference (or pyrotgfork silently swallowed it) — re-raise
+        # so handlers.py can re-fetch the message and get a fresh reference.
         for p in [out_path] + temp_paths:
             try:
                 if os.path.exists(p):
@@ -339,20 +376,24 @@ async def download_media_fast(
                 progress_args=progress_args
             )
             if path and os.path.exists(path) and os.path.getsize(path) == 0:
-                logging.warning(f"Download returned empty file on attempt {i+1}: {path} — retrying")
                 try:
                     os.remove(path)
                 except Exception:
                     pass
-                if i < retries - 1:
-                    await asyncio.sleep(2 * (i + 1))
-                    continue
-                raise ValueError(f"File downloaded as empty after {retries} attempts: {path}")
+                # pyrotgfork's get_file() silently swallows FileReferenceExpired
+                # (client.py lines 1319-1322: `except Exception as e: log.exception(e)`
+                # with no re-raise).  The result is an empty file regardless of how many
+                # times we retry with the same stale reference.  Raise immediately so
+                # handlers.py can re-fetch the message and get a fresh file reference.
+                raise _FileRefSwallowedByPyrogram(
+                    f"download_media returned empty file on attempt {i+1}: {path} "
+                    f"(pyrotgfork swallowed FileReferenceExpired)"
+                )
             return path
         except (FloodWait, FloodPremiumWait) as e:
             logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
             await asyncio.sleep(e.value)
-        except (FileReferenceExpired, FileReferenceInvalid) as e:
+        except (FileReferenceExpired, FileReferenceInvalid, _FileRefSwallowedByPyrogram) as e:
             logging.error(f"File reference expired on attempt {i+1}: {e}")
             raise
         except Exception as e:
