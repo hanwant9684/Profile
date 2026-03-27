@@ -259,10 +259,10 @@ async def get_user_client(user_id, session_str):
         no_updates=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
-        max_concurrent_transmissions=4
+        max_concurrent_transmissions=8
     )
     await client.start()
-    user_clients[user_id] = {"client": client, "last_used": now}
+    user_clients[user_id] = {"client": client, "session_str": session_str, "last_used": now}
 
     if not _cleanup_task_started:
         asyncio.create_task(cleanup_user_clients())
@@ -1378,13 +1378,16 @@ async def download_handler(client, message, link_override=None, processed_albums
                             orig_file_name = getattr(current_msg.audio, "file_name", None)
                         has_spoiler = getattr(current_msg, "has_media_spoiler", None)
 
+                        # ── FastTelethon-style parallel download ───────────────────────────
+                        # download_media_parallel creates N independent raw MTProto sessions
+                        # to Telegram's file DC internally — no helper Client needed here.
                         for _dl_attempt in range(2):
                             try:
                                 path = await asyncio.wait_for(
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=4,
+                                        num_workers=8,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
