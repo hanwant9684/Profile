@@ -22,7 +22,7 @@ from pyrogram.errors.exceptions.bad_request_400 import (
 _PYROGRAM_CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 # Only use parallel download for files larger than this — smaller files don't benefit
-_MIN_PARALLEL_SIZE = 2 * 1024 * 1024  # 2 MB
+_MIN_PARALLEL_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 class _FileRefSwallowedByPyrogram(Exception):
@@ -48,49 +48,34 @@ async def download_media_parallel(
     client: Client,
     message: Message,
     file_name=None,
-    num_workers: int = 8,
-    extra_clients: list = None,
+    num_workers: int = 4,
     progress_callback=None,
     progress_args=()
 ):
     """
-    FastTelethon-style parallel downloader using N independent raw MTProto sessions.
+    Parallel chunk downloader — overcomes pyrotgfork's ~4 MB/s serial ceiling.
 
-    How it works (and why it beats the old single-session approach):
-      pyrotgfork's client.get_file() routes every chunk through ONE shared
-      media session (one TCP connection to Telegram's file DC) protected by a
-      get_file_semaphore that limits in-flight requests to max_concurrent_transmissions.
-      No matter how many asyncio workers you spin up, they all queue through that
-      single pipe — and Telegram throttles each TCP connection to ~4 MB/s.
+    Background:
+      pyrotgfork fetches file chunks ONE at a time (1 MB each) over a single
+      media session.  Each GetFile RPC takes ~250-300 ms at Telegram's DC,
+      giving a hard ceiling of ~4 MB/s per connection regardless of network speed.
 
-      This function instead creates N independent raw pyrogram.session.Session
-      objects, each establishing its OWN TCP connection to Telegram's file DC
-      with its OWN auth key export.  Workers bypass get_file_semaphore entirely
-      and call session.invoke(GetFile(...)) directly.  N sessions = N independent
-      bandwidth streams from Telegram's DC → true N× throughput.
+      This function splits the file into `num_workers` byte ranges and fetches
+      them CONCURRENTLY via asyncio.gather().  pyrotgfork's Session.invoke()
+      uses per-request msg_id matching and supports multiple in-flight requests
+      on the same TCP connection, so N workers × ~4 MB/s ≈ N× throughput.
 
-      This is the same technique used by FastTelethon on the Telethon library.
-      With 8 sessions on a fast VPS near Telegram's DC you can realistically
-      reach 15-30 MB/s on large files.
+      Each user already has their own Client → own media_sessions dict → own
+      TCP connection to Telegram's file DC, so there is zero inter-user
+      contention even with 10 concurrent users.
 
-    Auth strategy:
-      One new MTProto auth key is created for the file DC (via DH handshake).
-      That key is authorised with ExportAuthorization/ImportAuthorization on the
-      first session, then reused for all other sessions.  MTProto allows multiple
-      concurrent connections sharing the same auth key — each Session object
-      generates its own unique 8-byte session_id (os.urandom(8)) so Telegram
-      treats them as separate connections.
-
-    Falls back to serial download on any unrecoverable error.
+      Falls back silently to standard serial download on any unrecoverable error.
 
     Upload note:
       pyrotgfork's save_file() already uses 3 sessions × 4 workers (12 streams)
       for files > 10 MB — upload is already optimally parallelised in the library.
     """
-    from pyrogram.file_id import FileId, FileType
-    from pyrogram.session import Session
-    from pyrogram.session.auth import Auth
-    import pyrogram.raw as raw
+    from pyrogram.file_id import FileId
 
     media = (
         getattr(message, "document", None) or
@@ -136,130 +121,46 @@ async def download_media_parallel(
     uid = uuid.uuid4().hex[:10]
     out_path = os.path.join("downloads", f"dl_{uid}{ext}")
 
-    # Build the Telegram file location object for GetFile RPC calls.
-    file_type = file_id_obj.file_type
-    if file_type == FileType.PHOTO:
-        location = raw.types.InputPhotoFileLocation(
-            id=file_id_obj.media_id,
-            access_hash=file_id_obj.access_hash,
-            file_reference=file_id_obj.file_reference,
-            thumb_size=file_id_obj.thumbnail_size or ""
-        )
-    else:
-        location = raw.types.InputDocumentFileLocation(
-            id=file_id_obj.media_id,
-            access_hash=file_id_obj.access_hash,
-            file_reference=file_id_obj.file_reference,
-            thumb_size=""
-        )
-
-    dc_id = file_id_obj.dc_id
-    test_mode = await client.storage.test_mode()
-    client_dc_id = await client.storage.dc_id()
-
+    # Split file into N chunk ranges
     total_chunks = (file_size + _PYROGRAM_CHUNK_SIZE - 1) // _PYROGRAM_CHUNK_SIZE
-    actual_sessions = min(num_workers, total_chunks)
+    actual_workers = min(num_workers, total_chunks)
 
-    # Distribute chunks evenly across sessions — each session downloads a
-    # contiguous range sequentially (no cross-session locking needed).
-    base, rem = divmod(total_chunks, actual_sessions)
-    ranges = []
+    base, rem = divmod(total_chunks, actual_workers)
+    ranges = []  # (offset_in_chunks, count_in_chunks)
     pos = 0
-    for i in range(actual_sessions):
+    for i in range(actual_workers):
         cnt = base + (1 if i < rem else 0)
         ranges.append((pos, cnt))
         pos += cnt
 
-    temp_paths = [os.path.join("downloads", f"dl_{uid}_p{i}.tmp") for i in range(actual_sessions)]
-    downloaded = [0] * actual_sessions
+    temp_paths = [os.path.join("downloads", f"dl_{uid}_p{i}.tmp") for i in range(actual_workers)]
+    downloaded = [0] * actual_workers
     last_report = [time.time()]
     failed = [False]
-    raw_sessions = []
 
-    try:
-        # ── Auth key ────────────────────────────────────────────────────────────
-        # Create ONE new MTProto auth key for the file DC (single DH handshake).
-        # All sessions will share this key — each Session gets its own random
-        # session_id (os.urandom(8)) so Telegram treats them as separate connections.
-        if dc_id != client_dc_id:
-            auth_key = await Auth(client, dc_id, test_mode).create()
-        else:
-            auth_key = await client.storage.auth_key()
+    async def worker(idx, chunk_offset, chunk_limit):
+        """Fetch one byte-range with per-error retry policy.
 
-        # ── Session 0 + authorization (BEFORE starting the rest) ────────────────
-        # CRITICAL ORDER: session 0 must connect and ImportAuthorization BEFORE
-        # sessions 1-N start.  If sessions 1-N connect while the auth_key is still
-        # unlinked (no user import done yet), the DC sends transport error 404
-        # ("auth key not found") and kills those connections immediately.
-        # After ImportAuthorization, the auth_key is permanently recognized on the
-        # DC — all subsequent sessions with the same key are accepted.
-        session_0 = Session(client, dc_id, auth_key, test_mode, is_media=True)
-        await session_0.start()
-        raw_sessions.append(session_0)
+        Error classification (determined from VPS log analysis):
+          FATAL  — session/reference is dead; retrying would only flood logs.
+                   Set failed[0], raise immediately.
+          RETRY  — transient; back-off and retry up to 3 attempts.
+        """
+        for attempt in range(3):
+            # Exit immediately if another worker already failed fatally.
+            if failed[0]:
+                raise RuntimeError("Aborting — another worker already failed")
 
-        if dc_id != client_dc_id:
-            auth_imported = False
-            for attempt in range(3):
-                try:
-                    exported = await client.invoke(
-                        raw.functions.auth.ExportAuthorization(dc_id=dc_id)
-                    )
-                    await session_0.invoke(
-                        raw.functions.auth.ImportAuthorization(
-                            id=exported.id,
-                            bytes=exported.bytes
-                        )
-                    )
-                    auth_imported = True
-                    break
-                except Exception as e:
-                    logging.warning(f"Auth export attempt {attempt + 1}/3 failed: {e}")
-                    await asyncio.sleep(1)
-            if not auth_imported:
-                raise RuntimeError("Failed to authorize sessions with Telegram file DC")
-
-        # ── Sessions 1-N (started AFTER auth is established) ────────────────────
-        # auth_key is now linked to the user on the file DC, so these sessions
-        # are accepted immediately when they connect.
-        for i in range(1, actual_sessions):
-            session = Session(client, dc_id, auth_key, test_mode, is_media=True)
-            await session.start()
-            raw_sessions.append(session)
-
-        # ── Per-session download worker ──────────────────────────────────────────
-        async def session_worker(idx, chunk_offset, chunk_count):
-            """Download a sequential range of chunks via a dedicated raw Session.
-
-            Direct session.invoke(GetFile) bypasses get_file_semaphore entirely.
-            No contention with other workers — each session has its own TCP pipe.
-
-            Reconnection: if Telegram drops the TCP connection mid-transfer
-            (TCPTransport closed, network hiccup, DC rebalance, etc.) the session
-            is stopped and a NEW Session is created with the same auth_key — no
-            new ExportAuthorization needed because the key is already linked to
-            the user on that DC.  Download resumes from the failed chunk.
-            """
-            reconnects = 0
-            chunk_idx = 0
-            with open(temp_paths[idx], "wb") as fh:
-                while chunk_idx < chunk_count:
-                    if failed[0]:
-                        return
-                    offset_bytes = (chunk_offset + chunk_idx) * _PYROGRAM_CHUNK_SIZE
-                    session = raw_sessions[idx]
-                    try:
-                        r = await session.invoke(
-                            raw.functions.upload.GetFile(
-                                location=location,
-                                offset=offset_bytes,
-                                limit=_PYROGRAM_CHUNK_SIZE
-                            )
-                        )
-                        data = getattr(r, "bytes", b"")
-                        if not data and chunk_idx < chunk_count - 1:
-                            raise ValueError(f"Empty chunk at byte offset {offset_bytes}")
-                        fh.write(data)
-                        downloaded[idx] += len(data)
+            try:
+                open(temp_paths[idx], "wb").close()
+                with open(temp_paths[idx], "wb") as fh:
+                    async for chunk in client.get_file(
+                        file_id_obj, file_size,
+                        limit=chunk_limit,
+                        offset=chunk_offset
+                    ):
+                        fh.write(chunk)
+                        downloaded[idx] += len(chunk)
                         if progress_callback and not failed[0]:
                             now = time.time()
                             if now - last_report[0] >= 2:
@@ -267,55 +168,123 @@ async def download_media_parallel(
                                 total_dl = min(sum(downloaded), file_size)
                                 if asyncio.iscoroutinefunction(progress_callback):
                                     await progress_callback(total_dl, file_size, *progress_args)
-                        chunk_idx += 1
-                        reconnects = 0  # reset reconnect counter on any success
+                # ── Detect pyrotgfork silently swallowing FileReferenceExpired ──────
+                # pyrotgfork's get_file() wraps all errors in a bare
+                #   `except Exception as e: log.exception(e)`
+                # with NO re-raise (client.py lines 1319-1322).  When
+                # FileReferenceExpired hits that handler the async generator
+                # exits without yielding a single byte, so the temp file is
+                # 0 bytes even though no exception reaches this worker.
+                temp_size = (
+                    os.path.getsize(temp_paths[idx])
+                    if os.path.exists(temp_paths[idx]) else 0
+                )
+                if file_size > 0 and temp_size == 0:
+                    failed[0] = True
+                    raise _FileRefSwallowedByPyrogram(
+                        f"Worker {idx}: get_file() yielded no data for a "
+                        f"{file_size}-byte file — pyrotgfork swallowed "
+                        f"FileReferenceExpired"
+                    )
+                return  # success
 
-                    except (FileReferenceExpired, FileReferenceInvalid):
-                        failed[0] = True
-                        raise
+            except (FloodWait, FloodPremiumWait) as e:
+                # RETRY: Telegram rate limit — transient, honour the wait.
+                wait = e.value
+                logging.warning(f"Parallel worker {idx} FloodWait {wait}s (attempt {attempt+1}/3)")
+                if attempt < 2:
+                    downloaded[idx] = 0
+                    await asyncio.sleep(wait)
+                else:
+                    failed[0] = True
+                    raise
 
-                    except (FloodWait, FloodPremiumWait) as e:
-                        logging.warning(f"Session {idx} FloodWait {e.value}s on chunk {chunk_idx}")
-                        await asyncio.sleep(e.value)
-                        # retry same chunk_idx
+            except (FileReferenceExpired, FileReferenceInvalid, _FileRefSwallowedByPyrogram):
+                # FATAL: file reference is stale (or pyrotgfork swallowed the
+                # error and the same stale reference would just fail again).
+                failed[0] = True
+                raise
 
-                    except Exception as e:
-                        if str(e) == "StopProcess":
-                            failed[0] = True
-                            raise
+            except AuthBytesInvalid:
+                # FATAL: exported auth for the file DC is invalid — session is dead or
+                # cross-DC auth export failed.  Clear the cached media session so the
+                # next call creates a fresh one with new exported auth.
+                failed[0] = True
+                try:
+                    client.media_sessions.clear()
+                except Exception:
+                    pass
+                raise
 
-                        reconnects += 1
-                        if reconnects > 3:
-                            failed[0] = True
-                            raise
+            except sqlite3.ProgrammingError:
+                # FATAL: the client's in-memory SQLite storage was closed while this
+                # worker was still calling get_file() — the parent session was evicted.
+                failed[0] = True
+                logging.warning(f"Parallel worker {idx}: client SQLite storage closed (session evicted mid-download)")
+                raise
 
-                        # TCP dropped or session closed — rebuild the connection.
-                        # auth_key is already linked to the user on this DC so
-                        # no ExportAuthorization needed for the replacement session.
-                        logging.warning(
-                            f"Session {idx} chunk {chunk_idx} dropped (reconnect {reconnects}/3): {e}"
-                        )
-                        try:
-                            await session.stop()
-                        except Exception:
-                            pass
-                        new_session = Session(client, dc_id, auth_key, test_mode, is_media=True)
-                        await new_session.start()
-                        raw_sessions[idx] = new_session
-                        await asyncio.sleep(0.5 * reconnects)
-                        # retry same chunk_idx with new session
+            except Exception as e:
+                error_str = str(e)
 
-        # ── Run all sessions in parallel ─────────────────────────────────────────
-        await asyncio.gather(*[
-            session_worker(i, off, cnt) for i, (off, cnt) in enumerate(ranges)
-        ])
+                # FATAL: StopProcess is intentional user cancellation — don't retry.
+                if error_str == "StopProcess":
+                    failed[0] = True
+                    raise
+
+                # FATAL: "Value after * must be an iterable, not NoneType" — the
+                # Pyrogram Session's internal connection state is None because the
+                # session was torn down between the start of get_file() and this
+                # await.  Retrying against the dead session only floods the logs.
+                if "NoneType" in error_str and (
+                    "iterable" in error_str or "* must be" in error_str
+                ):
+                    failed[0] = True
+                    logging.warning(f"Parallel worker {idx}: session connection torn down mid-transfer")
+                    raise
+
+                # FATAL: TCP transport explicitly closed — same root cause as above.
+                if "TCPTransport" in error_str and "closed=True" in error_str:
+                    failed[0] = True
+                    logging.warning(f"Parallel worker {idx}: TCP transport closed mid-transfer")
+                    raise
+
+                # RETRY: generic transient error (network hiccup, DC timeout, etc.)
+                if attempt < 2:
+                    logging.warning(f"Parallel worker {idx} error (attempt {attempt+1}/3): {e}, retrying")
+                    downloaded[idx] = 0
+                    await asyncio.sleep(1 * (attempt + 1))
+                else:
+                    failed[0] = True
+                    raise
+
+    def _is_session_fatal(exc: BaseException) -> bool:
+        """Return True for errors caused by a dead/evicted session.
+
+        These errors will recur on serial fallback with the same client, so we
+        re-raise them directly instead of attempting a pointless serial retry.
+        """
+        if isinstance(exc, sqlite3.ProgrammingError):
+            return True
+        if isinstance(exc, AuthBytesInvalid):
+            return True
+        if isinstance(exc, OSError):
+            s = str(exc)
+            if "NoneType" in s and ("iterable" in s or "* must be" in s):
+                return True
+            if "TCPTransport" in s and "closed=True" in s:
+                return True
+        return False
+
+    try:
+        await asyncio.gather(*[worker(i, off, cnt) for i, (off, cnt) in enumerate(ranges)])
 
         if failed[0]:
-            raise RuntimeError("One or more download sessions failed")
+            raise RuntimeError("One or more parallel workers failed after retries")
 
-        # Final progress at 100%
-        if progress_callback and asyncio.iscoroutinefunction(progress_callback):
-            await progress_callback(file_size, file_size, *progress_args)
+        # Final progress update at 100%
+        if progress_callback:
+            if asyncio.iscoroutinefunction(progress_callback):
+                await progress_callback(file_size, file_size, *progress_args)
 
         # Assemble part files in order
         with open(out_path, "wb") as out:
@@ -330,11 +299,13 @@ async def download_media_parallel(
             raise ValueError("Assembled file is empty")
 
         logging.info(
-            f"Fast-session download: {file_size/1048576:.1f} MB in {actual_sessions} sessions → {out_path}"
+            f"Parallel download: {file_size/1048576:.1f} MB in {actual_workers} workers → {out_path}"
         )
         return out_path
 
-    except (FileReferenceExpired, FileReferenceInvalid):
+    except (FileReferenceExpired, FileReferenceInvalid, _FileRefSwallowedByPyrogram):
+        # Stale file reference (or pyrotgfork silently swallowed it) — re-raise
+        # so handlers.py can re-fetch the message and get a fresh reference.
         for p in [out_path] + temp_paths:
             try:
                 if os.path.exists(p):
@@ -344,6 +315,9 @@ async def download_media_parallel(
         raise
 
     except Exception as e:
+        # User cancellation — re-raise immediately so handlers.py catches StopProcess.
+        # Falling through to serial would call the progress callback again, causing
+        # pyrotgfork to log a noisy ERROR before handlers.py ever sees the exception.
         if str(e) == "StopProcess":
             for p in [out_path] + temp_paths:
                 try:
@@ -353,7 +327,20 @@ async def download_media_parallel(
                     pass
             raise
 
-        logging.warning(f"Fast-session download failed ({type(e).__name__}: {e}), falling back to serial")
+        # Session-fatal errors: re-raise so handlers.py can reconnect the client
+        # rather than attempting a serial download with the same dead session.
+        if _is_session_fatal(e):
+            logging.warning(f"Parallel download: session fatal error ({type(e).__name__}: {e}), re-raising to caller")
+            for p in [out_path] + temp_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            raise
+
+        # Transient / recoverable error — fall back to serial download.
+        logging.warning(f"Parallel download failed ({type(e).__name__}: {e}), falling back to serial")
         for p in [out_path] + temp_paths:
             try:
                 if os.path.exists(p):
@@ -363,11 +350,6 @@ async def download_media_parallel(
         return await download_media_fast(client, message, file_name, progress_callback, progress_args)
 
     finally:
-        for session in raw_sessions:
-            try:
-                await session.stop()
-            except Exception:
-                pass
         for tp in temp_paths:
             try:
                 if os.path.exists(tp):
