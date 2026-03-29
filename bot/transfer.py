@@ -48,7 +48,7 @@ async def download_media_parallel(
     client: Client,
     message: Message,
     file_name=None,
-    num_workers: int = 4,
+    num_workers: int = 2,
     progress_callback=None,
     progress_args=()
 ):
