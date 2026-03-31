@@ -203,7 +203,7 @@ _user_floodwait_until: dict = {}
 
 # Per-user rate limiting: {user_id: last_request_timestamp}
 _user_last_request: dict = {}
-RATE_LIMIT_SECONDS = 180
+RATE_LIMIT_SECONDS = 120
 
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
