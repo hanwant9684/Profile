@@ -203,7 +203,7 @@ _user_floodwait_until: dict = {}
 
 # Per-user rate limiting: {user_id: last_request_timestamp}
 _user_last_request: dict = {}
-RATE_LIMIT_SECONDS = 120
+RATE_LIMIT_SECONDS = 900
 
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
@@ -255,7 +255,7 @@ async def get_user_client(user_id, session_str):
         api_id=API_ID,
         api_hash=API_HASH,
         in_memory=True,
-        sleep_threshold=120,
+        sleep_threshold=30,
         no_updates=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
@@ -533,7 +533,9 @@ async def help_command(client, message):
         "Just send any Telegram link (public or private) to download.\n"
         "For private links, you must /login first.\n\n"
         "📦 **Batch**\n"
-        "Format: `/batch start_link end_link` (Max 50)\n\n"
+        "Format: `/batch start_link end_link` (Max 50, Premium only)\n\n"
+        "🔗 **Multi-link**\n"
+        "Format: `/mlinks` then paste up to 50 links, one per line\n\n"
         "💰 **Quota**\n"
         "Free users: 5 files/day\n"
         "Premium users: Unlimited"
@@ -788,6 +790,180 @@ async def batch_handler(client, message):
         _batch_sessions.discard(user_id)
         batch_cancel_flags.discard(user_id)
 
+@app.on_message(filters.command("mlinks") & filters.private)
+async def mlinks_handler(client, message):
+    """Download up to 50 individual Telegram links sent one per line.
+    Usage: /mlinks
+    https://t.me/...
+    https://t.me/...
+    """
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+
+    if user and user.get("role") == "banned":
+        await message.reply("❌ **You are banned from using this bot.**")
+        return
+
+    # Premium / admin / owner only
+    is_owner = OWNER_ID and user_id == int(OWNER_ID)
+    is_privileged = user and user.get("role") in ("premium", "admin", "owner")
+    if not is_owner and not is_privileged:
+        await message.reply(
+            "❌ **This command is for Premium users only.**\n\n"
+            "Contact the owner to upgrade your account."
+        )
+        return
+
+    # FloodWait cooldown guard
+    _fw_deadline = _user_floodwait_until.get(user_id, 0)
+    if time.time() < _fw_deadline:
+        remaining = int(_fw_deadline - time.time())
+        logging.info(f"Dropping mlinks request from user {user_id} — FloodWait cooldown ({remaining}s left)")
+        return
+
+    # Extract all t.me links from the message
+    raw_links = re.findall(r"https?://t\.me/\S+", message.text)
+    # Strip ?single and any trailing punctuation from each link
+    links = []
+    for raw in raw_links:
+        clean = re.sub(r"\?single$", "", raw).rstrip(".,;)")
+        if clean:
+            links.append(clean)
+
+    if not links:
+        await message.reply(
+            "❌ **No links found.**\n\n"
+            "📖 **Usage** — send `/mlinks` with your links on the lines below:\n\n"
+            "`/mlinks`\n"
+            "`https://t.me/channel/123`\n"
+            "`https://t.me/channel/456?single`\n"
+            "`https://t.me/c/1234567890/789`\n\n"
+            "• Up to **50 links** per command\n"
+            "• Supports public & private links\n"
+            "• `?single` is handled automatically"
+        )
+        return
+
+    if len(links) > 50:
+        await message.reply("⚠️ Maximum 50 links allowed. Only the first 50 will be processed.")
+        links = links[:50]
+
+    count = len(links)
+
+    # Prevent overlapping batch runs for the same user
+    if user_id in _batch_sessions:
+        await message.reply("⚠️ You already have an active batch running. Use /cancelbatch to stop it first.")
+        return
+
+    batch_status = await safe_reply(
+        message,
+        f"🚀 **Multi-link download started** — {count} link(s)\n\n"
+        f"⏳ Progress: 0/{count}\n"
+        f"✅ Done: 0 | ❌ Skipped: 0\n\n"
+        f"ℹ️ /cancel = stop current item · /cancelbatch = stop all"
+    )
+    if batch_status is None:
+        logging.error(f"Could not send mlinks status message to user {user_id} — FloodWait too long")
+        return
+
+    processed_albums = set()
+    done = 0
+    skipped = 0
+
+    import random
+    _batch_sessions.add(user_id)
+    try:
+        for idx, link in enumerate(links, start=1):
+            if user_id in batch_cancel_flags:
+                batch_cancel_flags.discard(user_id)
+                try:
+                    await batch_status.edit_text(
+                        f"🛑 **Cancelled**\n\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Total attempted: {idx - 1}"
+                    )
+                except Exception:
+                    pass
+                return
+
+            try:
+                await batch_status.edit_text(
+                    f"📥 **Downloading** — link {idx}/{count}\n\n"
+                    f"✅ Done: {done} | ❌ Skipped: {skipped}\n"
+                    f"🔗 `{link}`"
+                )
+            except Exception:
+                pass
+
+            item_done = False
+            for attempt in range(3):
+                try:
+                    result = await download_handler(
+                        client, message,
+                        link_override=link,
+                        processed_albums=processed_albums,
+                        status_msg_override=batch_status,
+                    )
+                    if result is not None:
+                        done += 1
+                    else:
+                        skipped += 1
+                    item_done = True
+                    break
+                except (FloodWait, FloodPremiumWait) as e:
+                    wait_secs = e.value
+                    logging.warning(f"mlinks FloodWait: {wait_secs}s for user {user_id}, link {idx}, attempt {attempt + 1}")
+                    try:
+                        await batch_status.edit_text(
+                            f"⏳ **Rate limit — auto-pausing {wait_secs}s**\n\n"
+                            f"Retrying link {idx}/{count}...\n"
+                            f"✅ Done: {done} | ❌ Skipped: {skipped}"
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(wait_secs + 3)
+                except Exception as e:
+                    logging.error(f"mlinks item error (link={link}, attempt={attempt + 1}): {e}")
+                    if attempt == 2:
+                        skipped += 1
+                        item_done = True
+                    else:
+                        await asyncio.sleep(3)
+
+            if not item_done:
+                skipped += 1
+
+            # Abort on fatal session error
+            if user_id in _batch_session_error_flags:
+                _batch_session_error_flags.discard(user_id)
+                try:
+                    await batch_status.edit_text(
+                        f"🔐 **Session Error — Stopped**\n\n"
+                        f"Your Telegram session expired mid-download.\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped} | 📋 Remaining: {count - idx}\n\n"
+                        f"Please /login again and retry."
+                    )
+                except Exception:
+                    pass
+                return
+
+            if idx < count:
+                await asyncio.sleep(random.uniform(4, 7))
+
+        try:
+            await batch_status.edit_text(
+                f"✅ **All done!**\n\n"
+                f"📋 Total: {count}\n"
+                f"✅ Done: {done}\n"
+                f"❌ Skipped: {skipped}"
+            )
+        except (FloodWait, FloodPremiumWait) as e:
+            logging.warning(f"FloodWait {e.value}s on mlinks completion edit for user {user_id}")
+        except Exception:
+            pass
+    finally:
+        _batch_sessions.discard(user_id)
+        batch_cancel_flags.discard(user_id)
+
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client, message):
     """Cancel the current single download item only.
@@ -817,6 +993,9 @@ async def download_handler(client, message, link_override=None, processed_albums
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
     link = link_override or message.text.strip()
+    # Strip ?single so the link is handled identically to its plain version.
+    # Without this, ?single links skip the is_group check and lose the user session.
+    link = re.sub(r"\?single$", "", link).strip()
 
     from bot.database import create_user
     user = await get_user(user_id)
@@ -883,36 +1062,45 @@ async def download_handler(client, message, link_override=None, processed_albums
         is_group = True
     elif private_comment_match:
         temp_channel_id = int("-100" + private_comment_match.group(1))
+        channel_post_id = int(private_comment_match.group(2))
         comment_id = int(private_comment_match.group(3))
         is_private = True
         is_group = True
         try:
             chat_info = await client.get_chat(temp_channel_id)
             if chat_info.linked_chat:
-                chat_id = chat_info.linked_chat.id # Now targets the correct Private Group
+                chat_id = chat_info.linked_chat.id
                 message_id = comment_id
             else:
+                # No discussion group — fall back to the channel post itself
                 chat_id = temp_channel_id
-                message_id = comment_id
+                message_id = channel_post_id
         except Exception:
             chat_id = temp_channel_id
-            message_id = comment_id
+            message_id = channel_post_id
     elif comment_match:
         temp_channel = comment_match.group(1)
+        channel_post_id = int(comment_match.group(2))
         comment_id = int(comment_match.group(3))
-        is_private = True
-        is_group = True
         try:
             chat_info = await client.get_chat(temp_channel)
             if chat_info.linked_chat:
-                chat_id = chat_info.linked_chat.id # Use the GROUP ID instead
+                # Comment lives in the linked discussion group — needs session
+                chat_id = chat_info.linked_chat.id
                 message_id = comment_id
+                is_private = True
+                is_group = True
             else:
+                # No discussion group — download the channel post directly
                 chat_id = temp_channel
-                message_id = comment_id
+                message_id = channel_post_id
+                chat_type_str = str(chat_info.type).lower()
+                if "group" in chat_type_str or "supergroup" in chat_type_str:
+                    is_group = True
         except Exception:
+            # Fallback: download the channel post without requiring a session
             chat_id = temp_channel
-            message_id = comment_id
+            message_id = channel_post_id
     elif private_thread_match:
         chat_id = int("-100" + private_thread_match.group(1))
         message_id = int(private_thread_match.group(2))
@@ -1310,7 +1498,9 @@ async def download_handler(client, message, link_override=None, processed_albums
                         _dest_channel_cache[user_id] = (destination_id, using_user_session)
                         _resolved_channel_id = destination_id
 
-                for current_msg in target_messages:
+                for _msg_idx, current_msg in enumerate(target_messages):
+                    if _msg_idx > 0:
+                        await asyncio.sleep(0.5)
                     path = None
                     thumb_path = None
                     safe_caption = ""
