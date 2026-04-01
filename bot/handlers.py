@@ -203,7 +203,7 @@ _user_floodwait_until: dict = {}
 
 # Per-user rate limiting: {user_id: last_request_timestamp}
 _user_last_request: dict = {}
-RATE_LIMIT_SECONDS = 900
+RATE_LIMIT_SECONDS = 120
 
 async def get_user_client(user_id, session_str):
     global _cleanup_task_started
@@ -1840,6 +1840,7 @@ async def upgrade(client, message):
         "•———————————————•\n"
         "• Unlimited Downloads\n"
         "• Batch Download upto (50)\n"
+        "• Multiple Links upto (50)\n"
         "• Fast Speed\n\n"
         "> 🔥 **1 Year** - $30\n"
         "> • All Premium Features\n"
