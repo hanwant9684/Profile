@@ -8,6 +8,7 @@ import aiofiles
 import re
 import logging
 from collections import deque
+from urllib.parse import urlparse, parse_qs
 import pyrogram
 from pyrogram import filters, Client
 from pyrogram.client import Client as ClientObject
@@ -821,8 +822,8 @@ async def mlinks_handler(client, message):
         logging.info(f"Dropping mlinks request from user {user_id} — FloodWait cooldown ({remaining}s left)")
         return
 
-    # Extract all t.me links from the message
-    raw_links = re.findall(r"https?://t\.me/\S+", message.text)
+    # Extract all supported Telegram links from the message
+    raw_links = re.findall(r"https?://(?:t|telegram)\.me/\S+|tg://resolve\S+", message.text)
     # Strip ?single and any trailing punctuation from each link
     links = []
     for raw in raw_links:
@@ -987,7 +988,7 @@ async def cancelbatch_handler(client, message):
     else:
         await message.reply("ℹ️ No active batch to cancel.")
 
-@app.on_message(filters.regex(r"https://t\.me/") & filters.private)
+@app.on_message(filters.regex(r"https?://t\.me/|https?://telegram\.me/|tg://resolve") & filters.private)
 async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None):
     user_id = message.from_user.id
     username = message.from_user.username
@@ -996,6 +997,23 @@ async def download_handler(client, message, link_override=None, processed_albums
     # Strip ?single so the link is handled identically to its plain version.
     # Without this, ?single links skip the is_group check and lose the user session.
     link = re.sub(r"\?single$", "", link).strip()
+
+    # --- Normalize alternative Telegram link formats to standard t.me URLs ---
+    # telegram.me is an official alias for t.me — rewrite it so all patterns match.
+    link = re.sub(r"https?://telegram\.me/", "https://t.me/", link)
+    # tg://resolve?domain=USERNAME&post=MSGID  →  https://t.me/USERNAME/MSGID
+    if link.startswith("tg://resolve"):
+        _parsed = urlparse(link)
+        _params = parse_qs(_parsed.query)
+        _domain = (_params.get("domain") or [None])[0]
+        _post   = (_params.get("post")   or [None])[0]
+        if _domain and _post:
+            link = f"https://t.me/{_domain}/{_post}"
+        elif _domain:
+            # No post ID — just a channel link, nothing to download
+            await safe_reply(message, "❌ That link points to a channel but not a specific message. Send a direct message link.")
+            return
+    # -------------------------------------------------------------------------
 
     from bot.database import create_user
     user = await get_user(user_id)
@@ -1038,6 +1056,11 @@ async def download_handler(client, message, link_override=None, processed_albums
     topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", link)
     comment_match = re.search(r"t\.me/([^/]+)/(\d+)\?comment=(\d+)", link)
     private_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)\?comment=(\d+)", link)
+    # Forum topic comment links: t.me/c/CHANNEL/TOPIC/POST?comment=COMMENT
+    #                            t.me/USERNAME/TOPIC/POST?comment=COMMENT
+    # In forum supergroups, comments on topic posts live in the SAME group.
+    private_topic_comment_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)\?comment=(\d+)", link)
+    public_topic_comment_match  = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)/(\d+)\?comment=(\d+)", link)
     story_match = re.search(r"t\.me/([^/]+)/s/(\d+)", link)
     private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", link)
     single_match = re.search(r"t\.me/([^/]+)/(\d+)\?single", link)
@@ -1048,6 +1071,7 @@ async def download_handler(client, message, link_override=None, processed_albums
     is_private = False
     is_group = False
     is_story = False
+    _pending_comment_resolve = None  # (temp_channel, comment_id) when bot couldn't resolve linked chat
 
     if private_story_match:
         chat_id = int("-100" + private_story_match.group(1))
@@ -1060,55 +1084,57 @@ async def download_handler(client, message, link_override=None, processed_albums
         is_story = True
         is_private = True
         is_group = True
+    elif private_topic_comment_match:
+        # t.me/c/CHANNEL/TOPIC/POST?comment=COMMENT — comment in a forum topic.
+        # The comment lives in the SAME supergroup (not a separate linked chat).
+        chat_id = int("-100" + private_topic_comment_match.group(1))
+        message_id = int(private_topic_comment_match.group(4))
+        is_private = True
+        is_group = True
+    elif public_topic_comment_match:
+        # t.me/USERNAME/TOPIC/POST?comment=COMMENT — public forum topic comment.
+        chat_id = public_topic_comment_match.group(1)
+        message_id = int(public_topic_comment_match.group(4))
+        is_group = True
+        is_private = True
     elif private_comment_match:
         temp_channel_id = int("-100" + private_comment_match.group(1))
         channel_post_id = int(private_comment_match.group(2))
         comment_id = int(private_comment_match.group(3))
         is_private = True
         is_group = True
-        try:
-            chat_info = await client.get_chat(temp_channel_id)
-            if chat_info.linked_chat:
-                chat_id = chat_info.linked_chat.id
-                message_id = comment_id
-            else:
-                # No discussion group — fall back to the channel post itself
-                chat_id = temp_channel_id
-                message_id = channel_post_id
-        except Exception:
-            chat_id = temp_channel_id
-            message_id = channel_post_id
+        # Same deferral as comment_match: let the user client resolve the
+        # linked discussion group so its access hash lands in user client
+        # storage (not just the bot client's storage).
+        chat_id = temp_channel_id
+        message_id = channel_post_id
+        _pending_comment_resolve = (temp_channel_id, channel_post_id, comment_id)
     elif comment_match:
         temp_channel = comment_match.group(1)
         channel_post_id = int(comment_match.group(2))
         comment_id = int(comment_match.group(3))
-        try:
-            chat_info = await client.get_chat(temp_channel)
-            if chat_info.linked_chat:
-                # Comment lives in the linked discussion group — needs session
-                chat_id = chat_info.linked_chat.id
-                message_id = comment_id
-                is_private = True
-                is_group = True
-            else:
-                # No discussion group — download the channel post directly
-                chat_id = temp_channel
-                message_id = channel_post_id
-                chat_type_str = str(chat_info.type).lower()
-                if "group" in chat_type_str or "supergroup" in chat_type_str:
-                    is_group = True
-        except Exception:
-            # Fallback: download the channel post without requiring a session
-            chat_id = temp_channel
-            message_id = channel_post_id
+        # Always defer resolution to the user client. The bot client's
+        # access hashes are NOT shared with the user client's storage, so
+        # if we resolve the linked discussion group here and hand its
+        # numeric ID to the user client, the user client calls
+        # channels.GetChannels with access_hash=0 → CHANNEL_INVALID.
+        # By deferring, the user client resolves the channel itself and
+        # populates its own storage with the correct access hash.
+        chat_id = temp_channel
+        message_id = channel_post_id
+        is_private = True
+        is_group = True
+        _pending_comment_resolve = (temp_channel, channel_post_id, comment_id)
     elif private_thread_match:
         chat_id = int("-100" + private_thread_match.group(1))
         message_id = int(private_thread_match.group(2))
         is_private = True
         is_group = True
     elif thread_match:
+        # t.me/GROUP/POST?thread=TOPIC — message in a forum thread (supergroup)
         chat_id = thread_match.group(1)
         message_id = int(thread_match.group(2))
+        is_group = True
     elif private_single_match:
         chat_id = int("-100" + private_single_match.group(1))
         message_id = int(private_single_match.group(2))
@@ -1149,6 +1175,13 @@ async def download_handler(client, message, link_override=None, processed_albums
         except Exception as e:
             logging.debug(f"Chat check error for {chat_id}: {e}")
             pass
+
+    if chat_id is None:
+        if status_msg_override is not None:
+            await update_status(status_msg_override, "❌ Unsupported or unrecognised link format.")
+        else:
+            await safe_reply(message, "❌ Unsupported or unrecognised link format. Supported: `t.me/channel/123`, `t.me/c/ID/123`, topic, comment, thread, and story links.")
+        return
 
     if status_msg_override is not None:
         status_msg = status_msg_override
@@ -1194,6 +1227,26 @@ async def download_handler(client, message, link_override=None, processed_albums
                         logging.error(f"Failed to restart user_client: {e}")
                         await update_status(status_msg, "❌ Session disconnected. Please try again.")
                         return None
+
+                # Re-resolve comment links using the user client so that the
+                # linked discussion group's access hash ends up in the USER
+                # client's own storage (not just the bot client's storage).
+                if _pending_comment_resolve:
+                    _rc_channel, _rc_post_id, _rc_comment_id = _pending_comment_resolve
+                    try:
+                        chat_info = await user_client.get_chat(_rc_channel)
+                        if chat_info.linked_chat:
+                            # linked_chat.id is now cached in user_client storage
+                            chat_id = chat_info.linked_chat.id
+                            message_id = _rc_comment_id
+                        else:
+                            # No discussion group — download the channel post
+                            chat_id = _rc_channel
+                            message_id = _rc_post_id
+                    except Exception as _e:
+                        logging.debug(f"User-client comment re-resolve failed for {_rc_channel}: {_e}")
+                        # Keep the username fallback set earlier; user client
+                        # will attempt contacts.ResolveUsername at fetch time.
 
                 msg = None
                 # Use batch pre-fetched message if available — avoids one get_messages API call
