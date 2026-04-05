@@ -1877,40 +1877,171 @@ async def download_handler(client, message, link_override=None, processed_albums
 
 @app.on_callback_query(filters.regex("upgrade_prompt"))
 async def upgrade_prompt_callback(client, callback_query):
-    await upgrade(client, callback_query.message)
+    await _show_upgrade_plans(callback_query.message)
     await callback_query.answer()
 
 @app.on_message(filters.command("upgrade") & filters.private)
 async def upgrade(client, message):
-    from bot.config import OWNER_USERNAME, SUPPORT_CHAT_LINK, UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
+    await _show_upgrade_plans(message)
+
+
+async def _show_upgrade_plans(message):
+    from bot.payments import PREMIUM_PLANS
     text = (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
         "•———————————————•\n"
-        "🔸 **10** days - **$2**\n"
-        "🔸 **30** days - **$3**\n"
-        "🔸 **60** days - **$6**\n"
+        "🔸 **10** days  — $2 / ₹200\n"
+        "🔸 **30** days  — $3 / ₹300\n"
+        "🔸 **60** days  — $6 / ₹600\n"
         "•———————————————•\n"
-        "• Unlimited Downloads\n"
-        "• Batch Download upto (50)\n"
-        "• Multiple Links upto (50)\n"
-        "• Fast Speed\n\n"
-        "> 🔥 **1 Year** - $30\n"
+        "• ✅ Unlimited Downloads\n"
+        "• ✅ Batch Download up to 50\n"
+        "• ✅ Multiple Links up to 50\n"
+        "• ✅ Fast Speed\n\n"
+        "> 🔥 **1 Year** — $30 / ₹3000\n"
         "> • All Premium Features\n"
         "> • Priority Support\n\n"
-        "> 💳 **Payment Details**\n"
-        f"🪙 **Crypto(Binance)**: [Crpto Payment / Binance]({CRYPTO_ADDRESS})\n\n"
-        f"🇮🇳 **UPI**: [UPI QrCode]({UPI_ID})\n\n"
-        f"💲 **PayPal**: **[Click Here for PayPal]({PAYPAL_LINK})**\n\n"
-        f"🍎 **Apple Pay**: **[Click Here for Apple Pay]({APPLE_PAY_ID})**\n\n"
-        f"💳 **Card**: **[Click Here for Card]({CARD_PAYMENT_LINK})**\n\n"
-        f"> **🚀 After payment, send a screenshot to: ♦️ @Wolfy0046**"
+        "**Select your plan to get a payment link:**"
     )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("10 Days  — $2 / ₹200",  callback_data="upg_plan|10d")],
+        [InlineKeyboardButton("30 Days  — $3 / ₹300",  callback_data="upg_plan|30d")],
+        [InlineKeyboardButton("60 Days  — $6 / ₹600",  callback_data="upg_plan|60d")],
+        [InlineKeyboardButton("🔥 1 Year — $30 / ₹3000", callback_data="upg_plan|365d")],
+    ])
     await message.reply(
         text,
         link_preview_options=LinkPreviewOptions(is_disabled=True),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url=f"https://t.me/Wolfy0046")],
-            [InlineKeyboardButton("Support Chat", url=SUPPORT_CHAT_LINK)]
-        ])
+        reply_markup=keyboard,
     )
+
+
+@app.on_callback_query(filters.regex(r"^upg_plan\|(.+)$"))
+async def upgrade_plan_selected(client, callback_query):
+    plan_key = callback_query.matches[0].group(1)
+    from bot.payments import PREMIUM_PLANS
+    plan = PREMIUM_PLANS.get(plan_key)
+    if not plan:
+        await callback_query.answer("Unknown plan.", show_alert=True)
+        return
+
+    await callback_query.answer()
+
+    available = []
+    from bot.config import PAYPAL_CLIENT_ID, RAZORPAY_KEY_ID, OXAPAY_MERCHANT_API_KEY
+    if PAYPAL_CLIENT_ID:
+        available.append([InlineKeyboardButton("🅿️ PayPal / Apple Pay",        callback_data=f"upg_pay|{plan_key}|paypal")])
+        available.append([InlineKeyboardButton("💳 Credit / Debit Card",        callback_data=f"upg_pay|{plan_key}|paypal")])
+    if RAZORPAY_KEY_ID:
+        available.append([InlineKeyboardButton("🇮🇳 UPI (Razorpay)",           callback_data=f"upg_pay|{plan_key}|razorpay")])
+    if OXAPAY_MERCHANT_API_KEY:
+        available.append([InlineKeyboardButton("🪙 Crypto (OxaPay)",           callback_data=f"upg_pay|{plan_key}|oxapay")])
+    available.append([InlineKeyboardButton("⬅️ Back", callback_data="upgrade_prompt")])
+
+    if not available[:-1]:
+        await callback_query.message.reply("Payment gateways are not configured yet. Please contact the owner.")
+        return
+
+    await callback_query.message.reply(
+        f"✅ Plan selected: **{plan['label']}**\n\n"
+        "Choose your payment method:",
+        reply_markup=InlineKeyboardMarkup(available),
+    )
+
+
+@app.on_callback_query(filters.regex(r"^upg_pay\|(.+)\|(.+)$"))
+async def upgrade_payment_selected(client, callback_query):
+    plan_key = callback_query.matches[0].group(1)
+    provider = callback_query.matches[0].group(2)
+
+    from bot.payments import PREMIUM_PLANS
+    plan = PREMIUM_PLANS.get(plan_key)
+    if not plan:
+        await callback_query.answer("Unknown plan.", show_alert=True)
+        return
+
+    await callback_query.answer("Generating your payment link…")
+    status_msg = await callback_query.message.reply("⏳ Generating secure payment link…")
+
+    telegram_id = callback_query.from_user.id
+    days        = plan["days"]
+    amount_usd  = plan["usd"]
+    amount_inr  = plan["inr"]
+
+    from bot.config import WEBHOOK_BASE_URL, SUPPORT_CHAT_LINK, OWNER_USERNAME
+
+    try:
+        if provider == "paypal":
+            from bot.payments import create_paypal_order
+            result = await create_paypal_order(
+                telegram_id  = telegram_id,
+                plan_key     = plan_key,
+                days         = days,
+                amount_usd   = amount_usd,
+                return_url   = f"{WEBHOOK_BASE_URL}/paypal/return",
+                cancel_url   = f"{WEBHOOK_BASE_URL}/paypal/cancel",
+            )
+            pay_url   = result["approval_url"]
+            pay_label = "💳 Pay with PayPal / Card / Apple Pay"
+            note      = (
+                "After completing payment on PayPal, your account will be **upgraded automatically**.\n"
+                "No screenshot needed!"
+            )
+
+        elif provider == "razorpay":
+            from bot.payments import create_razorpay_payment_link
+            result = await create_razorpay_payment_link(
+                telegram_id = telegram_id,
+                plan_key    = plan_key,
+                days        = days,
+                amount_inr  = amount_inr,
+                
+            )
+            pay_url   = result["short_url"]
+            pay_label = "🇮🇳 Pay via UPI"
+            note      = (
+                "Complete your UPI payment through the Razorpay link.\n"
+                "Your account will be **upgraded automatically** once payment is confirmed."
+            )
+
+        elif provider == "oxapay":
+            from bot.payments import create_oxapay_invoice
+            result = await create_oxapay_invoice(
+                telegram_id  = telegram_id,
+                plan_key     = plan_key,
+                days         = days,
+                amount_usd   = amount_usd,
+                callback_url = f"{WEBHOOK_BASE_URL}/webhook/oxapay",
+            )
+            pay_url   = result["pay_link"]
+            pay_label = "🪙 Pay with Crypto"
+            note      = (
+                "Send crypto to the OxaPay address shown on the payment page.\n"
+                "Your account will be **upgraded automatically** once the transaction is confirmed on-chain."
+            )
+
+        else:
+            await status_msg.edit("Unknown payment provider.")
+            return
+
+        await status_msg.edit(
+            f"✅ **{plan['label']}** — secure payment link ready!\n\n"
+            f"{note}\n\n"
+            f"⏱️ Link expires in **30 minutes**.",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(pay_label, url=pay_url)],
+                [InlineKeyboardButton("❓ Support", url=SUPPORT_CHAT_LINK)],
+            ]),
+        )
+
+    except Exception as e:
+        logging.error(f"Payment link generation error [{provider}]: {e}", exc_info=True)
+        from bot.config import SUPPORT_CHAT_LINK
+        await status_msg.edit(
+            "❌ Failed to generate payment link. Please try again or contact support.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Contact Support", url=SUPPORT_CHAT_LINK)]
+            ]),
+        )

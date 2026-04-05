@@ -88,6 +88,35 @@ if missing_vars:
     print(f"CRITICAL ERROR: Missing environment variables: {', '.join(missing_vars)}")
     sys.exit(1)
 
+# Payment Gateway Configuration
+# Auto-detect webhook URL: explicit env var takes priority, then auto-detect on Replit
+WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "").rstrip("/")
+if not WEBHOOK_BASE_URL:
+    _replit_domain = os.environ.get("REPLIT_DEV_DOMAIN", "")
+    if _replit_domain:
+        WEBHOOK_PORT_FOR_URL = int(os.environ.get("WEBHOOK_PORT", "8080"))
+        WEBHOOK_BASE_URL = f"https://{WEBHOOK_PORT_FOR_URL}-{_replit_domain}"
+
+# PayPal (for credit card, Apple Pay, PayPal)
+PAYPAL_CLIENT_ID     = os.environ.get("PAYPAL_CLIENT_ID", "")
+PAYPAL_CLIENT_SECRET = os.environ.get("PAYPAL_CLIENT_SECRET", "")
+PAYPAL_WEBHOOK_ID    = os.environ.get("PAYPAL_WEBHOOK_ID", "")
+PAYPAL_MODE          = os.environ.get("PAYPAL_MODE", "live")
+
+# Razorpay (for UPI)
+RAZORPAY_KEY_ID         = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET     = os.environ.get("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+
+# OxaPay (for crypto)
+OXAPAY_MERCHANT_API_KEY = os.environ.get("OXAPAY_MERCHANT_API_KEY", "")
+
+# Webhook server port (change if 8080 is taken on your VPS)
+WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8080"))
+
+# Event loop reference — set by main.py so Flask threads can schedule async work
+bot_event_loop = None
+
 # RichAds Configuration
 RICHADS_PUBLISHER_ID = os.environ.get("RICHADS_PUBLISHER_ID", "989337")
 RICHADS_WIDGET_ID = os.environ.get("RICHADS_WIDGET_ID", "381546")
