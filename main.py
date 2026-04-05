@@ -58,6 +58,10 @@ async def main():
     import bot.admin
     import bot.info
 
+    # Store event loop reference so Flask webhook threads can schedule async work
+    import bot.config as _cfg
+    _cfg.bot_event_loop = asyncio.get_event_loop()
+
     print("Initializing database...")
     await init_db()
 
@@ -69,6 +73,12 @@ async def main():
         print("❌ TgCrypto NOT FOUND. Bot will be slow.")
     except Exception as e:
         print(f"❌ TgCrypto Debug Error: {e}")
+
+    # Start payment webhook server (runs in a background daemon thread)
+    from bot.config import WEBHOOK_PORT
+    from bot.webhook_server import start_webhook_server
+    start_webhook_server(port=WEBHOOK_PORT)
+    print(f"✅ Webhook server running on port {WEBHOOK_PORT}")
 
     print("Starting cleanup tasks...")
     if os.environ.get("RUN_WEB_SERVER", "False").lower() == "true":
