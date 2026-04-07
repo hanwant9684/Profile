@@ -1,7 +1,7 @@
 modules = ["python-3.12"]
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "cargo", "libiconv", "libuv", "libxcrypt", "libyaml", "openssl", "pkg-config", "postgresql", "redis", "rustc", "unzip"]
+packages = ["cacert", "libuv", "libyaml", "postgresql", "redis", "unzip"]
 
 [agent]
 expertMode = true
@@ -32,10 +32,6 @@ args = "python main.py"
 [[ports]]
 localPort = 6379
 externalPort = 80
-
-[[ports]]
-localPort = 8080
-externalPort = 8080
 
 [userenv]
 

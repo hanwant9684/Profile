@@ -2,13 +2,11 @@ aiofiles
 aiohttp
 asyncpg
 certifi
-cryptography
 flask
 psutil
 pyrotgfork
 python-dotenv
 pyyaml
 redis
-requests
 tgcrypto
 uvloop
