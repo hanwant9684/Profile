@@ -1553,7 +1553,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                 for _msg_idx, current_msg in enumerate(target_messages):
                     if _msg_idx > 0:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(2)
                     path = None
                     thumb_path = None
                     safe_caption = ""
