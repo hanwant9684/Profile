@@ -124,9 +124,6 @@ async def init_db():
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_role_expiry ON users(role, premium_expiry_date)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)')
 
-        from bot.payments_db import init_payments_table
-        await init_payments_table()
-
         logger.info("PostgreSQL database initialized")
     except Exception as e:
         logger.error(f"PostgreSQL initialization error: {e}")
