@@ -50,37 +50,26 @@ async def download_media_parallel(
     file_name=None,
     num_workers: int = 2,
     progress_callback=None,
-    progress_args=(),
-    extra_clients=None,
+    progress_args=()
 ):
     """
     Parallel chunk downloader — overcomes pyrotgfork's ~4 MB/s serial ceiling.
 
     Background:
-      pyrotgfork fetches file chunks ONE at a time (1 MB each).  Each GetFile
-      RPC takes ~250-300 ms, giving a hard ceiling of ~4 MB/s per TCP connection
-      to the file DC regardless of network speed.
+      pyrotgfork fetches file chunks ONE at a time (1 MB each) over a single
+      media session.  Each GetFile RPC takes ~250-300 ms at Telegram's DC,
+      giving a hard ceiling of ~4 MB/s per connection regardless of network speed.
 
       This function splits the file into `num_workers` byte ranges and fetches
-      them CONCURRENTLY.  When `extra_clients` are supplied (one per additional
-      worker), each worker uses its own Client instance → its own TCP socket to
-      the file DC → its own independent ~4 MB/s stream.  Two workers on two
-      separate clients gives ~2× throughput instead of sharing one socket.
-
-      Without extra_clients all workers share the primary client's single media
-      session; multiple in-flight GetFile RPCs on one connection still yield some
-      benefit via MTProto's msg_id multiplexing, but the gain is smaller.
+      them CONCURRENTLY via asyncio.gather().  pyrotgfork's Session.invoke()
+      uses per-request msg_id matching and supports multiple in-flight requests
+      on the same TCP connection, so N workers × ~4 MB/s ≈ N× throughput.
 
       Each user already has their own Client → own media_sessions dict → own
-      TCP socket, so there is zero inter-user contention.
+      TCP connection to Telegram's file DC, so there is zero inter-user
+      contention even with 10 concurrent users.
 
       Falls back silently to standard serial download on any unrecoverable error.
-
-    extra_clients:
-      Optional list of additional pre-started Client objects.  Worker 0 uses
-      `client`; worker i uses extra_clients[i-1] if available, else falls back
-      to `client`.  Each extra client should be created with
-      max_concurrent_transmissions=1 since it serves exactly one worker.
 
     Upload note:
       pyrotgfork's save_file() already uses 3 sessions × 4 workers (12 streams)
@@ -149,60 +138,28 @@ async def download_media_parallel(
     last_report = [time.time()]
     failed = [False]
 
-    # Build per-worker client list.
-    # Worker 0 → primary client; worker i → extra_clients[i-1] when available.
-    # This gives each worker its own TCP connection to the file DC, bypassing the
-    # single-socket bottleneck of sharing one media session across all workers.
-    _all_clients = [client] + list(extra_clients or [])
-
     async def worker(idx, chunk_offset, chunk_limit):
         """Fetch one byte-range with per-error retry policy.
 
-        Error classification:
-          FATAL  — session/reference is dead; retrying floods logs.  Set failed[0], raise.
-          FLOOD  — Telegram rate limit: sleep then RESUME from last written chunk.
-                   Never restart the whole range — that is the root cause of the
-                   70-80% speed-drop bug (worker re-downloads chunks it already wrote).
-          RETRY  — transient network error: restart the range from the beginning.
+        Error classification (determined from VPS log analysis):
+          FATAL  — session/reference is dead; retrying would only flood logs.
+                   Set failed[0], raise immediately.
+          RETRY  — transient; back-off and retry up to 3 attempts.
         """
-        # Each worker uses its own Client for an independent TCP socket to the file DC.
-        _client = _all_clients[idx % len(_all_clients)]
-
-        # _chunks_done tracks how many 1-MB chunks were successfully written to disk.
-        # On FloodWait we advance offset/limit past these chunks and append to the
-        # existing partial file instead of truncating and re-downloading from scratch.
-        _chunks_done = 0
-
         for attempt in range(3):
             # Exit immediately if another worker already failed fatally.
             if failed[0]:
                 raise RuntimeError("Aborting — another worker already failed")
 
-            # Compute resume parameters.
-            # FloodWait retry: _chunks_done > 0, so we skip ahead in the range.
-            # Fresh start / generic retry: _chunks_done == 0, full range.
-            _resume_offset = chunk_offset + _chunks_done
-            _resume_limit  = chunk_limit  - _chunks_done
-
-            if _resume_limit <= 0:
-                return  # All chunks already written — nothing left to do.
-
-            # Append to partial file on FloodWait resume; truncate on fresh start.
-            _file_mode = "ab" if _chunks_done > 0 else "wb"
-            if _chunks_done == 0:
-                open(temp_paths[idx], "wb").close()  # create / truncate
-
-            _chunks_before = _chunks_done  # to detect silent empty-response
-
             try:
-                with open(temp_paths[idx], _file_mode) as fh:
-                    async for chunk in _client.get_file(
+                open(temp_paths[idx], "wb").close()
+                with open(temp_paths[idx], "wb") as fh:
+                    async for chunk in client.get_file(
                         file_id_obj, file_size,
-                        limit=_resume_limit,
-                        offset=_resume_offset
+                        limit=chunk_limit,
+                        offset=chunk_offset
                     ):
                         fh.write(chunk)
-                        _chunks_done += 1
                         downloaded[idx] += len(chunk)
                         if progress_callback and not failed[0]:
                             now = time.time()
@@ -211,75 +168,73 @@ async def download_media_parallel(
                                 total_dl = min(sum(downloaded), file_size)
                                 if asyncio.iscoroutinefunction(progress_callback):
                                     await progress_callback(total_dl, file_size, *progress_args)
-
                 # ── Detect pyrotgfork silently swallowing FileReferenceExpired ──────
-                # get_file() catches ALL exceptions internally and logs without
-                # re-raising (client.py lines 1319-1322).  When FileReferenceExpired
-                # hits that handler the async generator exits without yielding a
-                # single byte.  Detect this by checking that this attempt produced
-                # ZERO new chunks even though chunks were expected.
-                _chunks_got = _chunks_done - _chunks_before
-                if _resume_limit > 0 and _chunks_got == 0:
+                # pyrotgfork's get_file() wraps all errors in a bare
+                #   `except Exception as e: log.exception(e)`
+                # with NO re-raise (client.py lines 1319-1322).  When
+                # FileReferenceExpired hits that handler the async generator
+                # exits without yielding a single byte, so the temp file is
+                # 0 bytes even though no exception reaches this worker.
+                temp_size = (
+                    os.path.getsize(temp_paths[idx])
+                    if os.path.exists(temp_paths[idx]) else 0
+                )
+                if file_size > 0 and temp_size == 0:
                     failed[0] = True
                     raise _FileRefSwallowedByPyrogram(
-                        f"Worker {idx}: get_file() yielded 0 chunks for a remaining "
-                        f"{_resume_limit}-chunk range — pyrotgfork swallowed an error "
-                        f"(likely FileReferenceExpired)"
+                        f"Worker {idx}: get_file() yielded no data for a "
+                        f"{file_size}-byte file — pyrotgfork swallowed "
+                        f"FileReferenceExpired"
                     )
                 return  # success
 
             except (FloodWait, FloodPremiumWait) as e:
-                # ── FLOOD: do NOT restart the range. ───────────────────────────────
-                # The old code set downloaded[idx]=0 and re-opened the file with "wb",
-                # which truncated all written data and restarted from chunk_offset.
-                # That is the root cause of the 70-80% speed-drop: one worker finishes
-                # its half, the other worker hits a FloodWait, resets, and has to
-                # re-fetch its entire range from scratch while only one worker runs.
-                #
-                # Fix: honour the wait, then resume from _chunks_done (append mode).
-                # downloaded[idx] is NOT reset — the bytes are still on disk.
+                # RETRY: Telegram rate limit — transient, honour the wait.
                 wait = e.value
-                logging.warning(
-                    f"Parallel worker {idx} FloodWait {wait}s — "
-                    f"resuming from chunk {_chunks_done}/{chunk_limit} (attempt {attempt+1}/3)"
-                )
+                logging.warning(f"Parallel worker {idx} FloodWait {wait}s (attempt {attempt+1}/3)")
                 if attempt < 2:
+                    downloaded[idx] = 0
                     await asyncio.sleep(wait)
-                    # Loop continues with _chunks_done intact → resumes mid-range.
                 else:
                     failed[0] = True
                     raise
 
             except (FileReferenceExpired, FileReferenceInvalid, _FileRefSwallowedByPyrogram):
-                # FATAL: file reference is stale (or pyrotgfork swallowed it).
+                # FATAL: file reference is stale (or pyrotgfork swallowed the
+                # error and the same stale reference would just fail again).
                 failed[0] = True
                 raise
 
             except AuthBytesInvalid:
-                # FATAL: exported auth for the file DC is invalid.
-                # Clear the cached media session so the next call creates a fresh one.
+                # FATAL: exported auth for the file DC is invalid — session is dead or
+                # cross-DC auth export failed.  Clear the cached media session so the
+                # next call creates a fresh one with new exported auth.
                 failed[0] = True
                 try:
-                    _client.media_sessions.clear()
+                    client.media_sessions.clear()
                 except Exception:
                     pass
                 raise
 
             except sqlite3.ProgrammingError:
-                # FATAL: client's in-memory SQLite storage was closed (session evicted).
+                # FATAL: the client's in-memory SQLite storage was closed while this
+                # worker was still calling get_file() — the parent session was evicted.
                 failed[0] = True
-                logging.warning(f"Parallel worker {idx}: client SQLite storage closed mid-download")
+                logging.warning(f"Parallel worker {idx}: client SQLite storage closed (session evicted mid-download)")
                 raise
 
             except Exception as e:
                 error_str = str(e)
 
-                # FATAL: intentional user cancellation.
+                # FATAL: StopProcess is intentional user cancellation — don't retry.
                 if error_str == "StopProcess":
                     failed[0] = True
                     raise
 
-                # FATAL: session connection torn down (NoneType iterable error).
+                # FATAL: "Value after * must be an iterable, not NoneType" — the
+                # Pyrogram Session's internal connection state is None because the
+                # session was torn down between the start of get_file() and this
+                # await.  Retrying against the dead session only floods the logs.
                 if "NoneType" in error_str and (
                     "iterable" in error_str or "* must be" in error_str
                 ):
@@ -287,18 +242,15 @@ async def download_media_parallel(
                     logging.warning(f"Parallel worker {idx}: session connection torn down mid-transfer")
                     raise
 
-                # FATAL: TCP transport explicitly closed.
+                # FATAL: TCP transport explicitly closed — same root cause as above.
                 if "TCPTransport" in error_str and "closed=True" in error_str:
                     failed[0] = True
                     logging.warning(f"Parallel worker {idx}: TCP transport closed mid-transfer")
                     raise
 
-                # RETRY: generic transient error — restart the full range from scratch.
-                # (Unlike FloodWait, these errors may have left the file in a
-                # partially-corrupt state, so we truncate and re-download the range.)
+                # RETRY: generic transient error (network hiccup, DC timeout, etc.)
                 if attempt < 2:
-                    logging.warning(f"Parallel worker {idx} error (attempt {attempt+1}/3): {e}, retrying from start")
-                    _chunks_done = 0
+                    logging.warning(f"Parallel worker {idx} error (attempt {attempt+1}/3): {e}, retrying")
                     downloaded[idx] = 0
                     await asyncio.sleep(1 * (attempt + 1))
                 else:

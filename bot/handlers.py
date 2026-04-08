@@ -182,13 +182,6 @@ async def send_to_dump(client, user_id, link, msg):
         
 # Session caching dictionary: {user_id: {"client": Client, "last_used": timestamp}}
 user_clients = {}
-
-# Secondary client cache — one extra Client per user, used as worker-1's client in
-# download_media_parallel so that each download worker owns a separate TCP connection
-# to the file DC instead of sharing the primary client's single media session.
-# {user_id: {"client": Client, "last_used": timestamp}}
-_secondary_user_clients = {}
-
 active_sessions = set() # Track sessions currently in use (per-item level)
 _batch_sessions = set() # Track users mid-batch — held for the entire batch duration
 _batch_session_error_flags = set() # Set when a fatal session error occurs mid-batch; signals the batch loop to abort
@@ -222,11 +215,11 @@ async def get_user_client(user_id, session_str):
         client = cached["client"]
         idle_secs = now - cached["last_used"]
 
-        # The Session layer sends PingDelayDisconnect every 5 s so the TCP socket
-        # stays alive while the Session is running.  We can safely keep a client
-        # for up to 300 s before rebuilding — this eliminates the media-session
-        # re-auth overhead for users who download files a few minutes apart.
-        if idle_secs <= 300 and client.is_connected:
+        # Telegram silently closes idle TCP sockets after ~60-120s.
+        # is_connected only checks an internal flag — it cannot detect
+        # a server-side close. Evict any client idle for over 90s so the
+        # next call always starts on a freshly opened socket.
+        if idle_secs <= 90 and client.is_connected:
             cached["last_used"] = now
             return client
 
@@ -237,13 +230,7 @@ async def get_user_client(user_id, session_str):
             cached["last_used"] = now
             return client
 
-        # Idle too long or already disconnected — tear down primary and secondary.
-        _sc = _secondary_user_clients.pop(user_id, None)
-        if _sc:
-            try:
-                await _sc["client"].stop()
-            except Exception:
-                pass
+        # Idle too long or already disconnected — tear down and rebuild.
         try:
             await client.stop()
         except Exception:
@@ -262,13 +249,6 @@ async def get_user_client(user_id, session_str):
                     await old["client"].stop()
                 except Exception:
                     pass
-            # Also evict the oldest user's secondary client
-            _sc_old = _secondary_user_clients.pop(oldest_uid, None)
-            if _sc_old:
-                try:
-                    await _sc_old["client"].stop()
-                except Exception:
-                    pass
 
     client = Client(
         f"user_{user_id}",
@@ -276,7 +256,7 @@ async def get_user_client(user_id, session_str):
         api_id=API_ID,
         api_hash=API_HASH,
         in_memory=True,
-        sleep_threshold=0,
+        sleep_threshold=30,
         no_updates=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
@@ -289,50 +269,6 @@ async def get_user_client(user_id, session_str):
         asyncio.create_task(cleanup_user_clients())
         _cleanup_task_started = True
     return client
-
-async def get_secondary_user_client(user_id, session_str):
-    """Acquire or reuse a second Client for the same user session.
-
-    Used exclusively as worker-1's client in download_media_parallel.
-    Each parallel download worker owns a separate TCP connection to the file
-    DC (its own Session object), bypassing the single-socket bottleneck.
-
-    max_concurrent_transmissions=1: only one get_file() runs on this client
-    at a time, which is exactly what a single worker needs.
-    sleep_threshold=0: all FloodWaits propagate up immediately so handlers
-    can show the user a clear status message instead of silent stalls.
-    """
-    now = time.time()
-    if user_id in _secondary_user_clients:
-        cached = _secondary_user_clients[user_id]
-        sc = cached["client"]
-        idle_secs = now - cached["last_used"]
-        if idle_secs <= 300 and sc.is_connected:
-            cached["last_used"] = now
-            return sc
-        # Stale or disconnected — tear it down and rebuild.
-        try:
-            await sc.stop()
-        except Exception:
-            pass
-        del _secondary_user_clients[user_id]
-
-    sc = Client(
-        f"user_{user_id}_b",
-        session_string=session_str,
-        api_id=API_ID,
-        api_hash=API_HASH,
-        in_memory=True,
-        sleep_threshold=0,
-        no_updates=True,
-        no_joined_notifications=True,
-        max_message_cache_size=10,
-        max_concurrent_transmissions=1,
-    )
-    await sc.start()
-    _secondary_user_clients[user_id] = {"client": sc, "last_used": now}
-    return sc
-
 
 async def cleanup_user_clients():
     global _cleanup_cycle
@@ -357,26 +293,6 @@ async def cleanup_user_clients():
             if data:
                 try:
                     await data["client"].stop()
-                except Exception:
-                    pass
-            # Always evict secondary when primary is evicted.
-            sc_data = _secondary_user_clients.pop(user_id, None)
-            if sc_data:
-                try:
-                    await sc_data["client"].stop()
-                except Exception:
-                    pass
-
-        # ── 1b. Secondary client idle eviction (independent TTL: 600s) ───────
-        sc_remove = [
-            uid for uid, d in _secondary_user_clients.items()
-            if now - d["last_used"] > 600 and uid not in active_sessions
-        ]
-        for uid in sc_remove:
-            sc_data = _secondary_user_clients.pop(uid, None)
-            if sc_data:
-                try:
-                    await sc_data["client"].stop()
                 except Exception:
                     pass
 
@@ -856,14 +772,9 @@ async def batch_handler(client, message):
                     pass
                 return
 
-            # Inter-item delay — private links use the user's own session so a
-            # shorter pause is safe.  Public links go through the shared bot
-            # client which has stricter shared rate-limits, so keep the longer gap.
+            # Smart inter-item delay: 4–7s after each item to stay well under Telegram limits
             if idx < count:
-                if link_type in ("private", "private_topic", "private_story"):
-                    await asyncio.sleep(random.uniform(1.5, 2.5))
-                else:
-                    await asyncio.sleep(random.uniform(4, 7))
+                await asyncio.sleep(random.uniform(4, 7))
 
         try:
             await batch_status.edit_text(
@@ -1037,11 +948,7 @@ async def mlinks_handler(client, message):
                 return
 
             if idx < count:
-                # Users with a session use their own account rate-limits; a shorter
-                # delay is safe.  Users without a session fall back to the shared bot
-                # client, so keep the conservative gap.
-                _has_session = bool(user.get("phone_session_string")) if user else False
-                await asyncio.sleep(random.uniform(1.5, 2.5) if _has_session else random.uniform(4, 7))
+                await asyncio.sleep(random.uniform(4, 7))
 
         try:
             await batch_status.edit_text(
@@ -1371,12 +1278,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 await stale["client"].stop()
                             except Exception:
                                 pass
-                        sc_stale = _secondary_user_clients.pop(user_id, None)
-                        if sc_stale:
-                            try:
-                                await sc_stale["client"].stop()
-                            except Exception:
-                                pass
                         if _fetch_attempt < 3:
                             session_str = user.get("phone_session_string") if user else None
                             if session_str:
@@ -1403,12 +1304,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         await client_data["client"].stop()
                                     except:
                                         pass
-                            sc_stale = _secondary_user_clients.pop(user_id, None)
-                            if sc_stale:
-                                try:
-                                    await sc_stale["client"].stop()
-                                except:
-                                    pass
                             # Signal the batch loop to abort so remaining items don't all hit the same error
                             if user_id in _batch_sessions:
                                 _batch_session_error_flags.add(user_id)
@@ -1658,7 +1553,7 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                 for _msg_idx, current_msg in enumerate(target_messages):
                     if _msg_idx > 0:
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(0.5)
                     path = None
                     thumb_path = None
                     safe_caption = ""
@@ -1726,17 +1621,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                             orig_file_name = getattr(current_msg.audio, "file_name", None)
                         has_spoiler = getattr(current_msg, "has_media_spoiler", None)
 
-                        # Try to get a secondary client so each download worker
-                        # gets its own TCP socket to the file DC, doubling throughput.
-                        _dl_secondary_client = None
-                        if user_client is not client:
-                            _dl_ph_session = user.get("phone_session_string") if user else None
-                            if _dl_ph_session:
-                                try:
-                                    _dl_secondary_client = await get_secondary_user_client(user_id, _dl_ph_session)
-                                except Exception as _sc_err:
-                                    logging.debug(f"Secondary client unavailable for {user_id}: {_sc_err}")
-
                         for _dl_attempt in range(2):
                             try:
                                 path = await asyncio.wait_for(
@@ -1744,7 +1628,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         user_client,
                                         current_msg,
                                         num_workers=2,
-                                        extra_clients=[_dl_secondary_client] if _dl_secondary_client else None,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
@@ -1753,7 +1636,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 break
                             except (FloodWait, FloodPremiumWait) as e:
                                 logging.warning(f"FloodWait on download: {e.value}s")
-                                await update_status(status_msg, f"⏳ Telegram rate limit — auto-resuming in {e.value}s...")
                                 await asyncio.sleep(e.value)
                             except asyncio.TimeoutError:
                                 logging.error(f"Download stuck/timed out (45 min) for user {user_id}, msg {current_msg.id} — aborting")
@@ -1762,20 +1644,12 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 break
                             except (ConnectionError, OSError, TimeoutError) as e:
                                 logging.warning(f"TCP error during download for user {user_id} (attempt {_dl_attempt + 1}): {e}")
-                                # Evict both primary and secondary — both TCP sockets are dead.
                                 stale = user_clients.pop(user_id, None)
                                 if stale:
                                     try:
                                         await stale["client"].stop()
                                     except Exception:
                                         pass
-                                sc_stale = _secondary_user_clients.pop(user_id, None)
-                                if sc_stale:
-                                    try:
-                                        await sc_stale["client"].stop()
-                                    except Exception:
-                                        pass
-                                _dl_secondary_client = None
                                 if _dl_attempt < 1:
                                     session_str_dl = user.get("phone_session_string") if user else None
                                     if session_str_dl:
@@ -1813,13 +1687,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         await stale["client"].stop()
                                     except Exception:
                                         pass
-                                sc_stale = _secondary_user_clients.pop(user_id, None)
-                                if sc_stale:
-                                    try:
-                                        await sc_stale["client"].stop()
-                                    except Exception:
-                                        pass
-                                _dl_secondary_client = None
                                 if _dl_attempt < 1:
                                     session_str_dl = user.get("phone_session_string") if user else None
                                     if session_str_dl:
@@ -1882,10 +1749,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                                 if client_data:
                                     try: await client_data["client"].stop()
                                     except: pass
-                            sc_stale = _secondary_user_clients.pop(user_id, None)
-                            if sc_stale:
-                                try: await sc_stale["client"].stop()
-                                except: pass
                             await update_status(status_msg, "❌ Session expired. Please /login again.")
                             return None
 
@@ -1922,12 +1785,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                             if stale:
                                 try:
                                     await stale["client"].stop()
-                                except Exception:
-                                    pass
-                            sc_stale = _secondary_user_clients.pop(user_id, None)
-                            if sc_stale:
-                                try:
-                                    await sc_stale["client"].stop()
                                 except Exception:
                                     pass
                             continue
@@ -1995,12 +1852,6 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await client_data["client"].stop()
                     except:
                         pass
-            sc_stale = _secondary_user_clients.pop(user_id, None)
-            if sc_stale:
-                try:
-                    await sc_stale["client"].stop()
-                except:
-                    pass
             # Signal the batch loop to abort so remaining items don't all hit the same error
             if user_id in _batch_sessions:
                 _batch_session_error_flags.add(user_id)
