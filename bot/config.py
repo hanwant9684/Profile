@@ -59,7 +59,7 @@ async def get_dump_channel_id():
     return os.environ.get("DUMP_CHANNEL_ID")
 
 # Performance Settings
-MAX_CONCURRENT_DOWNLOADS = 20
+MAX_CONCURRENT_DOWNLOADS = 10
 
 active_downloads = set()
 cancel_flags = set()       # Cancels the current single download item (used by /cancel)
@@ -107,6 +107,6 @@ app = Client(
     no_updates=False,
     skip_updates=True,
     fetch_replies=0,
-    max_concurrent_transmissions=20,
-    workers=20
+    max_concurrent_transmissions=10,
+    workers=10
 )
