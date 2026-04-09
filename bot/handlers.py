@@ -700,6 +700,10 @@ async def batch_handler(client, message):
                 )
                 return
 
+            # Inter-item delay: pause before every item except the first
+            if idx > 1:
+                await asyncio.sleep(5)
+
             if link_type == "private_story":
                 link = f"https://t.me/c/{channel_part}/s/{msg_id}"
             elif link_type == "public_story":
@@ -778,10 +782,6 @@ async def batch_handler(client, message):
                 except Exception:
                     pass
                 return
-
-            # Smart inter-item delay: 4–7s after each item to stay well under Telegram limits
-            if idx < count:
-                await asyncio.sleep(random.uniform(4, 7))
 
         try:
             await batch_status.edit_text(
@@ -906,6 +906,10 @@ async def mlinks_handler(client, message):
                     pass
                 return
 
+            # Inter-item delay: pause before every item except the first
+            if idx > 1:
+                await asyncio.sleep(5)
+
             try:
                 await batch_status.edit_text(
                     f"📥 **Downloading** — link {idx}/{count}\n\n"
@@ -967,9 +971,6 @@ async def mlinks_handler(client, message):
                 except Exception:
                     pass
                 return
-
-            if idx < count:
-                await asyncio.sleep(random.uniform(4, 7))
 
         try:
             await batch_status.edit_text(
