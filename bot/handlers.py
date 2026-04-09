@@ -1098,6 +1098,7 @@ async def download_handler(client, message, link_override=None, processed_albums
     is_group = False
     is_story = False
     _pending_comment_resolve = None  # (temp_channel, comment_id) when bot couldn't resolve linked chat
+    _topic_filter = None  # set for topic links — messages not in this topic are skipped
 
     if private_story_match:
         chat_id = int("-100" + private_story_match.group(1))
@@ -1171,11 +1172,13 @@ async def download_handler(client, message, link_override=None, processed_albums
     elif topic_match:
         chat_id = int("-100" + topic_match.group(1))
         message_id = int(topic_match.group(3))
+        _topic_filter = int(topic_match.group(2))
         is_private = True
         is_group = True
     elif public_topic_match:
         chat_id = public_topic_match.group(1)
         message_id = int(public_topic_match.group(3))
+        _topic_filter = int(public_topic_match.group(2))
         is_group = True
     elif private_match:
         chat_id = int("-100" + private_match.group(1))
@@ -1361,6 +1364,21 @@ async def download_handler(client, message, link_override=None, processed_albums
                 if msg is None:
                     await update_status(status_msg, "❌ Failed to fetch message after multiple attempts due to rate limits. Please try again later.")
                     return None
+
+                # Topic filter: skip messages that don't belong to the expected topic.
+                # In Telegram forum groups, message IDs are global across the whole group —
+                # iterating IDs 161, 162, 163... will hit messages from OTHER topics too.
+                # msg.message_thread_id tells us which topic this message actually belongs to.
+                if _topic_filter is not None:
+                    msg_thread = getattr(msg, "message_thread_id", None)
+                    if msg_thread != _topic_filter:
+                        logging.debug(f"Skipping msg {message_id}: belongs to topic {msg_thread}, expected {_topic_filter}")
+                        if status_msg_override is None:
+                            try:
+                                await status_msg.delete()
+                            except Exception:
+                                pass
+                        return None
 
                 if not msg or (not getattr(msg, "media", None) and not getattr(msg, "text", None) and type(msg).__name__ != "Story"):
                     await update_status(status_msg, "❌ No content found in link.")
