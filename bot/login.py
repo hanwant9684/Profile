@@ -91,7 +91,7 @@ async def login_start(client, message):
         "⏳ This session will expire in 5 minutes if no activity is detected."
     )
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "stats", "killall"]) & ~filters.regex(r"https://t\.me/"))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "mlinks", "stats", "killall", "premium_users"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:

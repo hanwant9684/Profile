@@ -22,7 +22,8 @@ from pyrogram.errors.exceptions.bad_request_400 import (
 )
 from bot.config import (
     app, API_ID, API_HASH, active_downloads, global_download_semaphore,
-    OWNER_ID, cancel_flags, batch_cancel_flags, login_states
+    OWNER_ID, cancel_flags, batch_cancel_flags, login_states,
+    SUPPORT_CHAT_LINK, OWNER_USERNAME
 )
 
 MAX_FLOODWAIT_TOLERATE = 60
@@ -536,10 +537,11 @@ async def help_command(client, message):
         "📦 **Batch**\n"
         "Format: `/batch start_link end_link` (Max 50, Premium only)\n\n"
         "🔗 **Multi-link**\n"
-        "Format: `/mlinks` then paste up to 50 links, one per line\n\n"
+        "Format: `/mlinks` then paste up to 50 links, one per line\n"
+        "Links can be from **different channels** — mix any public or private channels freely\n\n"
         "💰 **Quota**\n"
-        "Free users: 5 files/day\n"
-        "Premium users: Unlimited"
+        "Free users: 5 files/day · 15 files/month\n"
+        "Premium users: Unlimited — no cooldown, no limits"
     )
     await message.reply(help_text, reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url=f"https://t.me/Wolfy0046")],
@@ -557,7 +559,11 @@ async def batch_handler(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
     if not user or user.get('role', 'free') == 'free':
-        await message.reply("❌ Batch command is for Premium users only.")
+        await message.reply(
+            "❌ **Batch download is for Premium users only.**\n\n"
+            "💎 With Premium you can batch up to **50 files at once** from any channel — no cooldown, no daily or monthly limits.\n\n"
+            "👉 Use /upgrade to see plans and get Premium."
+        )
         return
 
     # FloodWait cooldown guard
@@ -726,7 +732,8 @@ async def batch_handler(client, message):
                         link_override=link,
                         processed_albums=processed_albums,
                         status_msg_override=batch_status,
-                        prefetched_msgs=prefetched_msgs
+                        prefetched_msgs=prefetched_msgs,
+                        skip_quota_check=True,
                     )
                     if result is not None:
                         done += 1
@@ -798,6 +805,17 @@ async def mlinks_handler(client, message):
     https://t.me/...
     https://t.me/...
     """
+    # Show usage if no links were included in the command message
+    if not re.search(r"https?://(?:t|telegram)\.me/\S+|tg://resolve\S+", message.text or ""):
+        await message.reply(
+            "❌ Usage: `/mlinks` followed by up to 50 links, one per line:\n\n"
+            "`/mlinks`\n"
+            "`https://t.me/channel/123`\n"
+            "`https://t.me/channel/456`\n\n"
+            "Links can be from different channels — mix any public or private channels freely."
+        )
+        return
+
     user_id = message.from_user.id
     user = await get_user(user_id)
 
@@ -810,8 +828,9 @@ async def mlinks_handler(client, message):
     is_privileged = user and user.get("role") in ("premium", "admin", "owner")
     if not is_owner and not is_privileged:
         await message.reply(
-            "❌ **This command is for Premium users only.**\n\n"
-            "Contact the owner to upgrade your account."
+            "❌ **Multi-link download is for Premium users only.**\n\n"
+            "💎 With Premium you can download up to **50 links at once** from any mix of channels — no cooldown, no daily or monthly limits.\n\n"
+            "👉 Use /upgrade to see plans and get Premium."
         )
         return
 
@@ -836,10 +855,11 @@ async def mlinks_handler(client, message):
             "❌ **No links found.**\n\n"
             "📖 **Usage** — send `/mlinks` with your links on the lines below:\n\n"
             "`/mlinks`\n"
-            "`https://t.me/channel/123`\n"
-            "`https://t.me/channel/456?single`\n"
+            "`https://t.me/channelA/123`\n"
+            "`https://t.me/channelB/456`\n"
             "`https://t.me/c/1234567890/789`\n\n"
             "• Up to **50 links** per command\n"
+            "• Links can be from **different channels** — mix public, private, and restricted channels freely\n"
             "• Supports public & private links\n"
             "• `?single` is handled automatically"
         )
@@ -903,6 +923,7 @@ async def mlinks_handler(client, message):
                         link_override=link,
                         processed_albums=processed_albums,
                         status_msg_override=batch_status,
+                        skip_quota_check=True,
                     )
                     if result is not None:
                         done += 1
@@ -989,7 +1010,7 @@ async def cancelbatch_handler(client, message):
         await message.reply("ℹ️ No active batch to cancel.")
 
 @app.on_message(filters.regex(r"https?://t\.me/|https?://telegram\.me/|tg://resolve") & filters.private)
-async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None):
+async def download_handler(client, message, link_override=None, processed_albums=None, status_msg_override=None, prefetched_msgs: dict = None, skip_quota_check: bool = False):
     user_id = message.from_user.id
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
@@ -1043,7 +1064,11 @@ async def download_handler(client, message, link_override=None, processed_albums
             _wait_mins = int(_wait // 60)
             _wait_secs = int(_wait % 60)
             _wait_str = f"{_wait_mins}m {_wait_secs}s" if _wait_mins > 0 else f"{_wait_secs}s"
-            await message.reply(f"⏳ Please wait **{_wait_str}** before sending another request.")
+            await message.reply(
+                f"⏳ **Please wait {_wait_str}** before sending another request.\n\n"
+                f"💎 **Premium users skip this wait entirely** — unlimited downloads with no cooldown.\n\n"
+                f"👉 Use /upgrade to see plans and get Premium."
+            )
             return
         _user_last_request[user_id] = _now
 
@@ -1356,14 +1381,15 @@ async def download_handler(client, message, link_override=None, processed_albums
                     target_messages = [msg]
                     is_media_group = False
 
-                can_download, quota_status = await check_and_update_quota(user_id)
+                if not skip_quota_check:
+                    can_download, quota_status = await check_and_update_quota(user_id)
 
-                if not can_download:
-                    await update_status(status_msg, f"❌ {quota_status}")
-                    return None
+                    if not can_download:
+                        await update_status(status_msg, f"❌ {quota_status}")
+                        return None
 
-                if user and user.get("role") == "free":
-                    await increment_quota(user_id, len(target_messages))
+                    if user and user.get("role") == "free":
+                        await increment_quota(user_id, len(target_messages))
 
                 if not is_private and not is_group and not is_story:
                     try:

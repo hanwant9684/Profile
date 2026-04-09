@@ -6,7 +6,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
-from bot.config import OWNER_ID
+from bot.config import OWNER_ID, SUPPORT_CHAT_LINK
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,6 +93,8 @@ async def init_db():
                     role TEXT DEFAULT 'free',
                     downloads_today INTEGER DEFAULT 0,
                     last_download_date DATE,
+                    downloads_this_month INTEGER DEFAULT 0,
+                    last_download_month DATE,
                     is_agreed_terms BOOLEAN DEFAULT FALSE,
                     phone_session_string TEXT,
                     download_channel_id TEXT,
@@ -109,6 +111,8 @@ async def init_db():
             try:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS downloads_this_month INTEGER DEFAULT 0")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_download_month DATE")
             except Exception as e:
                 logger.info(f"Migration notice (likely columns already exist): {e}")
 
@@ -154,6 +158,8 @@ async def get_user(user_id) -> Optional[Dict]:
                 user['updated_at'] = user['updated_at'].isoformat()
             if user.get('last_download_date'):
                 user['last_download_date'] = user['last_download_date'].isoformat()
+            if user.get('last_download_month'):
+                user['last_download_month'] = user['last_download_month'].isoformat()
             if user.get('last_ad_date'):
                 user['last_ad_date'] = user['last_ad_date'].isoformat()
 
@@ -291,6 +297,9 @@ async def ban_user(user_id, is_banned=True):
         logger.error(f"Error banning user {user_id}: {e}")
 
 
+DAILY_LIMIT = 5
+MONTHLY_LIMIT = 15
+
 async def check_and_update_quota(user_id):
     try:
         user = await get_user(user_id)
@@ -302,6 +311,7 @@ async def check_and_update_quota(user_id):
 
         now = datetime.now()
         today = now.date()
+        this_month_first = today.replace(day=1)
 
         if user.get("role") == 'premium' and user.get("premium_expiry_date"):
             try:
@@ -328,21 +338,57 @@ async def check_and_update_quota(user_id):
         if user.get("role") in ['premium', 'admin', 'owner']:
             return True, "Unlimited"
 
+        # Determine what needs resetting (daily and/or monthly) — do it in one query
         last_download_date = None
         if user.get("last_download_date"):
             last_download_date = datetime.fromisoformat(user["last_download_date"]).date()
 
-        if last_download_date != today:
+        last_download_month = None
+        if user.get("last_download_month"):
+            last_download_month = datetime.fromisoformat(user["last_download_month"]).date()
+
+        new_day = last_download_date != today
+        new_month = last_download_month != this_month_first
+
+        if new_day or new_month:
+            reset_daily = new_day
+            reset_monthly = new_month
             async with pool.acquire() as conn:
-                await conn.execute('UPDATE users SET downloads_today = 0, last_download_date = $1 WHERE telegram_id = $2',
-                                   today, int(user_id))
+                await conn.execute(
+                    '''UPDATE users SET
+                        downloads_today = CASE WHEN $1 THEN 0 ELSE downloads_today END,
+                        last_download_date = CASE WHEN $1 THEN $3 ELSE last_download_date END,
+                        downloads_this_month = CASE WHEN $2 THEN 0 ELSE downloads_this_month END,
+                        last_download_month = CASE WHEN $2 THEN $4 ELSE last_download_month END
+                       WHERE telegram_id = $5''',
+                    reset_daily, reset_monthly, today, this_month_first, int(user_id)
+                )
             await _redis_del(f"user:{user_id}")
-            user["downloads_today"] = 0
+            if reset_daily:
+                user["downloads_today"] = 0
+            if reset_monthly:
+                user["downloads_this_month"] = 0
 
-        if user.get("downloads_today", 0) >= 5:
-            return False, "Daily limit reached (5/5). Upgrade to Premium for unlimited downloads. use /upgrade"
+        downloads_today = user.get("downloads_today", 0)
+        downloads_this_month = user.get("downloads_this_month", 0)
 
-        return True, f"{user.get('downloads_today', 0)}/5"
+        if downloads_this_month >= MONTHLY_LIMIT:
+            return False, (
+                f"📵 Monthly limit reached ({downloads_this_month}/{MONTHLY_LIMIT} files used this month).\n\n"
+                f"💎 Upgrade to **Premium** for unlimited downloads with no daily or monthly limits.\n"
+                f"👉 Use /upgrade to see plans and get Premium."
+            )
+
+        if downloads_today >= DAILY_LIMIT:
+            remaining_month = max(0, MONTHLY_LIMIT - downloads_this_month)
+            return False, (
+                f"⏰ Daily limit reached ({DAILY_LIMIT}/{DAILY_LIMIT} files today). "
+                f"{remaining_month} download{'s' if remaining_month != 1 else ''} left this month.\n\n"
+                f"💎 Upgrade to **Premium** — no waiting, no daily or monthly limits.\n"
+                f"👉 Use /upgrade to see plans and get Premium."
+            )
+
+        return True, f"{downloads_today}/{DAILY_LIMIT} today · {downloads_this_month}/{MONTHLY_LIMIT} this month"
     except Exception as e:
         logger.error(f"Error checking quota for {user_id}: {e}")
         return False, "Database error."
@@ -354,9 +400,19 @@ async def increment_quota(user_id, count=1):
         if not user or user.get("role") != 'free':
             return
 
+        today = datetime.now().date()
+        this_month_first = today.replace(day=1)
+
         async with pool.acquire() as conn:
-            await conn.execute('UPDATE users SET downloads_today = downloads_today + $1 WHERE telegram_id = $2',
-                               count, int(user_id))
+            await conn.execute(
+                '''UPDATE users SET
+                    downloads_today = downloads_today + $1,
+                    last_download_date = $2,
+                    downloads_this_month = downloads_this_month + $1,
+                    last_download_month = $3
+                   WHERE telegram_id = $4''',
+                count, today, this_month_first, int(user_id)
+            )
         await _redis_del(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error incrementing quota for {user_id}: {e}")
@@ -411,16 +467,25 @@ async def get_remaining_quota(user_id):
             return 999999, True
 
         today = datetime.now().date()
-        downloads_today = user.get("downloads_today", 0)
+        this_month_first = today.replace(day=1)
 
+        downloads_today = user.get("downloads_today", 0)
         last_download_date = None
         if user.get("last_download_date"):
             last_download_date = datetime.fromisoformat(user["last_download_date"]).date()
-
         if last_download_date != today:
             downloads_today = 0
 
-        remaining = max(0, 5 - downloads_today)
+        downloads_this_month = user.get("downloads_this_month", 0)
+        last_download_month = None
+        if user.get("last_download_month"):
+            last_download_month = datetime.fromisoformat(user["last_download_month"]).date()
+        if last_download_month != this_month_first:
+            downloads_this_month = 0
+
+        remaining_daily = max(0, DAILY_LIMIT - downloads_today)
+        remaining_monthly = max(0, MONTHLY_LIMIT - downloads_this_month)
+        remaining = min(remaining_daily, remaining_monthly)
         return remaining, False
     except Exception as e:
         logger.error(f"Error getting remaining quota for {user_id}: {e}")
