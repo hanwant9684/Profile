@@ -535,7 +535,9 @@ async def help_command(client, message):
         "Just send any Telegram link (public or private) to download.\n"
         "For private links, you must /login first.\n\n"
         "📦 **Batch**\n"
-        "Format: `/batch start_link end_link` (Max 50, Premium only)\n\n"
+        "Format 1: `/batch start_link end_link` (download from start to end)\n"
+        "Format 2: `/batch start_link 50` (download 50 files from start link)\n"
+        "Max 50 files per batch · Premium only\n\n"
         "🔗 **Multi-link**\n"
         "Format: `/mlinks` then paste up to 50 links, one per line\n"
         "Links can be from **different channels** — mix any public or private channels freely\n\n"
@@ -553,7 +555,11 @@ async def help_command(client, message):
 async def batch_handler(client, message):
     parts = message.text.split()
     if len(parts) < 3:
-        await message.reply("❌ Usage: `/batch start_link end_link`")
+        await message.reply(
+            "❌ **Usage:**\n"
+            "`/batch start_link end_link` — download from start to end\n"
+            "`/batch start_link 50` — download 50 files starting from start link"
+        )
         return
 
     user_id = message.from_user.id
@@ -574,69 +580,79 @@ async def batch_handler(client, message):
         return
 
     start_link = parts[1]
-    end_link = parts[2]
+    second_arg = parts[2]
+
+    # Detect if second argument is a count (number) or an end link
+    count_mode = second_arg.isdigit()
+    if count_mode:
+        requested_count = int(second_arg)
+        if requested_count < 1 or requested_count > 50:
+            await message.reply("⚠️ Count must be between 1 and 50.")
+            return
+        end_link = start_link  # placeholder — end_id computed from count below
+    else:
+        end_link = second_arg
+        requested_count = None
 
     # Story links: t.me/c/CHANNEL/s/ID  or  t.me/USERNAME/s/ID
-    # Must be checked first — the /s/ segment is not digits so it won't collide with
-    # any plain-message pattern, but checking early keeps the logic explicit.
     start_private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", start_link)
-    end_private_story_match   = re.search(r"t\.me/c/(\d+)/s/(\d+)", end_link)
     start_public_story_match  = re.search(r"t\.me/(?!c/)([^/]+)/s/(\d+)", start_link)
-    end_public_story_match    = re.search(r"t\.me/(?!c/)([^/]+)/s/(\d+)", end_link)
 
-    # Topic links: t.me/c/CHANNEL/TOPIC/MSG  — must be checked before the plain 2-segment pattern
-    start_topic_match = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", start_link)
-    end_topic_match   = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", end_link)
-
-    # Public topic links: t.me/USERNAME/TOPIC/MSG
+    # Topic links: t.me/c/CHANNEL/TOPIC/MSG
+    start_topic_match     = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", start_link)
     start_pub_topic_match = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)/(\d+)", start_link)
-    end_pub_topic_match   = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)/(\d+)", end_link)
 
     # Plain private/public links (no topic)
     start_match = re.search(r"t\.me/c/(\d+)/(\d+)", start_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", start_link)
-    end_match   = re.search(r"t\.me/c/(\d+)/(\d+)", end_link)   or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
 
-    # Determine link type and extract the correct message ID from each link
-    if start_private_story_match and end_private_story_match:
-        # Private story: t.me/c/CHANNEL/s/ID
+    # End-link matches — only needed when not in count_mode
+    if not count_mode:
+        end_private_story_match = re.search(r"t\.me/c/(\d+)/s/(\d+)", end_link)
+        end_public_story_match  = re.search(r"t\.me/(?!c/)([^/]+)/s/(\d+)", end_link)
+        end_topic_match         = re.search(r"t\.me/c/(\d+)/(\d+)/(\d+)", end_link)
+        end_pub_topic_match     = re.search(r"t\.me/(?!c/)([^/]+)/(\d+)/(\d+)", end_link)
+        end_match               = re.search(r"t\.me/c/(\d+)/(\d+)", end_link) or re.search(r"t\.me/(?!c/)([^/]+)/(\d+)", end_link)
+    else:
+        end_private_story_match = end_public_story_match = None
+        end_topic_match = end_pub_topic_match = end_match = None
+
+    # Determine link type, extract start_id, compute end_id
+    if start_private_story_match and (count_mode or end_private_story_match):
         link_type    = "private_story"
         channel_part = start_private_story_match.group(1)
         topic_part   = None
         start_id = int(start_private_story_match.group(2))
-        end_id   = int(end_private_story_match.group(2))
-    elif start_public_story_match and end_public_story_match:
-        # Public story: t.me/USERNAME/s/ID
+        end_id   = start_id + requested_count - 1 if count_mode else int(end_private_story_match.group(2))
+    elif start_public_story_match and (count_mode or end_public_story_match):
         link_type    = "public_story"
         channel_part = start_public_story_match.group(1)
         topic_part   = None
         start_id = int(start_public_story_match.group(2))
-        end_id   = int(end_public_story_match.group(2))
-    elif start_topic_match and end_topic_match:
-        # Private topic: t.me/c/CHANNEL/TOPIC/MSG
-        link_type = "private_topic"
+        end_id   = start_id + requested_count - 1 if count_mode else int(end_public_story_match.group(2))
+    elif start_topic_match and (count_mode or end_topic_match):
+        link_type    = "private_topic"
         channel_part = start_topic_match.group(1)
-        topic_part    = start_topic_match.group(2)
+        topic_part   = start_topic_match.group(2)
         start_id = int(start_topic_match.group(3))
-        end_id   = int(end_topic_match.group(3))
-    elif start_pub_topic_match and end_pub_topic_match:
-        # Public topic: t.me/USERNAME/TOPIC/MSG
-        link_type = "public_topic"
+        end_id   = start_id + requested_count - 1 if count_mode else int(end_topic_match.group(3))
+    elif start_pub_topic_match and (count_mode or end_pub_topic_match):
+        link_type    = "public_topic"
         channel_part = start_pub_topic_match.group(1)
-        topic_part    = start_pub_topic_match.group(2)
+        topic_part   = start_pub_topic_match.group(2)
         start_id = int(start_pub_topic_match.group(3))
-        end_id   = int(end_pub_topic_match.group(3))
-    elif start_match and end_match:
-        # Plain private or public link
+        end_id   = start_id + requested_count - 1 if count_mode else int(end_pub_topic_match.group(3))
+    elif start_match and (count_mode or end_match):
         link_type    = "private" if "t.me/c/" in start_link else "public"
         channel_part = start_match.group(1)
         topic_part   = None
         start_id = int(start_match.group(2))
-        end_id   = int(end_match.group(2))
+        end_id   = start_id + requested_count - 1 if count_mode else int(end_match.group(2))
     else:
-        await message.reply("❌ Invalid links provided.")
+        await message.reply("❌ Invalid link or format provided.")
         return
 
-    if start_id > end_id:
+    # In end_link mode allow reversed order; count_mode always goes forward
+    if not count_mode and start_id > end_id:
         start_id, end_id = end_id, start_id
 
     count = end_id - start_id + 1
@@ -700,10 +716,6 @@ async def batch_handler(client, message):
                 )
                 return
 
-            # Inter-item delay: pause before every item except the first
-            if idx > 1:
-                await asyncio.sleep(5)
-
             if link_type == "private_story":
                 link = f"https://t.me/c/{channel_part}/s/{msg_id}"
             elif link_type == "public_story":
@@ -729,6 +741,7 @@ async def batch_handler(client, message):
 
             # Retry this item up to 3 times (handles FloodWait inside download_handler)
             item_done = False
+            item_had_media = False
             for attempt in range(3):
                 try:
                     result = await download_handler(
@@ -741,6 +754,7 @@ async def batch_handler(client, message):
                     )
                     if result is not None:
                         done += 1
+                        item_had_media = True
                     else:
                         skipped += 1
                     item_done = True
@@ -782,6 +796,18 @@ async def batch_handler(client, message):
                 except Exception:
                     pass
                 return
+
+            # Inter-item delay: only when the current item actually had media and was
+            # fully downloaded + uploaded. Items with no media are skipped instantly.
+            if idx < count and item_had_media:
+                try:
+                    await batch_status.edit_text(
+                        f"⏸️ **Item {idx}/{count} done** — waiting 5s before next...\n\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped}"
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
 
         try:
             await batch_status.edit_text(
@@ -906,10 +932,6 @@ async def mlinks_handler(client, message):
                     pass
                 return
 
-            # Inter-item delay: pause before every item except the first
-            if idx > 1:
-                await asyncio.sleep(5)
-
             try:
                 await batch_status.edit_text(
                     f"📥 **Downloading** — link {idx}/{count}\n\n"
@@ -920,6 +942,7 @@ async def mlinks_handler(client, message):
                 pass
 
             item_done = False
+            item_had_media = False
             for attempt in range(3):
                 try:
                     result = await download_handler(
@@ -931,6 +954,7 @@ async def mlinks_handler(client, message):
                     )
                     if result is not None:
                         done += 1
+                        item_had_media = True
                     else:
                         skipped += 1
                     item_done = True
@@ -971,6 +995,18 @@ async def mlinks_handler(client, message):
                 except Exception:
                     pass
                 return
+
+            # Inter-item delay: only when the current item actually had media and was
+            # fully downloaded + uploaded. Items with no media are skipped instantly.
+            if idx < count and item_had_media:
+                try:
+                    await batch_status.edit_text(
+                        f"⏸️ **Link {idx}/{count} done** — waiting 5s before next...\n\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped}"
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
 
         try:
             await batch_status.edit_text(
