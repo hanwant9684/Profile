@@ -677,30 +677,11 @@ async def batch_handler(client, message):
     done = 0
     skipped = 0
 
-    # ── Batch pre-fetch: get all messages in one API call instead of N calls ──
-    # This turns N serial get_messages(replies=0) calls into a single batched call,
-    # which is the biggest latency win for batch mode.
-    # Stories are excluded — they must be fetched individually via get_stories().
+    # Pre-fetch deliberately disabled: a single bulk get_messages([id×50]) call
+    # triggers Telegram's IP-level rate limiter (~10 000s FloodWait) which then
+    # blocks every user on the same VPS for ~3 hours.  Each item is fetched
+    # individually inside download_handler instead.
     prefetched_msgs: dict = {}
-    session_str_batch = user.get("phone_session_string") if user else None
-    if session_str_batch and link_type not in ("public_story", "private_story"):
-        if link_type in ("private", "private_topic"):
-            _batch_chat_id = int("-100" + channel_part)
-        else:
-            _batch_chat_id = channel_part
-        try:
-            _batch_client = await get_user_client(user_id, session_str_batch)
-            _all_ids = list(range(start_id, end_id + 1))
-            _fetched = await _batch_client.get_messages(_batch_chat_id, _all_ids, replies=0)
-            if not isinstance(_fetched, list):
-                _fetched = [_fetched]
-            for _m in _fetched:
-                if _m and getattr(_m, "id", None):
-                    prefetched_msgs[_m.id] = _m
-            logging.info(f"Batch pre-fetch: {len(prefetched_msgs)}/{count} messages fetched for user {user_id}")
-        except Exception as _pf_err:
-            logging.warning(f"Batch pre-fetch failed (falling back to per-item fetch): {_pf_err}")
-            prefetched_msgs = {}
 
     # Hold the session guard for the entire batch so the cleanup loop
     # never evicts this user's Pyrogram client during inter-item sleeps
