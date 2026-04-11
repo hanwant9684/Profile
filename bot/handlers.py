@@ -1330,6 +1330,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         wait_secs = e.value
                         logging.warning(f"FloodWait on get_messages: {wait_secs}s for user {user_id} (attempt {_fetch_attempt + 1})")
                         if wait_secs > MAX_FLOODWAIT_TOLERATE:
+                            _user_floodwait_until[user_id] = time.time() + wait_secs
                             await update_status(status_msg, f"⏳ Telegram rate limit is too high ({wait_secs}s). Please try again later.")
                             return None
                         await update_status(status_msg, f"⏳ Telegram rate limit — auto-resuming in {wait_secs}s...")
@@ -1418,6 +1419,10 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                 if not msg or (not getattr(msg, "media", None) and not getattr(msg, "text", None) and type(msg).__name__ != "Story"):
                     await update_status(status_msg, "❌ No content found in link.")
+                    return None
+
+                if isinstance(getattr(msg, "media", None), WebPage):
+                    await update_status(status_msg, "❌ This link points to a web page preview — there is no downloadable file attached.")
                     return None
 
                 media_group_id = getattr(msg, "media_group_id", None)
@@ -1681,6 +1686,14 @@ async def download_handler(client, message, link_override=None, processed_albums
                             except Exception as e:
                                 logging.debug(f"Thumb download error: {e}")
 
+                        if thumb_path is not None and hasattr(thumb_path, "read"):
+                            _tpos = thumb_path.tell()
+                            thumb_path.seek(0, 2)
+                            if thumb_path.tell() == 0:
+                                thumb_path = None
+                            else:
+                                thumb_path.seek(_tpos)
+
                         duration = 0
                         width = 0
                         height = 0
@@ -1822,15 +1835,23 @@ async def download_handler(client, message, link_override=None, processed_albums
                         processed_count += 1
                     except Exception as e:
                         error_str = str(e)
-                        if "AUTH_KEY_UNREGISTERED" in error_str or "401" in error_str:
-                            from bot.database import update_user
-                            await update_user(user_id, {"phone_session_string": None})
-                            if user_id in user_clients:
-                                client_data = user_clients.pop(user_id, None)
-                                if client_data:
-                                    try: await client_data["client"].stop()
-                                    except: pass
-                            await update_status(status_msg, "❌ Session expired. Please /login again.")
+                        if "AUTH_KEY_UNREGISTERED" in error_str or "SESSION_REVOKED" in error_str or "401" in error_str:
+                            is_revoked = "SESSION_REVOKED" in error_str
+                            stale = user_clients.pop(user_id, None)
+                            if stale:
+                                try:
+                                    await stale["client"].stop()
+                                except Exception:
+                                    pass
+                            if is_revoked:
+                                from bot.database import update_user
+                                await update_user(user_id, {"phone_session_string": None})
+                                if user_id in _batch_sessions:
+                                    _batch_session_error_flags.add(user_id)
+                                await update_status(status_msg, "❌ Your session was revoked. Please /login again.")
+                            else:
+                                logging.warning(f"AuthKeyUnregistered (possible PFS rotation) for user {user_id} — evicting client, session preserved")
+                                await update_status(status_msg, "❌ Connection interrupted. Please send the link again.")
                             return None
 
                         if str(e) == "StopProcess":
@@ -1914,7 +1935,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                     except Exception as _conf_err:
                         logging.debug(f"Confirmation message failed: {_conf_err}")
                     await status_msg.delete()
-                return msg 
+                return msg if processed_count > 0 else None
             finally:
                 active_downloads.discard(user_id)
                 if hasattr(progress_bar, "data"):

@@ -275,8 +275,21 @@ async def download_media_parallel(
                 return True
         return False
 
+    _tasks = [asyncio.create_task(worker(i, off, cnt)) for i, (off, cnt) in enumerate(ranges)]
     try:
-        await asyncio.gather(*[worker(i, off, cnt) for i, (off, cnt) in enumerate(ranges)])
+        await asyncio.gather(*_tasks)
+    except Exception:
+        # Cancel every still-running sibling task immediately.
+        # Without this, asyncio.gather() propagates the first exception but leaves
+        # remaining tasks alive in the background — they continue using the now-dead
+        # client, hit "Cannot operate on a closed database" (SQLite) or TCPTransport
+        # errors, and produce unhandled-exception log spam.
+        for _t in _tasks:
+            if not _t.done():
+                _t.cancel()
+        await asyncio.gather(*_tasks, return_exceptions=True)
+        raise
+    try:
 
         if failed[0]:
             raise RuntimeError("One or more parallel workers failed after retries")
