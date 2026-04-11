@@ -1475,6 +1475,15 @@ async def download_handler(client, message, link_override=None, processed_albums
                         raise e
                     except Exception as e:
                         error_str = str(e)
+                        if isinstance(e, (FloodWait, FloodPremiumWait)):
+                            wait_secs = e.value
+                            logging.warning(f"FloodWait {wait_secs}s on direct extraction (messages.SendMedia) for user {user_id}")
+                            if wait_secs > MAX_FLOODWAIT_TOLERATE:
+                                _user_floodwait_until[user_id] = time.time() + wait_secs
+                                await update_status(status_msg, f"⏳ Telegram rate limit hit ({wait_secs}s). Please try again later.")
+                                return None
+                            await asyncio.sleep(wait_secs + 2)
+                            return None
                         if "USER_IS_BLOCKED" in error_str:
                             logging.warning(f"User {user_id} has blocked the bot — cannot send direct extraction.")
                             return None
@@ -1944,22 +1953,28 @@ async def download_handler(client, message, link_override=None, processed_albums
     except Exception as e:
         error_str = str(e)
         if any(kw in error_str for kw in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "401"]):
+            is_revoked = "SESSION_REVOKED" in error_str
             logging.error(f"Session error for {user_id}: {error_str}")
-            from bot.database import logout_user
-            await logout_user(user_id)
-            if user_id in user_clients:
-                client_data = user_clients.pop(user_id, None)
-                if client_data:
-                    try:
-                        await client_data["client"].stop()
-                    except:
-                        pass
+            if is_revoked:
+                from bot.database import logout_user
+                await logout_user(user_id)
+            else:
+                logging.warning(f"AuthKeyUnregistered (possible PFS rotation) for user {user_id} — evicting client only, session preserved")
+            stale = user_clients.pop(user_id, None)
+            if stale:
+                try:
+                    await stale["client"].stop()
+                except:
+                    pass
             # Signal the batch loop to abort so remaining items don't all hit the same error
             if user_id in _batch_sessions:
                 _batch_session_error_flags.add(user_id)
             if 'status_msg' in locals():
                 try:
-                    await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
+                    if is_revoked:
+                        await update_status(status_msg, "❌ Your Telegram session was revoked. Please log in again using /login.")
+                    else:
+                        await update_status(status_msg, "❌ Connection interrupted. Please send the link again.")
                 except:
                     pass
             return None

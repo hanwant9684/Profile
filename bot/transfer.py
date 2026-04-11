@@ -13,6 +13,7 @@ from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as A
 from pyrogram.errors.exceptions.bad_request_400 import (
     PhotoExtInvalid,
     PhotoInvalidDimensions,
+    PhotoSaveFileInvalid,
     FileReferenceExpired,
     FileReferenceInvalid,
     AuthBytesInvalid,
@@ -534,8 +535,8 @@ async def upload_media_fast(
                 return await _send_with_floodwait(
                     lambda: client.send_photo(target_id, file_path, **upload_kwargs)
                 )
-            except (PhotoExtInvalid, PhotoInvalidDimensions):
-                logging.warning(f"Photo rejected (invalid ext or dimensions) for {file_path} — falling back to send_document")
+            except (PhotoExtInvalid, PhotoInvalidDimensions, PhotoSaveFileInvalid):
+                logging.warning(f"Photo rejected (invalid ext, dimensions, or save error) for {file_path} — falling back to send_document")
                 doc_kwargs = dict(upload_kwargs)
                 doc_kwargs.pop("has_spoiler", None)
                 doc_kwargs["thumb"] = thumb
