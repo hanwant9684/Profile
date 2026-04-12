@@ -332,13 +332,33 @@ async def cleanup_user_clients():
             except Exception:
                 pass
 
-        # ── 5. Python GC (every 15 cycles = ~30 min) ─────────────────────────
+        # ── 5. Python GC + orphan-file sweep (every 15 cycles = ~30 min) ────────
         if _cleanup_cycle % 15 == 0:
             gc.collect()
             try:
                 import psutil
                 mem = psutil.Process().memory_info().rss / 1024 / 1024
                 logging.info(f"Scheduled GC: current RSS {mem:.1f} MB")
+            except Exception:
+                pass
+
+            # Remove any file in downloads/ that is older than 2 h — these are
+            # partial chunks left behind when a download was cancelled or crashed
+            # mid-transfer (CancelledError bypasses the normal finally cleanup).
+            _dl_dir = "downloads"
+            _stale_cutoff = now - 7200  # 2 hours
+            try:
+                _removed = 0
+                for _fname in os.listdir(_dl_dir):
+                    _fpath = os.path.join(_dl_dir, _fname)
+                    try:
+                        if os.path.isfile(_fpath) and os.path.getmtime(_fpath) < _stale_cutoff:
+                            os.remove(_fpath)
+                            _removed += 1
+                    except Exception:
+                        pass
+                if _removed:
+                    logging.info(f"Orphan-file sweep: removed {_removed} stale file(s) from {_dl_dir}/")
             except Exception:
                 pass
 
@@ -1341,9 +1361,8 @@ async def download_handler(client, message, link_override=None, processed_albums
                     except Exception as e:
                         error_str = str(e)
                         if any(kw in error_str for kw in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "401"]):
+                            is_revoked = "SESSION_REVOKED" in error_str
                             logging.error(f"Session error for {user_id}: {error_str}")
-                            from bot.database import logout_user
-                            await logout_user(user_id)
                             if user_id in user_clients:
                                 client_data = user_clients.pop(user_id, None)
                                 if client_data:
@@ -1351,10 +1370,17 @@ async def download_handler(client, message, link_override=None, processed_albums
                                         await client_data["client"].stop()
                                     except:
                                         pass
-                            # Signal the batch loop to abort so remaining items don't all hit the same error
-                            if user_id in _batch_sessions:
-                                _batch_session_error_flags.add(user_id)
-                            await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
+                            if is_revoked:
+                                from bot.database import logout_user
+                                await logout_user(user_id)
+                                if user_id in _batch_sessions:
+                                    _batch_session_error_flags.add(user_id)
+                                await update_status(status_msg, "❌ Your Telegram session has expired or was revoked. Please log in again using /login.")
+                            else:
+                                logging.warning(f"AuthKeyUnregistered (possible PFS rotation) for user {user_id} — evicting client only, session preserved")
+                                if user_id in _batch_sessions:
+                                    _batch_session_error_flags.add(user_id)
+                                await update_status(status_msg, "❌ Connection interrupted. Please send the link again.")
                             return None
 
                         if "TAKEOUT_INIT_DELAY" in error_str:
@@ -1402,7 +1428,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                     await update_status(status_msg, "❌ No content found in link.")
                     return None
 
-                if isinstance(getattr(msg, "media", None), WebPage):
+                if getattr(msg, "web_page", None) is not None:
                     await update_status(status_msg, "❌ This link points to a web page preview — there is no downloadable file attached.")
                     return None
 
@@ -1644,7 +1670,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                         await safe_reply(message, "⚠️ Poll messages cannot be downloaded — skipping.")
                         continue
 
-                    if isinstance(getattr(current_msg, "media", None), WebPage):
+                    if getattr(current_msg, "web_page", None) is not None:
                         await update_status(status_msg, "❌ This link points to a web preview — there is no downloadable file attached.")
                         continue
 
@@ -1800,22 +1826,19 @@ async def download_handler(client, message, link_override=None, processed_albums
 
                         await update_status(status_msg, "📤 Uploading...")
 
-                        sent_msg = await asyncio.wait_for(
-                            upload_media_fast(
-                                upload_client,
-                                destination_id,
-                                path,
-                                caption=safe_caption,
-                                thumb=thumb_path,
-                                duration=duration,
-                                width=width,
-                                height=height,
-                                file_name=orig_file_name,
-                                has_spoiler=has_spoiler,
-                                progress_callback=progress_bar,
-                                progress_args=(status_msg, "📤 Uploading", status_msg_override is None)
-                            ),
-                            timeout=2700  # 45 min — kills truly stuck uploads
+                        sent_msg = await upload_media_fast(
+                            upload_client,
+                            destination_id,
+                            path,
+                            caption=safe_caption,
+                            thumb=thumb_path,
+                            duration=duration,
+                            width=width,
+                            height=height,
+                            file_name=orig_file_name,
+                            has_spoiler=has_spoiler,
+                            progress_callback=progress_bar,
+                            progress_args=(status_msg, "📤 Uploading", status_msg_override is None)
                         )
 
 
