@@ -1731,6 +1731,30 @@ async def download_handler(client, message, link_override=None, processed_albums
                             orig_file_name = getattr(current_msg.audio, "file_name", None)
                         has_spoiler = getattr(current_msg, "has_media_spoiler", None)
 
+                        _pre_dl_media = (
+                            getattr(current_msg, "document", None) or
+                            getattr(current_msg, "video", None) or
+                            getattr(current_msg, "audio", None) or
+                            getattr(current_msg, "voice", None) or
+                            getattr(current_msg, "video_note", None) or
+                            getattr(current_msg, "animation", None)
+                        )
+                        _pre_dl_size = getattr(_pre_dl_media, "file_size", 0) or 0
+                        _tg_premium = getattr(getattr(user_client, "me", None), "is_premium", False)
+                        _size_limit = 4000 * 1024 * 1024 if _tg_premium else 2000 * 1024 * 1024
+                        if _pre_dl_size > _size_limit:
+                            _limit_mb = 4000 if _tg_premium else 2000
+                            logging.warning(
+                                f"Skipping download for user {user_id}: "
+                                f"{_pre_dl_size / 1048576:.1f} MiB exceeds {_limit_mb} MiB Telegram limit"
+                            )
+                            await update_status(
+                                status_msg,
+                                f"❌ File is too large ({_pre_dl_size / 1048576:.0f} MB) — "
+                                f"Telegram cannot receive files larger than {_limit_mb} MB."
+                            )
+                            continue
+
                         for _dl_attempt in range(2):
                             try:
                                 path = await asyncio.wait_for(

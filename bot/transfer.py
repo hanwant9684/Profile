@@ -9,7 +9,6 @@ import sqlite3
 from pyrogram import Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
-from pyrogram.errors.exceptions.unauthorized_401 import AuthKeyUnregistered as AuthKeyUnregistered401
 from pyrogram.errors.exceptions.bad_request_400 import (
     PhotoExtInvalid,
     PhotoInvalidDimensions,
@@ -73,8 +72,9 @@ async def download_media_parallel(
       Falls back silently to standard serial download on any unrecoverable error.
 
     Upload note:
-      pyrotgfork's save_file() already uses 3 sessions × 4 workers (12 streams)
-      for files > 10 MB — upload is already optimally parallelised in the library.
+      pyrotgfork's save_file() creates 3 fresh sessions × 4 workers (12 streams)
+      per upload for files > 10 MB, then tears them down immediately after.
+      No session caching on the upload side — each upload is fully independent.
     """
     from pyrogram.file_id import FileId
 
@@ -426,18 +426,6 @@ def truncate_caption(caption, max_length=1024):
     return caption_str[:max_length - 3] + "..."
 
 
-def check_file_size(file_path, max_size_mib=2000):
-    if not os.path.exists(file_path):
-        raise ValueError(f"File not found: {file_path}")
-    file_size_bytes = os.path.getsize(file_path)
-    file_size_mib = file_size_bytes / (1024 * 1024)
-    if file_size_mib > max_size_mib:
-        raise ValueError(f"File size ({file_size_mib:.2f} MiB) exceeds Telegram limit of {max_size_mib} MiB")
-    if file_size_bytes == 0:
-        raise ValueError(f"File is empty: {file_path}")
-    return file_size_bytes
-
-
 async def _send_with_floodwait(coro_fn, max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -471,12 +459,6 @@ async def upload_media_fast(
     """
     safe_caption = truncate_caption(caption)
     file_path_lower = file_path.lower()
-
-    try:
-        check_file_size(file_path)
-    except ValueError as e:
-        logging.error(f"File validation error: {e}")
-        return None
 
     upload_kwargs = {
         "caption": safe_caption,
@@ -553,7 +535,7 @@ async def upload_media_fast(
             lambda: client.send_document(target_id, file_path, **upload_kwargs)
         )
 
-    except (AuthKeyUnregistered, AuthKeyUnregistered401, SessionRevoked) as e:
+    except (AuthKeyUnregistered, SessionRevoked) as e:
         logging.error(f"AuthKeyUnregistered during transfer for chat {chat_id}: {e}")
         raise
     except Exception:
