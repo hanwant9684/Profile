@@ -96,6 +96,7 @@ AD_DAILY_LIMIT_PREMIUM = int(os.environ.get("AD_DAILY_LIMIT_PREMIUM", 5))
 AD_DAILY_LIMIT = AD_DAILY_LIMIT_FREE # Legacy fallback
 AD_FOR_PREMIUM = os.environ.get("AD_FOR_PREMIUM", "True").lower() == "true"
 
+# Update client with higher max_concurrent_transmissions
 app = Client(
     "bot_session",
     api_id=API_ID,
@@ -106,5 +107,6 @@ app = Client(
     no_updates=False,
     skip_updates=True,
     fetch_replies=0,
+    max_concurrent_transmissions=10,
     workers=10
 )
