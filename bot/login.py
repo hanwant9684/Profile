@@ -1,3 +1,4 @@
+import asyncio
 import time
 from pyrogram import filters
 from pyrogram.client import Client
@@ -11,11 +12,8 @@ from bot.logger import logger
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = message.from_user.id
-    username = message.from_user.username
-    full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
 
-    from bot.handlers import verify_force_sub, _dest_channel_cache
-    _dest_channel_cache.pop(user_id, None)   # clear cached destination so /start always re-resolves
+    from bot.handlers import verify_force_sub
     is_subbed, channel = await verify_force_sub(client, user_id)
     if not is_subbed:
         channel_url = channel.replace('@', '') if channel else ''
@@ -30,12 +28,14 @@ async def start(client, message):
     user = await get_user(user_id)
     
     if not user:
-        user = await create_user(user_id, username, full_name)
-    else:
-        # Update username and full_name if they changed
-        if user.get("username") != username or user.get("full_name") != full_name:
-            await create_user(user_id, username, full_name)
-            user = await get_user(user_id)
+        user = await create_user(user_id)
+    
+    # Show RichAds on start
+    try:
+        from bot.ads import show_ad
+        await show_ad(client, user_id)
+    except Exception as e:
+        logger.error(f"Error showing RichAds: {e}")
     
     if not user or not user.get('is_agreed_terms'):
         text = (
@@ -59,6 +59,13 @@ async def accept_terms(client, callback_query):
     user_id = callback_query.from_user.id
     await update_user_terms(user_id, True)
     
+    # Show RichAds after accepting terms
+    try:
+        from bot.ads import show_ad
+        await show_ad(client, user_id)
+    except Exception as e:
+        logger.error(f"Error showing RichAds on T&C accept: {e}")
+        
     try:
         await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
     except Exception as e:
@@ -75,8 +82,8 @@ async def login_start(client, message):
         await message.reply("Please agree to the Terms & Conditions first using /start.")
         return
 
-    if user and user.get('phone_session_string'):
-        await message.reply("You are already logged in! If you want to re-login, please use /logout first.")
+    if user.get('phone_session_string'):
+        await message.reply("You are already logged in! Contact support if you need to re-login.")
         return
 
     # Check for login state limit to prevent resource exhaustion
@@ -91,7 +98,35 @@ async def login_start(client, message):
         "⏳ This session will expire in 5 minutes if no activity is detected."
     )
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "mlinks", "stats", "killall", "premium_users"]) & ~filters.regex(r"https://t\.me/"))
+async def cleanup_expired_logins():
+    while True:
+        try:
+            now = time.time()
+            expired_users = [
+                user_id for user_id, state in login_states.items()
+                if now - state.get("timestamp", 0) > 300  # 5 minutes timeout
+            ]
+            for user_id in expired_users:
+                state = login_states[user_id]
+                if "client" in state:
+                    try:
+                        # Ensure we stop the client properly to release threads
+                        await state["client"].stop()
+                    except:
+                        try:
+                            await state["client"].disconnect()
+                        except:
+                            pass
+                del login_states[user_id]
+                try:
+                    await app.send_message(user_id, "⚠️ Login session expired due to inactivity.")
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+        await asyncio.sleep(60)
+
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "stats", "killall"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
@@ -148,16 +183,11 @@ async def handle_login_steps(client, message: Message):
                 await message.reply("Two-Step Verification enabled. Send your **Cloud Password**.")
                 return
             except PhoneCodeInvalid:
-                await message.reply("❌ **Invalid Code.** Please check and try again.")
+                await message.reply("Invalid code. Try again.")
                 return
             except Exception as e:
-                error_msg = str(e)
-                if "PHONE_CODE_EXPIRED" in error_msg:
-                    await message.reply("⏰ **Code Expired.** The OTP you entered is no longer valid. Please start the /login process again.")
-                else:
-                    logger.error(f"Login code check error: {e}")
-                    await message.reply(f"❌ **Login failed:** {e}")
-                
+                logger.error(f"Login code check error: {e}")
+                await message.reply(f"Login failed: {e}")
                 try:
                     await temp_client.disconnect()
                 except Exception:
@@ -210,10 +240,7 @@ async def handle_login_steps(client, message: Message):
 
     except Exception as e:
         logger.error(f"handle_login_steps error: {e}")
-        try:
-            await message.reply("Error. Login cancelled.")
-        except Exception as reply_err:
-            logger.warning(f"Could not send login cancellation message: {reply_err}")
+        await message.reply("Error. Login cancelled.")
         if "client" in state:
             try:
                 await state["client"].disconnect()
@@ -255,22 +282,7 @@ async def cancel_login(client, message):
 async def logout(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-
-    # Clear the in-memory destination cache so a fresh login re-resolves cleanly
-    from bot.handlers import _dest_channel_cache, user_clients
-    _dest_channel_cache.pop(user_id, None)
-
-    # Evict the cached Pyrogram client — the session is about to be revoked,
-    # so any cached client object will be dead. Without this, the next download
-    # after re-login would pick up the dead client (idle < 90s, is_connected=True)
-    # and immediately fail with AUTH_KEY_UNREGISTERED before the user can use the bot.
-    stale = user_clients.pop(user_id, None)
-    if stale:
-        try:
-            await stale["client"].stop()
-        except Exception:
-            pass
-
+    
     # Clear any active login session
     if user_id in login_states:
         state = login_states.pop(user_id, None)
@@ -284,13 +296,7 @@ async def logout(client, message):
         try:
             from pyrogram import Client
             from bot.config import API_ID, API_HASH
-            temp_client = Client(
-                f"logout_{user_id}", 
-                session_string=user.get('phone_session_string'), 
-                api_id=API_ID, 
-                api_hash=API_HASH, 
-                in_memory=True
-            )
+            temp_client = Client(f"logout_{user_id}", session_string=user.get('phone_session_string'), api_id=API_ID, api_hash=API_HASH, in_memory=True)
             await temp_client.start()
             await temp_client.log_out()
 

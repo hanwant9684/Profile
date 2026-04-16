@@ -1,167 +1,98 @@
 import os
-import asyncio
 import logging
+import asyncio
 from pyrogram import Client
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
-from pyrogram.errors.exceptions.bad_request_400 import (
-    PhotoExtInvalid,
-    PhotoInvalidDimensions,
-    PhotoSaveFileInvalid,
-    FileReferenceExpired,
-    FileReferenceInvalid,
-)
+from pyrogram.errors import FloodWait, FloodPremiumWait
 
+from bot.config import get_smart_download_workers
 
-class FileReferenceSwallowed(Exception):
-    pass
+async def download_media_fast(client: Client, message: Message, file_name, progress_callback=None, progress_args=()):
+    """Fast media downloader with FloodWait handling"""
+    # Get file size to determine worker count
+    file_size = 0
+    if getattr(message, "document", None):
+        file_size = message.document.file_size
+    elif getattr(message, "video", None):
+        file_size = message.video.file_size
+    elif getattr(message, "audio", None):
+        file_size = message.audio.file_size
+    elif getattr(message, "photo", None):
+        file_size = message.photo.sizes[-1].file_size
+    elif type(message).__name__ == "Story":
+        if getattr(message, "video", None):
+            file_size = message.video.file_size
+        elif getattr(message, "photo", None):
+            file_size = message.photo.sizes[-1].file_size
 
-
-def truncate_caption(caption, max_length=1024):
-    if not caption:
-        return ""
-    s = str(caption)
-    return s if len(s) <= max_length else s[:max_length - 3] + "..."
-
-
-async def _with_floodwait(coro_fn, max_retries=3):
-    for attempt in range(max_retries):
+    retries = 5
+    for i in range(retries):
         try:
-            return await coro_fn()
-        except (FloodWait, FloodPremiumWait) as e:
-            logging.warning(f"FloodWait {e.value}s (attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(e.value)
-            else:
-                raise
-
-
-async def download_media(
-    client: Client,
-    message: Message,
-    file_name=None,
-    progress_callback=None,
-    progress_args=(),
-):
-    max_attempts = 5
-    for attempt in range(max_attempts):
-        try:
-            path = await client.download_media(
+            return await client.download_media(
                 message,
                 file_name=file_name or "downloads/",
-                progress=progress_callback,
-                progress_args=progress_args,
+                progress=progress_callback if progress_callback else None,
+                progress_args=progress_args
             )
-            if path and os.path.exists(path) and os.path.getsize(path) == 0:
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-                raise FileReferenceSwallowed(
-                    f"download_media returned an empty file on attempt {attempt + 1}"
-                )
-            return path
-
-        except (FileReferenceExpired, FileReferenceInvalid, FileReferenceSwallowed):
-            raise
-
+        except (FloodWait, FloodPremiumWait) as e:
+            logging.warning(f"FloodWait: Sleeping for {e.value} seconds")
+            await asyncio.sleep(e.value)
         except Exception as e:
-            if attempt == max_attempts - 1:
-                raise
-            logging.warning(f"Download attempt {attempt + 1} failed: {e} — retrying")
-            await asyncio.sleep(2 * (attempt + 1))
+            if i == retries - 1:
+                raise e
+            logging.error(f"Download attempt {i+1} failed: {e}. Retrying...")
+            await asyncio.sleep(2 * (i + 1))
 
+async def upload_media_fast(client: Client, chat_id, file_path, caption="", thumb=None, progress_callback=None, progress_args=(), **kwargs):
+    """Refactored upload function focusing on hardware-accelerated transfers via TgCrypto."""
+    safe_caption = str(caption) if caption is not None else ""
 
-_VIDEO_EXTS     = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
-_ANIMATION_EXTS = {".gif"}
-_AUDIO_EXTS     = {".mp3", ".m4a", ".flac"}
-_VOICE_EXTS     = {".ogg", ".wav"}
-_IMAGE_EXTS     = {".jpg", ".jpeg", ".png", ".webp"}
-
-
-async def upload_media(
-    client: Client,
-    chat_id,
-    file_path: str,
-    caption="",
-    thumb=None,
-    file_name=None,
-    has_spoiler=None,
-    progress_callback=None,
-    progress_args=(),
-    **kwargs,
-):
-    safe_caption = truncate_caption(caption)
-    ext = os.path.splitext(file_path)[1].lower()
-
-    if isinstance(chat_id, str) and chat_id.lower() == "me":
-        target = "me"
-    else:
-        try:
-            target = int(chat_id)
-        except (ValueError, TypeError):
-            target = chat_id
-
-    base = {
+    file_path_lower = file_path.lower()
+    # Base arguments for all upload methods
+    upload_kwargs = {
         "caption": safe_caption,
         "progress": progress_callback,
         "progress_args": progress_args,
     }
 
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logging.error(f"Upload failed: File {file_path} is empty or does not exist.")
+        return None
+
     try:
-        if ext in _VIDEO_EXTS:
-            kw = {**base, "thumb": thumb, **kwargs}
-            if has_spoiler is not None:
-                kw["has_spoiler"] = has_spoiler
-            return await _with_floodwait(
-                lambda: client.send_video(target, file_path, supports_streaming=True, **kw)
+        if file_path.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
+            upload_kwargs.update(kwargs)
+            upload_kwargs["thumb"] = thumb
+            if file_path_lower.endswith(".gif"):
+                return await client.send_animation(chat_id, file_path, **upload_kwargs)
+            return await client.send_video(
+                chat_id,
+                file_path,
+                supports_streaming=True,
+                **upload_kwargs
             )
-
-        if ext in _ANIMATION_EXTS:
-            return await _with_floodwait(
-                lambda: client.send_animation(target, file_path, **base)
+        #Audio
+        elif file_path_lower.endswith((".mp3", ".m4a", ".ogg", ".wav")):
+            upload_kwargs["duration"] = kwargs.get("duration", 0)
+            if file_path_lower.endswith((".ogg", ".wav")): # Voice formats
+                return await client.send_voice(chat_id, file_path, **upload_kwargs)
+            #Normal Audio
+            upload_kwargs["thumb"] = thumb
+            return await client.send_audio(chat_id, file_path, **upload_kwargs)
+        #Images
+        elif file_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            return await client.send_photo(
+                chat_id,
+                file_path,
+                **upload_kwargs
             )
-
-        if ext in _AUDIO_EXTS:
-            kw = {**base, "thumb": thumb, "duration": kwargs.get("duration", 0)}
-            if file_name:
-                kw["file_name"] = file_name
-            return await _with_floodwait(
-                lambda: client.send_audio(target, file_path, **kw)
-            )
-
-        if ext in _VOICE_EXTS:
-            kw = {**base, "duration": kwargs.get("duration", 0)}
-            return await _with_floodwait(
-                lambda: client.send_voice(target, file_path, **kw)
-            )
-
-        if ext in _IMAGE_EXTS:
-            photo_kw = {**base}
-            if has_spoiler is not None:
-                photo_kw["has_spoiler"] = has_spoiler
-            try:
-                return await _with_floodwait(
-                    lambda: client.send_photo(target, file_path, **photo_kw)
-                )
-            except (PhotoExtInvalid, PhotoInvalidDimensions, PhotoSaveFileInvalid):
-                logging.warning(f"Photo rejected for {file_path} — sending as document")
-                doc_kw = {**base, "thumb": thumb}
-                if file_name:
-                    doc_kw["file_name"] = file_name
-                return await _with_floodwait(
-                    lambda: client.send_document(target, file_path, **doc_kw)
-                )
-
-        doc_kw = {**base, "thumb": thumb}
-        if file_name:
-            doc_kw["file_name"] = file_name
-        return await _with_floodwait(
-            lambda: client.send_document(target, file_path, **doc_kw)
+         #Documents   
+        upload_kwargs["thumb"] = thumb    
+        return await client.send_document(
+            chat_id,
+            file_path,
+            **upload_kwargs
         )
-
-    except (AuthKeyUnregistered, SessionRevoked):
-        raise
     except Exception:
-        logging.exception(f"Upload error for {file_path}:")
+        logging.exception("Upload Error:")
         raise
