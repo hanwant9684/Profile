@@ -10,3 +10,4 @@ pyyaml
 redis
 tgcrypto
 uvloop
+aiofiles

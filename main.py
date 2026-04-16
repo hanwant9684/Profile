@@ -50,7 +50,6 @@ async def main():
     # Pyrogram Client and other imports inside the async main to ensure the loop is active
     from bot.config import app
     from bot.database import init_db
-    import bot.transfer 
 
     # Import all modules to register handlers
     import bot.login
