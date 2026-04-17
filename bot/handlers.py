@@ -261,7 +261,7 @@ async def get_user_client(user_id, session_str):
         no_updates=True,
         no_joined_notifications=True,
         max_message_cache_size=100,
-        max_concurrent_transmissions=1
+        max_concurrent_transmissions=4
     )
     await client.start()
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -1761,7 +1761,7 @@ async def download_handler(client, message, link_override=None, processed_albums
                                     download_media_parallel(
                                         user_client,
                                         current_msg,
-                                        num_workers=1,
+                                        num_workers=4,
                                         progress_callback=progress_bar,
                                         progress_args=(status_msg, "📥 Downloading", status_msg_override is None)
                                     ),
