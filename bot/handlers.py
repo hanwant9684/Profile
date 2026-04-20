@@ -3,6 +3,7 @@ import os
 import re
 import time
 import logging
+from collections import deque
 
 import pyrogram
 from pyrogram import filters, Client
@@ -11,7 +12,8 @@ from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, Se
 
 from bot.config import (
     app, API_ID, API_HASH,
-    batch_cancel_flags, batch_sessions, login_states,
+    active_downloads, global_download_semaphore,
+    cancel_flags, batch_cancel_flags, batch_sessions, login_states,
     OWNER_ID, SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, update_user_channel
@@ -26,16 +28,9 @@ user_clients: dict = {}
 active_sessions: set = set()
 _cleanup_started = False
 
+MAX_FLOODWAIT_TOLERATE = 60
+_user_floodwait_until: dict = {}
 _dest_channel_cache: dict = {}
-_bot_me_cache = None
-_dump_channel_id_cache: dict = {"value": None, "ts": 0.0}
-
-
-async def _get_bot_me(client):
-    global _bot_me_cache
-    if _bot_me_cache is None:
-        _bot_me_cache = await client.get_me()
-    return _bot_me_cache
 
 
 async def get_user_client(user_id: int, session_str: str) -> Client:
@@ -72,6 +67,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
         api_id=API_ID,
         api_hash=API_HASH,
         in_memory=True,
+        sleep_threshold=30,
         no_updates=True,
     )
     await client.start()
@@ -140,6 +136,71 @@ async def update_status(msg, text: str):
             logging.debug(f"update_status: {e}")
 
 
+def _fmt_size(size: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _fmt_time(seconds: float) -> str:
+    if seconds <= 0:
+        return "0s"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m {s}s" if h else (f"{m}m {s}s" if m else f"{s}s")
+
+
+async def progress_bar(current: int, total: int, msg, label: str):
+    if total == 0:
+        return
+    if msg.chat.id in cancel_flags:
+        raise Exception("StopProcess")
+
+    if not hasattr(progress_bar, "_data"):
+        progress_bar._data = {}
+
+    now = time.time()
+    mid = msg.id
+    data = progress_bar._data.setdefault(
+        mid, {"start": now, "last": 0, "samples": deque(maxlen=30)}
+    )
+    data["samples"].append((now, current))
+
+    if now - data["last"] < 5 and current < total:
+        return
+
+    pct = current * 100 / total
+    bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
+
+    speed = 0.0
+    if len(data["samples"]) >= 2:
+        t0, b0 = data["samples"][0]
+        dt, db = now - t0, current - b0
+        if dt > 0 and db > 0:
+            speed = db / dt
+    if not speed:
+        elapsed = now - data["start"]
+        speed = current / elapsed if elapsed > 0 else 0
+
+    eta = (total - current) / speed if speed > 0 else 0
+
+    text = (
+        f"**{label}**\n"
+        f"`[{bar}]` {pct:.1f}%\n"
+        f"⚡ {_fmt_size(speed)}/s  ⏳ {_fmt_time(eta)}\n"
+        f"📦 {_fmt_size(current)} / {_fmt_size(total)}"
+    )
+
+    if current >= total:
+        progress_bar._data.pop(mid, None)
+    else:
+        data["last"] = now
+
+    await update_status(msg, text)
+
+
 # ---------------------------------------------------------------------------
 # Force subscribe
 # ---------------------------------------------------------------------------
@@ -172,15 +233,10 @@ async def verify_force_sub(client: Client, user_id: int):
 
 async def send_to_dump(client, msg):
     """Forward a sent message to the configured dump channel, if any."""
-    global _dump_channel_id_cache
-    now = time.time()
-    if now - _dump_channel_id_cache["ts"] > 60:
-        setting = await get_setting("dump_channel_id")
-        _dump_channel_id_cache["value"] = setting.get("value") if setting else None
-        _dump_channel_id_cache["ts"] = now
-    dump_id_str = _dump_channel_id_cache["value"]
-    if not dump_id_str:
+    setting = await get_setting("dump_channel_id")
+    if not setting or not setting.get("value"):
         return
+    dump_id_str = setting["value"]
     try:
         dump_id = int(dump_id_str)
     except (ValueError, TypeError):
@@ -265,26 +321,6 @@ def _parse_link(link: str):
 
 
 # ---------------------------------------------------------------------------
-# Progress callback for Telegram status messages
-# ---------------------------------------------------------------------------
-
-def _make_tg_progress(status_msg, icon: str):
-    last_time = [0.0]
-
-    async def cb(current, total):
-        now = time.time()
-        if not total or now - last_time[0] < 4:
-            return
-        pct = int(current * 100 / total)
-        mb_cur = current / (1024 * 1024)
-        mb_tot = total / (1024 * 1024)
-        await update_status(status_msg, f"{icon} {pct}%\n`{mb_cur:.1f} / {mb_tot:.1f} MB`")
-        last_time[0] = now
-
-    return cb
-
-
-# ---------------------------------------------------------------------------
 # Core download handler
 # ---------------------------------------------------------------------------
 
@@ -316,6 +352,12 @@ async def download_handler(
                 await message.reply("❌ Unsupported link format.")
             return None
         chat_id, msg_id, is_private, comment_id, thread_id = parsed
+
+    if _user_floodwait_until.get(user_id, 0) > time.time():
+        wait_left = int(_user_floodwait_until[user_id] - time.time())
+        if not link_override:
+            await message.reply(f"⏳ Rate limit active. Please try again in {wait_left}s.")
+        return None
 
     if user_override is not None:
         user = user_override
@@ -352,7 +394,15 @@ async def download_handler(
                 await message.reply(f"❌ {reason}")
             return None
 
-    status = status_msg_override
+    status = status_msg_override or await message.reply("⏳ Processing...")
+    if status is None:
+        return None
+
+    async with global_download_semaphore:
+        if user_id in active_downloads:
+            await update_status(status, "⚠️ You already have an active download. Please wait.")
+            return None
+        active_downloads.add(user_id)
 
     try:
         if is_private or is_story:
@@ -367,16 +417,13 @@ async def download_handler(
             except (AuthKeyUnregistered, SessionRevoked):
                 from bot.database import logout_user
                 await logout_user(user_id)
-                if not link_override:
-                    await message.reply("❌ Your session expired. Please /login again.")
+                await update_status(status, "❌ Your session expired. Please /login again.")
                 return None
             except Exception as e:
-                if not link_override:
-                    await message.reply(f"❌ Could not fetch story: {e}")
+                await update_status(status, f"❌ Could not fetch story: {e}")
                 return None
             if not story_obj or not getattr(story_obj, "media", None):
-                if not link_override:
-                    await message.reply("❌ Story not found, already expired, or has no downloadable media.")
+                await update_status(status, "❌ Story not found, already expired, or has no downloadable media.")
                 return None
             msg = story_obj
             messages = [story_obj]
@@ -386,12 +433,10 @@ async def download_handler(
             except (AuthKeyUnregistered, SessionRevoked) as e:
                 from bot.database import logout_user
                 await logout_user(user_id)
-                if not link_override:
-                    await message.reply("❌ Your session expired. Please /login again.")
+                await update_status(status, "❌ Your session expired. Please /login again.")
                 return None
             except Exception as e:
-                if not link_override:
-                    await message.reply(f"❌ Could not fetch message: {e}")
+                await update_status(status, f"❌ Could not fetch message: {e}")
                 return None
 
         if not is_story and comment_id is not None:
@@ -442,14 +487,13 @@ async def download_handler(
                 logging.info(f"Thread resolution (thread={thread_id}): {e} — using direct message fetch")
 
         if not msg or not getattr(msg, "media", None):
-            if not link_override:
-                await message.reply("❌ No downloadable media found at this link.")
+            await update_status(status, "❌ No downloadable media found at this link.")
             return None
 
         if not is_story and msg.media_group_id:
             if processed_albums is not None:
                 if msg.media_group_id in processed_albums:
-                    if not status_msg_override and status:
+                    if not status_msg_override:
                         try:
                             await status.delete()
                         except Exception:
@@ -466,21 +510,29 @@ async def download_handler(
         if not is_private:
             media_group_id = getattr(msg, "media_group_id", None)
             try:
+                await update_status(status, "🚀 Extracting directly...")
                 if media_group_id:
                     await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=msg_id)
                 else:
                     await msg.copy(chat_id=user_id)
                 await send_to_dump(client, msg)
-                if not status_msg_override and status:
+                if not status_msg_override:
                     try:
                         await status.delete()
                     except Exception:
                         pass
+                active_downloads.discard(user_id)
                 return msg
             except (AuthKeyUnregistered, SessionRevoked):
                 raise
             except (FloodWait, FloodPremiumWait) as e:
-                await message.reply(f"⏳ Rate limit hit ({e.value}s). Please try again later.")
+                wait_secs = e.value
+                logging.warning(f"FloodWait {wait_secs}s on direct extraction for user {user_id}")
+                if wait_secs > MAX_FLOODWAIT_TOLERATE:
+                    _user_floodwait_until[user_id] = time.time() + wait_secs
+                    await update_status(status, f"⏳ Rate limit hit ({wait_secs}s). Please try again later.")
+                    return None
+                await asyncio.sleep(wait_secs + 2)
                 return None
             except Exception as e:
                 error_str = str(e)
@@ -493,19 +545,20 @@ async def download_handler(
                         else:
                             await msg.copy(chat_id=user_id, caption="")
                         await send_to_dump(client, msg)
-                        if not status_msg_override and status:
+                        if not status_msg_override:
                             try:
                                 await status.delete()
                             except Exception:
                                 pass
+                        active_downloads.discard(user_id)
                         return msg
                     except Exception as retry_e:
                         logging.error(f"Direct extraction (no caption) failed: {retry_e}")
                 elif "Unknown media" in error_str or "unknown media" in error_str.lower():
-                    if not link_override:
-                        await message.reply("❌ This media type is not supported for direct extraction.")
+                    await update_status(status, "❌ This media type is not supported for direct extraction.")
                     return None
                 logging.error(f"Direct extraction failed: {e}")
+                await update_status(status, "⚠️ Direct extraction failed, falling back to download/upload...")
 
         upload_client = client
         destination_id = user_id
@@ -531,7 +584,7 @@ async def download_handler(
                             try:
                                 await client.get_chat(channel_id)
                             except Exception:
-                                me = await _get_bot_me(client)
+                                me = await client.get_me()
                                 bot_id = f"@{me.username}" if me.username else me.id
                                 try:
                                     await user_client.add_chat_members(channel_id, me.id)
@@ -563,7 +616,7 @@ async def download_handler(
                             )
                             channel_id = new_chat.id
                             await update_user_channel(user_id, channel_id)
-                            me = await _get_bot_me(client)
+                            me = await client.get_me()
                             await user_client.promote_chat_member(
                                 channel_id,
                                 f"@{me.username}" if me.username else me.id,
@@ -597,17 +650,26 @@ async def download_handler(
                 _dest_channel_cache[user_id] = (destination_id, _using_user_channel)
 
         for m in messages:
+            if user_id in cancel_flags:
+                cancel_flags.discard(user_id)
+                await update_status(status, "🛑 Cancelled.")
+                return None
+
             path = None
             thumb = None
             try:
-                if status is None:
-                    status = await message.reply("📥 Downloading...")
-                else:
-                    await update_status(status, "📥 Downloading...")
-                dl_progress = _make_tg_progress(status, "📥")
-                path = await download_media(user_client, m, progress=dl_progress)
+                path = await download_media(
+                    user_client, m,
+                    progress=progress_bar,
+                    progress_args=(status, "📥 Downloading"),
+                )
                 if not path:
                     continue
+
+                if user_id in cancel_flags:
+                    cancel_flags.discard(user_id)
+                    await update_status(status, "🛑 Cancelled.")
+                    return None
 
                 caption = truncate_caption(m.caption or "")
                 duration = width = height = 0
@@ -629,8 +691,6 @@ async def download_handler(
                     duration = m.audio.duration or 0
                     file_name = m.audio.file_name
 
-                await update_status(status, "📤 Uploading...")
-                up_progress = _make_tg_progress(status, "📤")
                 sent_msg = await upload_media(
                     upload_client, destination_id, path,
                     caption=caption,
@@ -639,7 +699,8 @@ async def download_handler(
                     duration=duration,
                     width=width,
                     height=height,
-                    progress=up_progress,
+                    progress=progress_bar,
+                    progress_args=(status, "📤 Uploading"),
                 )
 
                 if sent_msg and _using_user_channel and status_msg_override is None:
@@ -657,6 +718,10 @@ async def download_handler(
                     await send_to_dump(client, sent_msg)
 
             except Exception as e:
+                if str(e) == "StopProcess":
+                    cancel_flags.discard(user_id)
+                    await update_status(status, "🛑 Cancelled.")
+                    return None
                 logging.error(f"Download/upload error for user {user_id}: {e}")
             finally:
                 if path and os.path.exists(path):
@@ -665,7 +730,7 @@ async def download_handler(
         if not skip_quota and user.get("role", "free") == "free":
             await increment_quota(user_id)
 
-        if not status_msg_override and status:
+        if not status_msg_override:
             try:
                 await status.delete()
             except Exception:
@@ -676,15 +741,30 @@ async def download_handler(
     except Exception as e:
         logging.error(f"Handler error for user {user_id}: {e}")
         try:
-            if status:
-                await update_status(status, f"❌ Error: {e}")
-            elif not link_override:
-                await message.reply(f"❌ Error: {e}")
+            await update_status(status, f"❌ Error: {e}")
         except Exception:
             pass
         return None
     finally:
+        active_downloads.discard(user_id)
         active_sessions.discard(user_id)
+        cancel_flags.discard(user_id)
+        if hasattr(progress_bar, "_data") and status:
+            progress_bar._data.pop(status.id, None)
+
+
+# ---------------------------------------------------------------------------
+# Cancel
+# ---------------------------------------------------------------------------
+
+@app.on_message(filters.command("cancel") & filters.private)
+async def cancel_handler(client, message):
+    user_id = message.from_user.id
+    if user_id in active_downloads or user_id in active_sessions:
+        cancel_flags.add(user_id)
+        await message.reply("🛑 Cancelling current download...")
+    else:
+        await message.reply("ℹ️ No active download to cancel.")
 
 
 # ---------------------------------------------------------------------------

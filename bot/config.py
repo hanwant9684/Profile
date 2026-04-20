@@ -42,8 +42,13 @@ if missing_vars:
     print(f"CRITICAL ERROR: Missing environment variables: {', '.join(missing_vars)}")
     sys.exit(1)
 
+MAX_CONCURRENT_DOWNLOADS = 10
+
+active_downloads: set = set()
+cancel_flags: set = set()
 batch_cancel_flags: set = set()
 batch_sessions: set = set()
+global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states: dict = {}
 
 _shared_session = None
@@ -63,6 +68,9 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     in_memory=True,
+    sleep_threshold=30,
     no_updates=False,
     skip_updates=True,
+    max_concurrent_transmissions=4,
+    workers=10,
 )

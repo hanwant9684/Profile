@@ -1,5 +1,4 @@
 import asyncio
-import random
 import re
 import logging
 
@@ -143,7 +142,6 @@ async def batch_handler(client, message):
             except Exception:
                 pass
 
-            had_media = False
             try:
                 from bot.handlers import download_handler
                 result = await download_handler(
@@ -156,7 +154,6 @@ async def batch_handler(client, message):
                 )
                 if result is not None:
                     done += 1
-                    had_media = True
                 else:
                     skipped += 1
             except (FloodWait, FloodPremiumWait) as e:
@@ -166,8 +163,8 @@ async def batch_handler(client, message):
                 logging.error(f"Batch item error (link={link}): {e}")
                 skipped += 1
 
-            if idx < count and had_media:
-                await asyncio.sleep(random.uniform(4, 7))
+            if idx < count:
+                await asyncio.sleep(3)
 
         try:
             await status.edit_text(
@@ -249,7 +246,6 @@ async def mlinks_handler(client, message):
             except Exception:
                 pass
 
-            had_media = False
             try:
                 from bot.handlers import download_handler
                 result = await download_handler(
@@ -262,7 +258,6 @@ async def mlinks_handler(client, message):
                 )
                 if result is not None:
                     done += 1
-                    had_media = True
                 else:
                     skipped += 1
             except (FloodWait, FloodPremiumWait) as e:
@@ -272,8 +267,8 @@ async def mlinks_handler(client, message):
                 logging.error(f"mlinks item error (link={link}): {e}")
                 skipped += 1
 
-            if idx < count and had_media:
-                await asyncio.sleep(random.uniform(4, 7))
+            if idx < count:
+                await asyncio.sleep(3)
 
         try:
             await status.edit_text(

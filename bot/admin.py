@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from pyrogram import filters
-from bot.config import app, OWNER_ID
+from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
 from bot.handlers import update_status
 from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user, iter_user_ids
 
@@ -13,8 +13,24 @@ async def stats(client, message):
     total_users = await get_user_count()
     await message.reply(
         f"📊 **Bot Statistics**\n\n"
-        f"👥 Total Users: `{total_users}`"
+        f"👥 Total Users: `{total_users}`\n"
+        f"⚡ Active Downloads: `{len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}`"
     )
+
+@app.on_message(filters.command("killall") & filters.private)
+async def kill_all_processes(client, message):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
+        return
+    from bot.config import cancel_flags
+    if not active_downloads:
+        await message.reply("⚠️ No active downloads to kill.")
+        return
+    count = len(active_downloads)
+    for uid in list(active_downloads):
+        cancel_flags.add(uid)
+    active_downloads.clear()
+    await message.reply(f"✅ Killed all `{count}` active processes and sent cancellation signals.")
 
 @app.on_message(filters.command("setrole") & filters.private)
 async def setrole(client, message):
