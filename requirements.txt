@@ -4,9 +4,10 @@ asyncpg
 certifi
 flask
 psutil
-pyrotgfork
+pyrofork
 python-dotenv
 pyyaml
 redis
-tgcrypto
+tgcrypto-pyrofork
+pymediainfo-pyrofork
 uvloop
