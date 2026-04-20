@@ -1,6 +1,5 @@
 import logging
 from logging.handlers import RotatingFileHandler
-import os
 
 logger = logging.getLogger("bot")
 
@@ -21,7 +20,5 @@ def setup_logger():
         handlers=[file_handler, console_handler]
     )
 
-    # Suppress specific noisy logs
     logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)
     logging.getLogger("pyrogram.connection.connection").setLevel(logging.ERROR)
-

@@ -1,11 +1,9 @@
 import time
-from pyrogram import filters
-from pyrogram.client import Client
+from pyrogram import filters, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
 from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import get_user, create_user, update_user_terms, save_session_string, logout_user
-
 from bot.logger import logger
 
 @app.on_message(filters.command("start") & filters.private)
@@ -14,8 +12,7 @@ async def start(client, message):
     username = message.from_user.username
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
 
-    from bot.handlers import verify_force_sub, _dest_channel_cache
-    _dest_channel_cache.pop(user_id, None)   # clear cached destination so /start always re-resolves
+    from bot.handlers import verify_force_sub
     is_subbed, channel = await verify_force_sub(client, user_id)
     if not is_subbed:
         channel_url = channel.replace('@', '') if channel else ''
@@ -28,15 +25,14 @@ async def start(client, message):
         return
 
     user = await get_user(user_id)
-    
+
     if not user:
         user = await create_user(user_id, username, full_name)
     else:
-        # Update username and full_name if they changed
         if user.get("username") != username or user.get("full_name") != full_name:
             await create_user(user_id, username, full_name)
             user = await get_user(user_id)
-    
+
     if not user or not user.get('is_agreed_terms'):
         text = (
             "Welcome to the Downloader Bot!\n\n"
@@ -58,7 +54,6 @@ async def start(client, message):
 async def accept_terms(client, callback_query):
     user_id = callback_query.from_user.id
     await update_user_terms(user_id, True)
-    
     try:
         await callback_query.message.edit_text("Terms accepted! You can now use the bot.\n\nSend /login to connect your Telegram account or send a link to download.")
     except Exception as e:
@@ -70,7 +65,7 @@ async def accept_terms(client, callback_query):
 async def login_start(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-    
+
     if not user or not user.get('is_agreed_terms'):
         await message.reply("Please agree to the Terms & Conditions first using /start.")
         return
@@ -79,7 +74,6 @@ async def login_start(client, message):
         await message.reply("You are already logged in! If you want to re-login, please use /logout first.")
         return
 
-    # Check for login state limit to prevent resource exhaustion
     if len(login_states) >= 10:
         await message.reply("⚠️ Too many active login attempts. Please try again in a few minutes.")
         return
@@ -91,7 +85,7 @@ async def login_start(client, message):
         "⏳ This session will expire in 5 minutes if no activity is detected."
     )
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "help", "batch", "mlinks", "stats", "killall", "premium_users"]) & ~filters.regex(r"https://t\.me/"))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "unset_dump", "help", "batch", "mlinks", "stats", "killall", "premium_users"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
@@ -108,7 +102,7 @@ async def handle_login_steps(client, message: Message):
             if not phone_number.startswith("+") or not phone_number[1:].isdigit():
                 await message.reply("❌ **Invalid Format.** Please send in international format (e.g., +1234567890).")
                 return
-                
+
             try:
                 state["client"] = Client(
                     f"session_{user_id}",
@@ -116,7 +110,6 @@ async def handle_login_steps(client, message: Message):
                     api_hash=str(API_HASH) if API_HASH else "",
                     in_memory=True,
                     sleep_threshold=60,
-                    max_concurrent_transmissions=5,
                     workers=5
                 )
                 await state["client"].connect()
@@ -133,14 +126,13 @@ async def handle_login_steps(client, message: Message):
             state["phone"] = phone_number
             state["phone_code_hash"] = sent_code.phone_code_hash
             state["step"] = "CODE"
-            
             await message.reply("OTP Code sent to your Telegram account. Send it here (e.g. `1 2 3 4 5`).")
 
         elif step == "CODE":
             state["timestamp"] = time.time()
             code = message.text.replace("-", "").replace(" ", "").strip()
             temp_client = state["client"]
-            
+
             try:
                 await temp_client.sign_in(state["phone"], state["phone_code_hash"], code)
             except SessionPasswordNeeded:
@@ -153,11 +145,10 @@ async def handle_login_steps(client, message: Message):
             except Exception as e:
                 error_msg = str(e)
                 if "PHONE_CODE_EXPIRED" in error_msg:
-                    await message.reply("⏰ **Code Expired.** The OTP you entered is no longer valid. Please start the /login process again.")
+                    await message.reply("⏰ **Code Expired.** Please start the /login process again.")
                 else:
                     logger.error(f"Login code check error: {e}")
                     await message.reply(f"❌ **Login failed:** {e}")
-                
                 try:
                     await temp_client.disconnect()
                 except Exception:
@@ -172,13 +163,15 @@ async def handle_login_steps(client, message: Message):
             except Exception:
                 pass
             login_states.pop(user_id, None)
-            await message.reply("✅ Login Successful!")
+            from bot.handlers import _dest_channel_cache
+            _dest_channel_cache.pop(user_id, None)
+            await message.reply("✅ Login Successful! Send any private channel link to start downloading.")
 
         elif step == "PASSWORD":
             state["timestamp"] = time.time()
             password = message.text.strip()
             temp_client = state["client"]
-            
+
             try:
                 await temp_client.check_password(password)
             except PasswordHashInvalid:
@@ -206,7 +199,9 @@ async def handle_login_steps(client, message: Message):
             except Exception:
                 pass
             login_states.pop(user_id, None)
-            await message.reply("✅ Login Successful!")
+            from bot.handlers import _dest_channel_cache
+            _dest_channel_cache.pop(user_id, None)
+            await message.reply("✅ Login Successful! Send any private channel link to start downloading.")
 
     except Exception as e:
         logger.error(f"handle_login_steps error: {e}")
@@ -221,21 +216,6 @@ async def handle_login_steps(client, message: Message):
                 pass
         login_states.pop(user_id, None)
 
-@app.on_message(filters.command("cancel") & filters.private)
-async def cancel_downloads(client, message):
-    user_id = message.from_user.id
-    from bot.config import active_downloads, cancel_flags
-    
-    if user_id in active_downloads:
-        cancel_flags.add(user_id)
-        # We don't discard from active_downloads here, the handler will do it after cleaning up
-        await message.reply("🛑 Download cancellation request sent.")
-    else:
-        # Just in case the flag was set but not in active_downloads
-        if user_id in cancel_flags:
-            cancel_flags.discard(user_id)
-        await message.reply("No active downloads to cancel.")
-
 @app.on_message(filters.command("cancel_login") & filters.private)
 async def cancel_login(client, message):
     user_id = message.from_user.id
@@ -244,7 +224,7 @@ async def cancel_login(client, message):
         if "client" in state:
             try:
                 await state["client"].disconnect()
-            except:
+            except Exception:
                 pass
         del login_states[user_id]
         await message.reply("✅ Login process cancelled.")
@@ -256,14 +236,8 @@ async def logout(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
 
-    # Clear the in-memory destination cache so a fresh login re-resolves cleanly
-    from bot.handlers import _dest_channel_cache, user_clients
-    _dest_channel_cache.pop(user_id, None)
+    from bot.handlers import user_clients
 
-    # Evict the cached Pyrogram client — the session is about to be revoked,
-    # so any cached client object will be dead. Without this, the next download
-    # after re-login would pick up the dead client (idle < 90s, is_connected=True)
-    # and immediately fail with AUTH_KEY_UNREGISTERED before the user can use the bot.
     stale = user_clients.pop(user_id, None)
     if stale:
         try:
@@ -271,32 +245,28 @@ async def logout(client, message):
         except Exception:
             pass
 
-    # Clear any active login session
     if user_id in login_states:
         state = login_states.pop(user_id, None)
         if state and "client" in state:
             try:
                 await state["client"].disconnect()
-            except:
+            except Exception:
                 pass
 
     if user and user.get('phone_session_string'):
         try:
-            from pyrogram import Client
-            from bot.config import API_ID, API_HASH
             temp_client = Client(
-                f"logout_{user_id}", 
-                session_string=user.get('phone_session_string'), 
-                api_id=API_ID, 
-                api_hash=API_HASH, 
+                f"logout_{user_id}",
+                session_string=user.get('phone_session_string'),
+                api_id=API_ID,
+                api_hash=API_HASH,
                 in_memory=True
             )
             await temp_client.start()
             await temp_client.log_out()
-
         except Exception:
             pass
-            
+
         await logout_user(user_id)
         await message.reply("✅ Logged out successfully! Your session has been cleared.")
     else:
