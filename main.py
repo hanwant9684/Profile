@@ -36,12 +36,6 @@ async def main():
         except Exception:
             pass
 
-    from bot.proxy_finder import find_working_proxy, PROXY_CACHE_FILE
-    if not os.environ.get("PROXY_URL"):
-        working_proxy = find_working_proxy()
-        if working_proxy:
-            os.environ["PROXY_URL"] = f"socks5://{working_proxy}"
-
     from bot.config import app
     from bot.database import init_db
 
