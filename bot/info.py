@@ -10,7 +10,7 @@ async def myinfo(client, message):
     if not user:
         await message.reply("User not found. /start first.")
         return
-        
+
     role_raw = user.get('role', 'free')
     role = role_raw.upper()
     is_privileged = role_raw in ['premium', 'admin', 'owner']
