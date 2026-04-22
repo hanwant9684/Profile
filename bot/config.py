@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 import aiohttp
-from urllib.parse import urlparse
 from bot.logger import setup_logger
 from pyrogram import Client
 from dotenv import load_dotenv
@@ -63,39 +62,11 @@ async def get_shared_session() -> aiohttp.ClientSession:
     return _shared_session
 
 
-def _parse_proxy(proxy_url: str) -> dict | None:
-    if not proxy_url:
-        return None
-    try:
-        parsed = urlparse(proxy_url)
-        scheme = parsed.scheme.lower()
-        if scheme not in ("socks5", "socks4", "http"):
-            print(f"⚠️  Unsupported proxy scheme '{scheme}'. Use socks5, socks4, or http.")
-            return None
-        proxy = {
-            "scheme": scheme,
-            "hostname": parsed.hostname,
-            "port": parsed.port,
-        }
-        if parsed.username:
-            proxy["username"] = parsed.username
-        if parsed.password:
-            proxy["password"] = parsed.password
-        print(f"🔌 Using proxy: {scheme}://{parsed.hostname}:{parsed.port}")
-        return proxy
-    except Exception as e:
-        print(f"⚠️  Failed to parse PROXY_URL: {e}")
-        return None
-
-
-_proxy = _parse_proxy(os.environ.get("PROXY_URL", ""))
-
 app = Client(
     "bot_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    proxy=_proxy,
     in_memory=True,
     sleep_threshold=30,
     no_updates=False,
