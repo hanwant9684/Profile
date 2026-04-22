@@ -4,6 +4,8 @@
 
 A Telegram bot built with Python that enables users to download content from Telegram links. The bot features a role-based access system (free/premium), daily download quotas, user authentication via Telegram sessions, and admin controls for bot management.
 
+For **public channel links** (e.g. `t.me/channel/123`), the bot uses direct extraction via `msg.copy()` / `copy_media_group()` — Telegram's servers handle the transfer with no download/upload needed. Private/restricted links still use the full download-then-upload path via the user's logged-in session.
+
 ## Quick Setup (New Replit Import)
 
 When importing to a new Replit:
@@ -36,7 +38,7 @@ Preferred communication style: Simple, everyday language.
 ## System Architecture
 
 ### Bot Framework
-- **Framework**: Kurigram (Pyrogram fork) via `pyrotgfork` for Telegram Bot API interaction
+- **Framework**: pyrofork (Pyrogram fork) — imports as `pyrogram` namespace, installed as `pyrofork` package
 - **Entry Point**: `main.py` initializes the database and starts the bot
 - **Modular Design**: Handlers are split across multiple files and imported to register with the bot client
 
@@ -46,6 +48,7 @@ Preferred communication style: Simple, everyday language.
 | `bot/config.py` | Environment variables, bot client initialization, global state (semaphores, active downloads) |
 | `bot/database.py` | SQLite database connection and user/settings CRUD operations |
 | `bot/handlers.py` | Main download link processing and force-subscribe verification |
+| `bot/batch.py` | `/batch` and `/mlinks` commands (Premium bulk download), `/cancelbatch` |
 | `bot/login.py` | User onboarding, terms acceptance, and Telegram session authentication |
 | `bot/admin.py` | Owner-only commands for stats, user management, and process control |
 | `bot/info.py` | User info and quota display commands |
@@ -83,7 +86,7 @@ Users table stores:
 Settings table stores key-value pairs (e.g., `force_sub_channel`)
 
 ## Dependencies (Python)
-- `pyrotgfork` — Pyrogram fork (Kurigram) for Telegram
+- `pyrofork` — Pyrogram fork for Telegram (imports as `pyrogram` namespace)
 - `aiofiles`, `aiohttp` — async file/HTTP operations
 - `asyncpg` — async PostgreSQL client
 - `certifi` — SSL certificates
