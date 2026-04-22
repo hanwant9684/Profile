@@ -788,7 +788,7 @@ async def help_command(client, message):
         "5 files/day · 15 files/month\n"
         "Premium: unlimited.",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url="https://t.me/Wolfy0046")],
+            [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
         ]),
     )
@@ -815,10 +815,10 @@ async def upgrade_command(client, message):
         f"💲 [PayPal]({PAYPAL_LINK})\n"
         f"🍎 [Apple Pay]({APPLE_PAY_ID})\n"
         f"💳 [Card]({CARD_PAYMENT_LINK})\n\n"
-        "After payment send screenshot to **@Wolfy0046**.",
+        "After payment send screenshot to **@Owner_Wolfy**.",
         disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url="https://t.me/Wolfy0046")],
+            [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
         ]),
     )
