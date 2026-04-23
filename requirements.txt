@@ -11,16 +11,3 @@ redis
 tgcrypto-pyrofork
 pymediainfo-pyrofork
 uvloop
-aiofiles
-aiohttp
-asyncpg
-certifi
-flask
-psutil
-pymediainfo-pyrofork
-pyrofork
-python-dotenv
-pyyaml
-redis
-tgcrypto-pyrofork
-uvloop
