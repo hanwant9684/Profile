@@ -276,7 +276,7 @@ def _parse_story_link(link: str):
 
 def _parse_link(link: str):
     """
-    Parse a t.me message link into (chat_id, message_id, is_private, comment_id, thread_id).
+    Parse a t.me message link into (chat_id, message_id, is_private, comment_id, thread_id, is_topic).
     Returns None if the link format is not recognised.
 
     Supported formats:
@@ -301,19 +301,19 @@ def _parse_link(link: str):
 
     m = re.fullmatch(r"https://t\.me/c/(\d+)/(\d+)", link)
     if m:
-        return int("-100" + m.group(1)), int(m.group(2)), True, comment_id, thread_id
+        return int("-100" + m.group(1)), int(m.group(2)), True, comment_id, thread_id, False
 
     m = re.fullmatch(r"https://t\.me/c/(\d+)/\d+/(\d+)", link)
     if m:
-        return int("-100" + m.group(1)), int(m.group(2)), True, comment_id, thread_id
+        return int("-100" + m.group(1)), int(m.group(2)), True, comment_id, thread_id, True
 
     m = re.fullmatch(r"https://t\.me/([^/+][^/]*)/(\d+)", link)
     if m:
-        return m.group(1), int(m.group(2)), False, comment_id, thread_id
+        return m.group(1), int(m.group(2)), False, comment_id, thread_id, False
 
-    m = re.fullmatch(r"https://t\.me/([^/+][^/]*)/\d+/(\d+)", link)
+    m = re.fullmatch(r"https://t\.me/([^/+][^/]*)/(\d+)/(\d+)", link)
     if m:
-        return m.group(1), int(m.group(2)), False, comment_id, thread_id
+        return m.group(1), int(m.group(3)), False, comment_id, thread_id, True
 
     return None
 
@@ -338,6 +338,7 @@ async def download_handler(
     link = link_override or message.text.strip()
 
     is_story = False
+    is_topic = False
     story_parsed = _parse_story_link(link)
     if story_parsed:
         is_story = True
@@ -351,7 +352,7 @@ async def download_handler(
             if not link_override:
                 await message.reply("❌ Unsupported link format.")
             return None
-        chat_id, msg_id, is_private, comment_id, thread_id = parsed
+        chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
 
     if _user_floodwait_until.get(user_id, 0) > time.time():
         wait_left = int(_user_floodwait_until[user_id] - time.time())
@@ -375,6 +376,9 @@ async def download_handler(
         if not link_override:
             await message.reply("❌ You are banned from using this bot.")
         return None
+
+    if is_topic and not is_private and user.get("phone_session_string"):
+        is_private = True
 
     if (is_private or is_story) and not user.get("phone_session_string"):
         if not link_override:
@@ -435,30 +439,9 @@ async def download_handler(
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
                 return None
-            except Exception as fetch_err:
-                if not is_private and user.get("phone_session_string"):
-                    try:
-                        user_client = await get_user_client(user_id, user["phone_session_string"])
-                        active_sessions.add(user_id)
-                        is_private = True
-                        msg = await user_client.get_messages(chat_id, msg_id, replies=0)
-                    except (AuthKeyUnregistered, SessionRevoked):
-                        from bot.database import logout_user
-                        await logout_user(user_id)
-                        await update_status(status, "❌ Your session expired. Please /login again.")
-                        return None
-                    except Exception as e2:
-                        await update_status(status, f"❌ Could not fetch message: {e2}")
-                        return None
-                else:
-                    if not is_private and not user.get("phone_session_string"):
-                        await update_status(
-                            status,
-                            f"❌ Could not fetch message. If this is a restricted group, use /login to connect your account."
-                        )
-                    else:
-                        await update_status(status, f"❌ Could not fetch message: {fetch_err}")
-                    return None
+            except Exception as e:
+                await update_status(status, f"❌ Could not fetch message: {e}")
+                return None
 
         if not is_story and comment_id is not None:
             _resolve_client = user_client
