@@ -435,9 +435,30 @@ async def download_handler(
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
                 return None
-            except Exception as e:
-                await update_status(status, f"❌ Could not fetch message: {e}")
-                return None
+            except Exception as fetch_err:
+                if not is_private and user.get("phone_session_string"):
+                    try:
+                        user_client = await get_user_client(user_id, user["phone_session_string"])
+                        active_sessions.add(user_id)
+                        is_private = True
+                        msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+                    except (AuthKeyUnregistered, SessionRevoked):
+                        from bot.database import logout_user
+                        await logout_user(user_id)
+                        await update_status(status, "❌ Your session expired. Please /login again.")
+                        return None
+                    except Exception as e2:
+                        await update_status(status, f"❌ Could not fetch message: {e2}")
+                        return None
+                else:
+                    if not is_private and not user.get("phone_session_string"):
+                        await update_status(
+                            status,
+                            f"❌ Could not fetch message. If this is a restricted group, use /login to connect your account."
+                        )
+                    else:
+                        await update_status(status, f"❌ Could not fetch message: {fetch_err}")
+                    return None
 
         if not is_story and comment_id is not None:
             _resolve_client = user_client
@@ -788,7 +809,7 @@ async def help_command(client, message):
         "5 files/day · 15 files/month\n"
         "Premium: unlimited.",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url="https://t.me/Wolfy0046")],
+            [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
         ]),
     )
@@ -815,10 +836,10 @@ async def upgrade_command(client, message):
         f"💲 [PayPal]({PAYPAL_LINK})\n"
         f"🍎 [Apple Pay]({APPLE_PAY_ID})\n"
         f"💳 [Card]({CARD_PAYMENT_LINK})\n\n"
-        "After payment send screenshot to **@Wolfy0046**.",
+        "After payment send screenshot to **@Owner_Wolfy**.",
         disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url="https://t.me/Wolfy0046")],
+            [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
         ]),
     )
