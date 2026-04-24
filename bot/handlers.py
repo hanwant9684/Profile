@@ -558,6 +558,8 @@ async def download_handler(
                 else:
                     await msg.copy(chat_id=user_id)
                 await send_to_dump(client, msg, user_id=user_id, source_link=getattr(msg, "link", None))
+                if not skip_quota and user.get("role", "free") == "free":
+                    await increment_quota(user_id)
                 if not status_msg_override:
                     try:
                         await status.delete()
@@ -587,6 +589,8 @@ async def download_handler(
                         else:
                             await msg.copy(chat_id=user_id, caption="")
                         await send_to_dump(client, msg, user_id=user_id, source_link=getattr(msg, "link", None))
+                        if not skip_quota and user.get("role", "free") == "free":
+                            await increment_quota(user_id)
                         if not status_msg_override:
                             try:
                                 await status.delete()
@@ -851,15 +855,14 @@ async def upgrade_command(client, message):
     await message.reply(
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
-        "🔸 10 days — $3\n"
-        "🔸 30 days — $4\n"
-        "🔸 60 days — $8\n"
-        "🔸 60 days — $12\n\n"
+        "🔸 10 days — $2\n"
+        "🔸 30 days — $3\n"
+        "🔸 60 days — $6\n\n"
         "• Unlimited downloads\n"
         "• Batch up to 50 files\n"
         "• Multi-link up to 50\n"
         "• Fast speed\n\n"
-        "🔥 **1 Year — $45**\n"
+        "🔥 **1 Year — $30**\n"
         "• All features + priority support\n\n"
         "💳 **Payment**\n"
         f"🪙 [Crypto / Binance]({CRYPTO_ADDRESS})\n"
