@@ -857,7 +857,7 @@ async def upgrade_command(client, message):
         "⚡ **Standard**\n"
         "🔸 10 days — $3\n"
         "🔸 30 days — $4\n"
-        "🔸 60 days — $8\n\n"
+        "🔸 60 days — $8\n"
         "🔸 90 days — $12\n\n"
         "• Unlimited downloads\n"
         "• Batch up to 50 files\n"
