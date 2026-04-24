@@ -45,6 +45,38 @@ async def download_media(client, message, progress=None, progress_args=()):
     return None
 
 
+async def _send_by_ext(
+    client: Client, chat_id, path: str, ext: str, kw: dict,
+    thumb, file_name, duration, width, height,
+):
+    if ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
+        return await client.send_video(
+            chat_id, path,
+            thumb=thumb, duration=duration, width=width, height=height,
+            supports_streaming=True, file_name=file_name, **kw
+        )
+    elif ext == ".gif":
+        return await client.send_animation(chat_id, path, **kw)
+    elif ext in (".mp3", ".m4a", ".flac"):
+        return await client.send_audio(
+            chat_id, path,
+            thumb=thumb, duration=duration, file_name=file_name, **kw
+        )
+    elif ext in (".ogg", ".opus"):
+        return await client.send_voice(chat_id, path, duration=duration, **kw)
+    elif ext in (".jpg", ".jpeg", ".png", ".webp"):
+        try:
+            return await client.send_photo(chat_id, path, **kw)
+        except (PhotoExtInvalid, PhotoInvalidDimensions, PhotoSaveFileInvalid):
+            return await client.send_document(
+                chat_id, path, file_name=file_name, **kw
+            )
+    else:
+        return await client.send_document(
+            chat_id, path, thumb=thumb, file_name=file_name, **kw
+        )
+
+
 async def upload_media(
     client: Client,
     chat_id,
@@ -57,6 +89,8 @@ async def upload_media(
     height: int = 0,
     progress=None,
     progress_args=(),
+    fallback_client: Client = None,
+    fallback_chat_id=None,
 ):
     """
     Upload a local file to Telegram and return the sent Message object.
@@ -67,39 +101,43 @@ async def upload_media(
     ext = os.path.splitext(path)[1].lower()
     kw = dict(caption=safe_cap, progress=progress, progress_args=progress_args)
 
+    last_exc = None
     for attempt in range(3):
         try:
-            if ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
-                return await client.send_video(
-                    chat_id, path,
-                    thumb=thumb, duration=duration, width=width, height=height,
-                    supports_streaming=True, file_name=file_name, **kw
-                )
-            elif ext == ".gif":
-                return await client.send_animation(chat_id, path, **kw)
-            elif ext in (".mp3", ".m4a", ".flac"):
-                return await client.send_audio(
-                    chat_id, path,
-                    thumb=thumb, duration=duration, file_name=file_name, **kw
-                )
-            elif ext in (".ogg", ".opus"):
-                return await client.send_voice(chat_id, path, duration=duration, **kw)
-            elif ext in (".jpg", ".jpeg", ".png", ".webp"):
-                try:
-                    return await client.send_photo(chat_id, path, **kw)
-                except (PhotoExtInvalid, PhotoInvalidDimensions, PhotoSaveFileInvalid):
-                    return await client.send_document(
-                        chat_id, path, file_name=file_name, **kw
-                    )
-            else:
-                return await client.send_document(
-                    chat_id, path, thumb=thumb, file_name=file_name, **kw
-                )
+            return await _send_by_ext(
+                client, chat_id, path, ext, kw,
+                thumb, file_name, duration, width, height,
+            )
         except (FloodWait, FloodPremiumWait) as e:
+            last_exc = e
             logging.warning(f"FloodWait {e.value}s on upload (attempt {attempt + 1}/3)")
             await asyncio.sleep(e.value)
-        except Exception:
+        except Exception as e:
+            last_exc = e
             if attempt == 2:
-                raise
+                break
             await asyncio.sleep(2 ** attempt)
+
+    if fallback_client is not None and fallback_client is not client:
+        target_chat = fallback_chat_id if fallback_chat_id is not None else chat_id
+        try:
+            return await _send_by_ext(
+                fallback_client, target_chat, path, ext, kw,
+                thumb, file_name, duration, width, height,
+            )
+        except (FloodWait, FloodPremiumWait) as e:
+            logging.warning(f"FloodWait {e.value}s on upload fallback")
+            await asyncio.sleep(e.value)
+            try:
+                return await _send_by_ext(
+                    fallback_client, target_chat, path, ext, kw,
+                    thumb, file_name, duration, width, height,
+                )
+            except Exception as e2:
+                last_exc = e2
+        except Exception as e:
+            last_exc = e
+
+    if last_exc is not None:
+        raise last_exc
     return None

@@ -6,7 +6,7 @@ import logging
 from collections import deque
 
 import pyrogram
-from pyrogram import filters, Client
+from pyrogram import filters, Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPrivileges
 from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
 
@@ -231,7 +231,35 @@ async def verify_force_sub(client: Client, user_id: int):
 # Dump channel
 # ---------------------------------------------------------------------------
 
-async def send_to_dump(client, msg):
+DUMP_CAPTION_LIMIT = 1024
+
+
+def _build_dump_caption(original_caption: str, user_id, source_link: str) -> str:
+    parts = []
+    if user_id:
+        parts.append(f"👤 {user_id}")
+    if source_link:
+        parts.append(f"🔗 {source_link}")
+    header = "\n".join(parts)
+
+    original_caption = original_caption or ""
+    if not header:
+        return original_caption[:DUMP_CAPTION_LIMIT]
+    if not original_caption:
+        return header[:DUMP_CAPTION_LIMIT]
+
+    sep = "\n\n"
+    available = DUMP_CAPTION_LIMIT - len(header) - len(sep)
+    if available <= 0:
+        return header[:DUMP_CAPTION_LIMIT]
+    if len(original_caption) <= available:
+        return header + sep + original_caption
+    if available <= 3:
+        return header[:DUMP_CAPTION_LIMIT]
+    return header + sep + original_caption[:available - 3] + "..."
+
+
+async def send_to_dump(client, msg, user_id=None, source_link=None):
     """Forward a sent message to the configured dump channel, if any."""
     setting = await get_setting("dump_channel_id")
     if not setting or not setting.get("value"):
@@ -242,8 +270,18 @@ async def send_to_dump(client, msg):
     except (ValueError, TypeError):
         logging.warning(f"send_to_dump: invalid dump_channel_id '{dump_id_str}'")
         return
+
+    if not source_link:
+        source_link = getattr(msg, "link", None)
+
+    new_caption = _build_dump_caption(msg.caption or "", user_id, source_link)
+
     try:
-        await client.copy_message(dump_id, msg.chat.id, msg.id)
+        await client.copy_message(
+            dump_id, msg.chat.id, msg.id,
+            caption=new_caption,
+            parse_mode=enums.ParseMode.DISABLED,
+        )
     except Exception as e:
         logging.error(f"send_to_dump error: {e}")
 
@@ -519,7 +557,7 @@ async def download_handler(
                     await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=msg_id)
                 else:
                     await msg.copy(chat_id=user_id)
-                await send_to_dump(client, msg)
+                await send_to_dump(client, msg, user_id=user_id, source_link=getattr(msg, "link", None))
                 if not status_msg_override:
                     try:
                         await status.delete()
@@ -548,7 +586,7 @@ async def download_handler(
                             await client.copy_media_group(chat_id=user_id, from_chat_id=chat_id, message_id=msg_id, captions="")
                         else:
                             await msg.copy(chat_id=user_id, caption="")
-                        await send_to_dump(client, msg)
+                        await send_to_dump(client, msg, user_id=user_id, source_link=getattr(msg, "link", None))
                         if not status_msg_override:
                             try:
                                 await status.delete()
@@ -695,6 +733,9 @@ async def download_handler(
                     duration = m.audio.duration or 0
                     file_name = m.audio.file_name
 
+                _fallback_client = client if upload_client is not client else None
+                _fallback_chat = user_id if destination_id == "me" else None
+
                 sent_msg = await upload_media(
                     upload_client, destination_id, path,
                     caption=caption,
@@ -705,6 +746,8 @@ async def download_handler(
                     height=height,
                     progress=progress_bar,
                     progress_args=(status, "📤 Uploading"),
+                    fallback_client=_fallback_client,
+                    fallback_chat_id=_fallback_chat,
                 )
 
                 if sent_msg and _using_user_channel and status_msg_override is None:
@@ -719,7 +762,11 @@ async def download_handler(
                         pass
 
                 if sent_msg:
-                    await send_to_dump(client, sent_msg)
+                    await send_to_dump(
+                        client, sent_msg,
+                        user_id=user_id,
+                        source_link=getattr(m, "link", None),
+                    )
 
             except Exception as e:
                 if str(e) == "StopProcess":
@@ -807,12 +854,12 @@ async def upgrade_command(client, message):
         "🔸 10 days — $3\n"
         "🔸 30 days — $4\n"
         "🔸 60 days — $8\n"
-        "🔸 90 days — $12\n\n"
+        "🔸 60 days — $12\n\n"
         "• Unlimited downloads\n"
         "• Batch up to 50 files\n"
         "• Multi-link up to 50\n"
         "• Fast speed\n\n"
-        "🔥 **1 Year — $30**\n"
+        "🔥 **1 Year — $45**\n"
         "• All features + priority support\n\n"
         "💳 **Payment**\n"
         f"🪙 [Crypto / Binance]({CRYPTO_ADDRESS})\n"
