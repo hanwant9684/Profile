@@ -207,63 +207,80 @@ async def progress_bar(current: int, total: int, msg, label: str):
 
 async def _resolve_upload_channel(user_id: int, user_client: Client, client: Client, user: dict):
     """
-    Resolve the user's private cloud channel (or Saved Messages fallback) as the upload
-    destination. The bot client always performs the actual upload since it is already
-    promoted as admin in the channel.
+    Resolve the upload destination.
+    Preferred: the user's private "Cloud Storage" channel (created via user_client;
+    bot uploads as admin).
+    Fallback: the bot's DM with the user (user_id) whenever the channel can't be
+    used — no usable session, channels-too-much, spam-restricted, create/promote
+    failure, etc.
     Returns (destination_id, using_user_channel).
     """
     if user_id in _dest_channel_cache:
         return _dest_channel_cache[user_id]
 
     channel_id = user.get("download_channel_id")
-    destination_id = user_id
-    _using_user_channel = False
 
+    # Legacy "saved_messages" sentinel: it used to route to "me", which for the
+    # bot client is the bot's own Saved Messages, not the user's. Treat it as no
+    # channel and try to create a real one; if that fails, fall back to bot DM.
+    # On successful creation the row is overwritten with the real channel id.
     if channel_id == "saved_messages":
-        destination_id = "me"
-        _using_user_channel = True
-    else:
-        if channel_id and user_client.is_connected:
-            try:
-                channel_id = int(channel_id)
-                try:
-                    await client.get_chat(channel_id)
-                except Exception:
-                    me = await client.get_me()
-                    bot_id = f"@{me.username}" if me.username else me.id
-                    try:
-                        await user_client.add_chat_members(channel_id, me.id)
-                    except Exception:
-                        pass
-                    try:
-                        await user_client.promote_chat_member(
-                            channel_id, bot_id,
-                            privileges=ChatPrivileges(
-                                can_post_messages=True,
-                                can_delete_messages=True,
-                                can_invite_users=True,
-                                can_manage_chat=True,
-                            ),
-                        )
-                    except Exception as re_e:
-                        logging.warning(f"Re-add bot to channel {channel_id} failed: {re_e}")
-                        channel_id = None
-            except Exception as e:
-                logging.warning(f"Channel check failed for user {user_id}: {e}")
-                channel_id = None
-        else:
-            channel_id = None
+        channel_id = None
 
-        if not channel_id:
+    if channel_id and user_client.is_connected:
+        try:
+            channel_id = int(channel_id)
             try:
-                new_chat = await user_client.create_channel(
-                    "Cloud Storage", "My private cloud storage for downloads."
+                await client.get_chat(channel_id)
+            except Exception:
+                me = await client.get_me()
+                bot_id = f"@{me.username}" if me.username else me.id
+                try:
+                    await user_client.add_chat_members(channel_id, me.id)
+                except Exception:
+                    pass
+                try:
+                    await user_client.promote_chat_member(
+                        channel_id, bot_id,
+                        privileges=ChatPrivileges(
+                            can_post_messages=True,
+                            can_delete_messages=True,
+                            can_invite_users=True,
+                            can_manage_chat=True,
+                        ),
+                    )
+                except Exception as re_e:
+                    logging.warning(f"Re-add bot to channel {channel_id} failed: {re_e}")
+                    channel_id = None
+        except Exception as e:
+            logging.warning(f"Channel check failed for user {user_id}: {e}")
+            channel_id = None
+    else:
+        channel_id = None
+
+    if not channel_id:
+        new_channel_id = None
+        try:
+            new_chat = await user_client.create_channel(
+                "Cloud Storage", "My private cloud storage for downloads."
+            )
+            new_channel_id = new_chat.id
+        except Exception as e:
+            if "CHANNELS_TOO_MUCH" in str(e):
+                logging.warning(
+                    f"User {user_id} has too many channels — falling back to bot DM"
                 )
-                channel_id = new_chat.id
-                await update_user_channel(user_id, channel_id)
+            else:
+                logging.error(
+                    f"Failed to create channel for user {user_id}: {e}. "
+                    f"Falling back to bot DM"
+                )
+
+        if new_channel_id is not None:
+            try:
                 me = await client.get_me()
                 await user_client.promote_chat_member(
-                    channel_id,
+                    new_channel_id,
                     f"@{me.username}" if me.username else me.id,
                     privileges=ChatPrivileges(
                         can_post_messages=True,
@@ -275,20 +292,22 @@ async def _resolve_upload_channel(user_id: int, user_client: Client, client: Cli
                         can_promote_members=False,
                     ),
                 )
+                channel_id = new_channel_id
+                await update_user_channel(user_id, channel_id)
                 logging.info(f"Created private channel {channel_id} for user {user_id}")
-            except Exception as e:
-                if "CHANNELS_TOO_MUCH" in str(e):
-                    await update_user_channel(user_id, "saved_messages")
-                    logging.warning(f"User {user_id} has too many channels — falling back to saved messages")
-                    destination_id = "me"
-                else:
-                    logging.error(f"Failed to create channel for user {user_id}: {e}")
-                _using_user_channel = True
+            except Exception as promote_e:
+                logging.error(
+                    f"Created channel {new_channel_id} for user {user_id} but bot "
+                    f"promotion failed: {promote_e}. Falling back to bot DM"
+                )
                 channel_id = None
 
-        if channel_id:
-            destination_id = channel_id
-            _using_user_channel = True
+    if channel_id:
+        destination_id = channel_id
+        _using_user_channel = True
+    else:
+        destination_id = user_id
+        _using_user_channel = False
 
     _dest_channel_cache[user_id] = (destination_id, _using_user_channel)
     return destination_id, _using_user_channel
