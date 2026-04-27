@@ -1,6 +1,5 @@
 import os
 import asyncio
-import logging
 import aiohttp
 from bot.logger import setup_logger
 from pyrogram import Client
