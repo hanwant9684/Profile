@@ -50,6 +50,10 @@ batch_sessions: set = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states: dict = {}
 
+# Per-user bot Client cache: { user_id: pyrogram.Client }
+# Each user registers their own bot via /setbot; we instantiate and reuse it.
+user_bots: dict = {}
+
 _shared_session = None
 
 

@@ -21,11 +21,9 @@ async def backup_to_github_async():
             logger.error("GITHUB_TOKEN or GITHUB_BACKUP_REPO not set")
             return False
 
-        # Use pg_dump to create a backup
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = f"backup_{timestamp}.sql"
-        
-        # pg_dump -d $DATABASE_URL -f $backup_file
+
         process = await asyncio.create_subprocess_exec(
             'pg_dump', '-d', str(DATABASE_URL), '-f', backup_file,
             stdout=asyncio.subprocess.PIPE,
@@ -109,9 +107,7 @@ async def restore_from_github_async():
         try:
             with open(temp_path, "wb") as f:
                 f.write(backup_content)
-            
-            # Use psql to restore
-            # psql -d $DATABASE_URL -f $temp_path
+
             process = await asyncio.create_subprocess_exec(
                 'psql', '-d', str(DATABASE_URL), '-f', temp_path,
                 stdout=asyncio.subprocess.PIPE,

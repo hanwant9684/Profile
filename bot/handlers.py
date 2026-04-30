@@ -17,12 +17,10 @@ from bot.config import (
     SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, update_user_channel
-from bot.transfer import download_media, upload_media, truncate_caption
+from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot
 
 
-# ---------------------------------------------------------------------------
-# User session cache
-# ---------------------------------------------------------------------------
+# --- User session cache ---
 
 user_clients: dict = {}
 active_sessions: set = set()
@@ -116,9 +114,7 @@ async def _cleanup_loop():
                 pass
 
 
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
+# --- Utilities ---
 
 async def update_status(msg, text: str):
     if not msg:
@@ -201,18 +197,56 @@ async def progress_bar(current: int, total: int, msg, label: str):
     await update_status(msg, text)
 
 
-# ---------------------------------------------------------------------------
-# Upload channel resolver (user_client creates/verifies channel; bot client uploads)
-# ---------------------------------------------------------------------------
+# --- Upload channel resolver: user_client creates/verifies channel; bot client uploads ---
 
-async def _resolve_upload_channel(user_id: int, user_client: Client, client: Client, user: dict):
+async def _ensure_bot_in_channel(
+    user_client: Client, channel_id, bot_client: Client, privileges: ChatPrivileges
+) -> bool:
     """
-    Resolve the upload destination.
-    Preferred: the user's private "Cloud Storage" channel (created via user_client;
-    bot uploads as admin).
-    Fallback: the bot's DM with the user (user_id) whenever the channel can't be
-    used — no usable session, channels-too-much, spam-restricted, create/promote
-    failure, etc.
+    Ensure `bot_client` is an admin in the user's `channel_id` with the given
+    `privileges`. Uses `user_client` (the userbot) to add and promote.
+    Always re-promotes so that channels created with stale (lower) privileges
+    get upgraded to the current set on the next call. Returns True on success.
+    """
+    try:
+        me = await bot_client.get_me()
+        bot_ref = f"@{me.username}" if me.username else me.id
+        try:
+            await user_client.add_chat_members(channel_id, me.id)
+        except Exception:
+            pass  # already a member
+        await user_client.promote_chat_member(channel_id, bot_ref, privileges=privileges)
+        return True
+    except Exception as e:
+        logging.warning(f"Could not add/promote bot in channel {channel_id}: {e}")
+        return False
+
+
+# Single admin privilege set used for BOTH the user's bot and the owner's shared bot.
+# Matches the perms the shared bot had before the per-user-bot switch.
+_BOT_ADMIN_PRIVS = ChatPrivileges(
+    can_post_messages=True,
+    can_delete_messages=True,
+    can_invite_users=True,
+    can_restrict_members=True,
+    can_pin_messages=True,
+    can_change_info=True,
+    can_promote_members=False,
+)
+
+
+async def _resolve_upload_channel(user_id: int, user_client: Client, upload_bot: Client, user: dict):
+    """
+    Resolve the upload destination for the user's per-user bot.
+
+    Preferred: the user's private "Cloud Storage" channel.
+      - upload_bot (user's @BotFather bot) is admin with full posting privs and uploads there.
+      - The owner's shared bot (`app`) is also admin with read-only privs so it
+        can copy each upload to the configured dump channel.
+    Fallback: upload_bot's DM with the user (user_id) when the channel can't be used.
+    Note: DM fallback requires the user to have pressed Start on their own bot,
+    AND it loses dump-channel forwarding (shared bot can't read that DM).
+
     Returns (destination_id, using_user_channel).
     """
     if user_id in _dest_channel_cache:
@@ -220,38 +254,18 @@ async def _resolve_upload_channel(user_id: int, user_client: Client, client: Cli
 
     channel_id = user.get("download_channel_id")
 
-    # Legacy "saved_messages" sentinel: it used to route to "me", which for the
-    # bot client is the bot's own Saved Messages, not the user's. Treat it as no
-    # channel and try to create a real one; if that fails, fall back to bot DM.
-    # On successful creation the row is overwritten with the real channel id.
+    # Legacy "saved_messages" sentinel — treat as no channel.
     if channel_id == "saved_messages":
         channel_id = None
 
     if channel_id and user_client.is_connected:
         try:
             channel_id = int(channel_id)
-            try:
-                await client.get_chat(channel_id)
-            except Exception:
-                me = await client.get_me()
-                bot_id = f"@{me.username}" if me.username else me.id
-                try:
-                    await user_client.add_chat_members(channel_id, me.id)
-                except Exception:
-                    pass
-                try:
-                    await user_client.promote_chat_member(
-                        channel_id, bot_id,
-                        privileges=ChatPrivileges(
-                            can_post_messages=True,
-                            can_delete_messages=True,
-                            can_invite_users=True,
-                            can_manage_chat=True,
-                        ),
-                    )
-                except Exception as re_e:
-                    logging.warning(f"Re-add bot to channel {channel_id} failed: {re_e}")
-                    channel_id = None
+            ok = await _ensure_bot_in_channel(
+                user_client, channel_id, upload_bot, _BOT_ADMIN_PRIVS
+            )
+            if not ok:
+                channel_id = None
         except Exception as e:
             logging.warning(f"Channel check failed for user {user_id}: {e}")
             channel_id = None
@@ -277,30 +291,27 @@ async def _resolve_upload_channel(user_id: int, user_client: Client, client: Cli
                 )
 
         if new_channel_id is not None:
-            try:
-                me = await client.get_me()
-                await user_client.promote_chat_member(
-                    new_channel_id,
-                    f"@{me.username}" if me.username else me.id,
-                    privileges=ChatPrivileges(
-                        can_post_messages=True,
-                        can_delete_messages=True,
-                        can_invite_users=True,
-                        can_restrict_members=True,
-                        can_pin_messages=True,
-                        can_change_info=True,
-                        can_promote_members=False,
-                    ),
-                )
+            ok = await _ensure_bot_in_channel(
+                user_client, new_channel_id, upload_bot, _BOT_ADMIN_PRIVS
+            )
+            if ok:
                 channel_id = new_channel_id
                 await update_user_channel(user_id, channel_id)
                 logging.info(f"Created private channel {channel_id} for user {user_id}")
-            except Exception as promote_e:
+            else:
                 logging.error(
-                    f"Created channel {new_channel_id} for user {user_id} but bot "
-                    f"promotion failed: {promote_e}. Falling back to bot DM"
+                    f"Created channel {new_channel_id} for user {user_id} but user-bot "
+                    f"promotion failed. Falling back to bot DM"
                 )
                 channel_id = None
+
+    # Also promote the owner's shared bot with the same admin set so dump-channel
+    # copying works. Best-effort; failure here doesn't break upload, only dump
+    # forwarding for this user.
+    if channel_id:
+        await _ensure_bot_in_channel(
+            user_client, channel_id, app, _BOT_ADMIN_PRIVS
+        )
 
     if channel_id:
         destination_id = channel_id
@@ -313,9 +324,7 @@ async def _resolve_upload_channel(user_id: int, user_client: Client, client: Cli
     return destination_id, _using_user_channel
 
 
-# ---------------------------------------------------------------------------
-# Force subscribe
-# ---------------------------------------------------------------------------
+# --- Force subscribe ---
 
 async def verify_force_sub(client: Client, user_id: int):
     setting = await get_setting("force_sub_channel")
@@ -338,9 +347,7 @@ async def verify_force_sub(client: Client, user_id: int):
         return True, None
 
 
-# ---------------------------------------------------------------------------
-# Dump channel
-# ---------------------------------------------------------------------------
+# --- Dump channel ---
 
 DUMP_CAPTION_LIMIT = 1024
 
@@ -397,9 +404,7 @@ async def send_to_dump(client, msg, user_id=None, source_link=None):
         logging.error(f"send_to_dump error: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Link parsing
-# ---------------------------------------------------------------------------
+# --- Link parsing ---
 
 def _parse_story_link(link: str):
     """
@@ -467,9 +472,7 @@ def _parse_link(link: str):
     return None
 
 
-# ---------------------------------------------------------------------------
-# Core download handler
-# ---------------------------------------------------------------------------
+# --- Core download handler ---
 
 @app.on_message(filters.regex(r"https?://t\.me/") & filters.private & ~filters.regex(r"^/"))
 async def download_handler(
@@ -737,11 +740,23 @@ async def download_handler(
                     await update_status(status, "🛑 Cancelled.")
                     return None
 
-                # Bot client always uploads; resolve destination channel when user is logged in
-                upload_client = client
+                # Per-user bot uploads: each user must register their own bot via /setbot.
+                # The user's bot has its own Telegram quota, isolated from other users.
+                upload_client = await get_user_bot(user_id)
+                if upload_client is None:
+                    await update_status(
+                        status,
+                        "❌ You haven't registered an upload bot yet.\n\n"
+                        "Create a bot via @BotFather (`/newbot`), then run\n"
+                        "`/setbot <token>` here.\n\n"
+                        "Your own bot uploads your files — this isolates you from "
+                        "other users' rate limits and keeps your account safe.",
+                    )
+                    return None
+
                 if user_client and user_client is not client:
                     destination_id, _using_user_channel = await _resolve_upload_channel(
-                        user_id, user_client, client, user
+                        user_id, user_client, upload_client, user
                     )
                 else:
                     destination_id = user_id
@@ -767,8 +782,23 @@ async def download_handler(
                     duration = m.audio.duration or 0
                     file_name = m.audio.file_name
 
-                _fallback_client = client if upload_client is not client else None
-                _fallback_chat = user_id if destination_id != user_id else None
+                # Size-limit fallback only: per-user bots are still capped at 2 GB by Telegram,
+                # so >2 GB files must be sent via the user's own userbot to their channel.
+                # FloodWait / PEER_FLOOD fallback to user_client is intentionally disabled —
+                # shifting load to the user's irreplaceable account is more dangerous than
+                # waiting on the bot. Disabled also when destination is the bot DM (user_client
+                # can't post to it as that bot).
+                if (
+                    user_client
+                    and user_client is not client
+                    and _using_user_channel
+                    and destination_id != user_id
+                ):
+                    _fallback_client = user_client
+                    _fallback_chat = destination_id
+                else:
+                    _fallback_client = None
+                    _fallback_chat = None
 
                 sent_msg = await upload_media(
                     upload_client, destination_id, path,
@@ -838,9 +868,7 @@ async def download_handler(
             progress_bar._data.pop(status.id, None)
 
 
-# ---------------------------------------------------------------------------
-# Cancel
-# ---------------------------------------------------------------------------
+# --- Cancel ---
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client, message):
@@ -852,17 +880,23 @@ async def cancel_handler(client, message):
         await message.reply("ℹ️ No active download to cancel.")
 
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
+# --- Commands ---
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
     await message.reply(
         "📖 **Help**\n\n"
+        "🤖 **First-time setup**\n"
+        "1. `/setbot <token>` — register your own @BotFather bot. "
+        "Your bot does the uploads (so your speed is isolated from other users).\n"
+        "2. `/login` — log in your Telegram account (only needed for "
+        "private/restricted links).\n\n"
         "🔗 **Download**\n"
-        "Send any t.me link to download.\n"
-        "For private/restricted links, use /login first.\n\n"
+        "Send any t.me link to download. Public links work right away. "
+        "Private/restricted links need both `/setbot` and `/login`.\n\n"
+        "🤖 **Bot management**\n"
+        "`/setbot <token>` — set or replace your upload bot\n"
+        "`/rembot` — remove your upload bot\n\n"
         "📦 **Batch** _(Premium)_\n"
         "`/batch start_link end_link` — range\n"
         "`/batch start_link 50` — count mode\n"

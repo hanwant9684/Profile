@@ -3,7 +3,11 @@ from pyrogram import filters, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
 from bot.config import app, login_states, API_ID, API_HASH
-from bot.database import get_user, create_user, update_user_terms, save_session_string, logout_user
+from bot.database import (
+    get_user, create_user, update_user_terms, save_session_string, logout_user,
+    set_bot_token, remove_bot_token, get_bot_token,
+)
+from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
 
 @app.on_message(filters.command("start") & filters.private)
@@ -85,7 +89,7 @@ async def login_start(client, message):
         "⏳ This session will expire in 5 minutes if no activity is detected."
     )
 
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "unset_dump", "help", "batch", "mlinks", "stats", "killall", "premium_users"]) & ~filters.regex(r"https://t\.me/"))
+@app.on_message(filters.private & filters.text & ~filters.command(["start", "login", "logout", "cancel", "cancelbatch", "cancel_login", "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban", "settings", "set_force_sub", "set_dump", "unset_dump", "help", "batch", "mlinks", "stats", "killall", "premium_users", "setbot", "rembot"]) & ~filters.regex(r"https://t\.me/"))
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
@@ -231,6 +235,80 @@ async def cancel_login(client, message):
         await message.reply("✅ Login process cancelled.")
     else:
         await message.reply("No active login process to cancel.")
+
+@app.on_message(filters.command("setbot") & filters.private)
+async def setbot_command(client, message: Message):
+    """Register the user's own @BotFather bot. Their bot performs all uploads.
+
+    Usage: /setbot 1234567:AAH...token
+    """
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    if not user or not user.get("is_agreed_terms"):
+        await message.reply("Please run /start and accept the terms first.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or ":" not in parts[1]:
+        await message.reply(
+            "❌ **Usage:** `/setbot <bot_token>`\n\n"
+            "1. Open @BotFather and run `/newbot` to create a fresh bot.\n"
+            "2. Copy the token (looks like `123456789:AAH....`).\n"
+            "3. Send `/setbot <that token>` here.\n\n"
+            "Your bot will be used to upload all your downloaded files. "
+            "Each upload uses *your* bot's quota with Telegram, isolated from other users."
+        )
+        return
+
+    token = parts[1].strip()
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    status = await message.reply("🔍 Validating token...")
+
+    try:
+        me = await validate_bot_token(token)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ **Invalid bot token.** Telegram rejected it:\n`{e}`\n\n"
+            f"Make sure you copied the full token from @BotFather."
+        )
+        return
+
+    await stop_user_bot(user_id)
+    await set_bot_token(user_id, token)
+
+    bot_username = f"@{me.username}" if me.username else str(me.id)
+    await status.edit_text(
+        f"✅ **Bot registered:** {bot_username}\n\n"
+        f"Now please open {bot_username} and press **Start** so it's allowed to "
+        f"DM you. After that, send any link to download — your bot will handle "
+        f"the upload.\n\n"
+        f"To swap bots later, just run `/setbot <new_token>` again.\n"
+        f"To remove it, run `/rembot`.",
+        disable_web_page_preview=True,
+    )
+
+
+@app.on_message(filters.command("rembot") & filters.private)
+async def rembot_command(client, message: Message):
+    """Stop the user's bot client and forget the token."""
+    user_id = message.from_user.id
+    token = await get_bot_token(user_id)
+    if not token:
+        await message.reply("ℹ️ You don't have a bot registered. Use /setbot to add one.")
+        return
+
+    await stop_user_bot(user_id)
+    await remove_bot_token(user_id)
+    await message.reply(
+        "✅ **Bot removed.** You'll need to run /setbot again before downloading "
+        "any restricted content."
+    )
+
 
 @app.on_message(filters.command("logout") & filters.private)
 async def logout(client, message):

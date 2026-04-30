@@ -113,6 +113,7 @@ async def init_db():
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS downloads_this_month INTEGER DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_download_month DATE")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_token TEXT")
             except Exception as e:
                 logger.info(f"Migration notice (likely columns already exist): {e}")
 
@@ -260,6 +261,43 @@ async def update_user(user_id, data: dict):
         await _redis_del(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error updating user {user_id}: {e}")
+
+
+async def get_bot_token(user_id) -> Optional[str]:
+    try:
+        user = await get_user(user_id)
+        if not user:
+            return None
+        return user.get("bot_token")
+    except Exception as e:
+        logger.error(f"Error getting bot_token for {user_id}: {e}")
+        return None
+
+
+async def set_bot_token(user_id, bot_token: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET bot_token = $1, updated_at = $2 WHERE telegram_id = $3',
+                bot_token, datetime.now(), int(user_id),
+            )
+        await _redis_del(f"user:{user_id}")
+        logger.info(f"Saved bot_token for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving bot_token for {user_id}: {e}")
+
+
+async def remove_bot_token(user_id):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET bot_token = NULL, updated_at = $1 WHERE telegram_id = $2',
+                datetime.now(), int(user_id),
+            )
+        await _redis_del(f"user:{user_id}")
+        logger.info(f"Cleared bot_token for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error clearing bot_token for {user_id}: {e}")
 
 
 async def update_user_channel(user_id, channel_id, channel_hash=None):
