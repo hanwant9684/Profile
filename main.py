@@ -51,15 +51,15 @@ async def main():
 
     try:
         import tgcrypto
-        print("✅ TgCrypto (pyrofork edition) is active. Fast transfers enabled.")
+        print("✅ TgCrypto is active. Fast transfers enabled.")
     except ImportError:
-        print("❌ TgCrypto NOT FOUND. Install tgcrypto-pyrofork for fast transfers.")
+        print("❌ TgCrypto NOT FOUND. Install tgcrypto for fast transfers.")
 
     try:
         import pymediainfo
-        print("✅ PyMediaInfo (pyrofork edition) is active.")
+        print("✅ PyMediaInfo is active.")
     except ImportError:
-        print("⚠️  PyMediaInfo NOT FOUND. Install pymediainfo-pyrofork for media metadata support.")
+        print("⚠️  PyMediaInfo NOT FOUND. Install pymediainfo for media metadata support.")
 
     print("Starting cleanup tasks...")
 

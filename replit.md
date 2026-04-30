@@ -38,7 +38,7 @@ Preferred communication style: Simple, everyday language.
 ## System Architecture
 
 ### Bot Framework
-- **Framework**: pyrofork (Pyrogram fork) — imports as `pyrogram` namespace, installed as `pyrofork` package
+- **Framework**: pyrofork (Pyrogram fork by Mayuri-Chan) — imports as `pyrogram` namespace, installed as `pyrofork` package
 - **Entry Point**: `main.py` initializes the database and starts the bot
 - **Modular Design**: Handlers are split across multiple files and imported to register with the bot client
 
@@ -77,6 +77,16 @@ Preferred communication style: Simple, everyday language.
 - **Video Streaming**: Videos are uploaded with proper thumbnail, duration, width/height for streaming playback
 - **Progress Tracking**: Real-time progress bars show download/upload status for each file
 
+### Per-User Bot Upload Architecture
+For all restricted/private content downloads, **each user must register their own @BotFather bot** via `/setbot <token>`. Their bot performs the actual upload — the shared owner bot only routes commands and never uploads bytes. This isolates each user's Telegram per-bot quota from other users (no shared FloodWait propagation), keeps the owner's bot account permanently uncapped, and avoids ever shifting heavy upload load onto the user's irreplaceable userbot account.
+
+- `/setbot <token>` — register/replace the user's upload bot. The token is validated by spinning up a probe Client; `bot_token` column persists in the `users` table.
+- `/rembot` — stop and evict the cached bot Client and clear the saved token.
+- Public-link `msg.copy()` / `copy_media_group()` paths still use the shared owner bot (no bytes flow through it — Telegram's servers do the copy).
+- Per-user bot Clients are lazily instantiated on first upload and cached in `bot.config.user_bots`. They run with `no_updates=True` (no update loop), `max_concurrent_transmissions=10`, `sleep_threshold=30`.
+- The Cloud Storage channel resolver adds the **user's own bot** as channel admin (not the owner's bot) via the user's userbot.
+- Fallback to the user's userbot for upload only triggers on **size-limit** / `FILE_PARTS_INVALID` errors (i.e. >2 GB files where bots physically can't upload). FloodWait and PEER_FLOOD are absorbed by the user's bot — never shifted to their userbot account.
+
 ### Data Models (SQLite)
 Users table stores:
 - `telegram_id`, `role`, `downloads_today`, `last_download_date`
@@ -86,7 +96,7 @@ Users table stores:
 Settings table stores key-value pairs (e.g., `force_sub_channel`)
 
 ## Dependencies (Python)
-- `pyrofork` — Pyrogram fork for Telegram (imports as `pyrogram` namespace)
+- `pyrofork` — Pyrogram fork (Mayuri-Chan) for Telegram, imports as `pyrogram` namespace.
 - `aiofiles`, `aiohttp` — async file/HTTP operations
 - `asyncpg` — async PostgreSQL client
 - `certifi` — SSL certificates
@@ -95,5 +105,6 @@ Settings table stores key-value pairs (e.g., `force_sub_channel`)
 - `python-dotenv` — environment variable loading
 - `pyyaml` — YAML parsing
 - `redis` — Redis client
-- `tgcrypto` — fast crypto for Telegram
+- `tgcrypto-pyrofork` — fast crypto for Telegram (pyrofork-bundled fork)
+- `pymediainfo-pyrofork` — media metadata (pyrofork-bundled fork)
 - `uvloop` — fast event loop
