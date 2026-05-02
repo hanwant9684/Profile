@@ -650,8 +650,15 @@ async def download_handler(
             except Exception as e:
                 logging.info(f"Thread resolution (thread={thread_id}): {e} — using direct message fetch")
 
-        if not msg or not getattr(msg, "media", None):
-            await update_status(status, "❌ No downloadable media found at this link.")
+        if not msg:
+            await update_status(status, "❌ Message not found or not accessible.")
+            return None
+
+        has_media = bool(getattr(msg, "media", None))
+        has_text = bool(getattr(msg, "text", None))
+
+        if not has_media and not has_text:
+            await update_status(status, "❌ No content found at this link (message is empty).")
             return None
 
         if not is_story and msg.media_group_id:
@@ -727,6 +734,31 @@ async def download_handler(
                     return None
                 logging.error(f"Direct extraction failed: {e}")
                 await update_status(status, "⚠️ Direct extraction failed, falling back to download/upload...")
+
+        # Text-only private message — no file to download, send the text directly
+        if not has_media:
+            text = getattr(msg, "text", None) or ""
+            entities = getattr(msg, "entities", None) or []
+            try:
+                await update_status(status, "✍️ Copying text message...")
+                await client.send_message(
+                    user_id, text,
+                    entities=entities,
+                    disable_web_page_preview=False,
+                )
+                try:
+                    await send_to_dump(client, msg, user_id=user_id, source_link=getattr(msg, "link", None))
+                except Exception:
+                    pass
+                if not status_msg_override:
+                    try:
+                        await status.delete()
+                    except Exception:
+                        pass
+            except Exception as e:
+                await update_status(status, f"❌ Failed to copy text message: {e}")
+            active_downloads.discard(user_id)
+            return msg
 
         for m in messages:
             if user_id in cancel_flags:
