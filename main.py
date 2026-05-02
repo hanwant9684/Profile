@@ -21,9 +21,10 @@ async def main():
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("🚀 Starting Redis server...")
         subprocess.Popen(
-            ["redis-server", "--bind", "0.0.0.0", "--port", "6379", "--daemonize", "yes"]
+            ["redis-server", "--bind", "127.0.0.1", "--port", "6379",
+             "--daemonize", "yes", "--dir", "/tmp", "--logfile", "/tmp/redis.log"]
         )
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
     os.makedirs("downloads", exist_ok=True)
     for name in os.listdir("downloads"):
