@@ -527,6 +527,16 @@ async def download_handler(
             await message.reply("❌ You are banned from using this bot.")
         return None
 
+    if user.get("role") not in ("admin", "owner"):
+        mm = await get_setting("maintenance_mode")
+        if mm and mm.get("value") == "on":
+            if not link_override:
+                await message.reply(
+                    "🔧 **Bot is under maintenance.**\n\n"
+                    "We'll be back shortly. Please try again later."
+                )
+            return None
+
     if is_topic and not is_private and user.get("phone_session_string"):
         is_private = True
 
