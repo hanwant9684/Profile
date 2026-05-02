@@ -47,10 +47,13 @@ async def start(client, message):
     user = await get_user(user_id)
     if not user:
         user = await create_user(user_id, username, full_name)
+        if not user:
+            # create_user failed — still allow them to proceed; accept_terms will upsert
+            user = {"telegram_id": user_id, "is_agreed_terms": False, "role": "free"}
     else:
         if user.get("username") != username or user.get("full_name") != full_name:
             await create_user(user_id, username, full_name)
-            user = await get_user(user_id)
+            user = await get_user(user_id) or user
 
     # Already fully onboarded — show a clean welcome back
     if user and user.get("is_agreed_terms"):
@@ -104,7 +107,9 @@ async def start(client, message):
 @app.on_callback_query(filters.regex("accept_terms"))
 async def accept_terms(client, callback_query):
     user_id = callback_query.from_user.id
-    await update_user_terms(user_id, True)
+    username = callback_query.from_user.username
+    full_name = f"{callback_query.from_user.first_name or ''} {callback_query.from_user.last_name or ''}".strip()
+    await update_user_terms(user_id, True, username=username, full_name=full_name)
     try:
         await callback_query.message.edit_text(
             "✅ **You're in!**\n\n"

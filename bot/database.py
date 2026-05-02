@@ -204,11 +204,21 @@ async def create_user(user_id, username=None, full_name=None) -> Optional[Dict]:
         return None
 
 
-async def update_user_terms(user_id, agreed=True):
+async def update_user_terms(user_id, agreed=True, username=None, full_name=None):
     try:
+        now = datetime.now()
+        today = now.date()
         async with pool.acquire() as conn:
-            await conn.execute('UPDATE users SET is_agreed_terms = $1, updated_at = $2 WHERE telegram_id = $3',
-                               agreed, datetime.now(), int(user_id))
+            await conn.execute(
+                '''INSERT INTO users (telegram_id, username, full_name, role, downloads_today,
+                                     last_download_date, is_agreed_terms, is_banned, ads_today,
+                                     created_at, updated_at)
+                   VALUES ($1, $2, $3, 'free', 0, $4, $5, FALSE, 0, $6, $6)
+                   ON CONFLICT (telegram_id) DO UPDATE SET
+                       is_agreed_terms = EXCLUDED.is_agreed_terms,
+                       updated_at = EXCLUDED.updated_at''',
+                int(user_id), username, full_name, today, agreed, now
+            )
         await _redis_del(f"user:{user_id}")
     except Exception as e:
         logger.error(f"Error updating terms for {user_id}: {e}")
