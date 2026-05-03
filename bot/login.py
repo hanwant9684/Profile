@@ -146,8 +146,8 @@ async def onboard_skip_bot(client, callback_query):
             "When you're ready:\n"
             "1. Open @BotFather → `/newbot`\n"
             "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-            "2. Run `/setbot bot_token` here\n"
-            "3. Press **Start** on your bot\n\n"
+            "3. Run `/setbot bot_token` here\n"
+            "4. Press **Start** on your bot\n\n"
             "Then send any Telegram link to download."
         )
     except Exception as e:
