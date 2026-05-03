@@ -144,8 +144,9 @@ async def onboard_skip_bot(client, callback_query):
             "⚠️ **Bot setup skipped.**\n\n"
             "You won't be able to download anything until you register an upload bot.\n\n"
             "When you're ready:\n"
-            "1. Open @BotFather → `/newbot` → copy the token\n"
-            "2. Run `/setbot <token>` here\n"
+            "1. Open @BotFather → `/newbot`\n"
+            "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+            "2. Run `/setbot bot_token` here\n"
             "3. Press **Start** on your bot\n\n"
             "Then send any Telegram link to download."
         )
@@ -553,9 +554,10 @@ async def setbot_command(client, message: Message):
     if len(parts) < 2 or ":" not in parts[1]:
         await message.reply(
             "❌ **Usage:** `/setbot <bot_token>`\n\n"
-            "1. Open @BotFather → `/newbot` → copy the token\n"
-            "2. Send `/setbot <token>` here\n"
-            "3. Press **Start** on your bot\n\n"
+            "1. Open @BotFather → `/newbot`\n"
+            "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+            "3. Send `/setbot bot_token` here\n"
+            "4. Press **Start** on your bot\n\n"
             "Your bot delivers all files directly to your DM."
         )
         return
