@@ -104,26 +104,6 @@ async def set_force_sub(client, message):
     except Exception:
         await message.reply("Usage: `/set_force_sub @channel`")
 
-@app.on_message(filters.command("set_dump") & filters.private)
-async def set_dump(client, message):
-    user = await get_user(message.from_user.id)
-    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
-        return
-    try:
-        channel_id = message.text.split()[1]
-        await update_setting("dump_channel_id", channel_id)
-        await message.reply(f"✅ Dump channel ID set to: `{channel_id}`")
-    except Exception:
-        await message.reply("Usage: `/set_dump <channel_id>`")
-
-@app.on_message(filters.command("unset_dump") & filters.private)
-async def unset_dump(client, message):
-    user = await get_user(message.from_user.id)
-    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
-        return
-    await update_setting("dump_channel_id", None)
-    await message.reply("✅ Dump channel cleared. Files will no longer be copied to a dump channel.")
-
 @app.on_message(filters.command("settings") & filters.private)
 async def view_settings(client, message):
     user = await get_user(message.from_user.id)
@@ -134,11 +114,9 @@ async def view_settings(client, message):
     from bot.handlers import user_clients
 
     fs = await get_setting("force_sub_channel")
-    dc = await get_setting("dump_channel_id")
     mm = await get_setting("maintenance_mode")
 
     fs_val = (fs.get("value") if fs else None) or "Not Set"
-    dc_val = (dc.get("value") if dc else None) or "Not Set"
     mm_on = (mm.get("value") if mm else None) == "on"
 
     active_dl = len(active_downloads)
@@ -146,7 +124,6 @@ async def view_settings(client, message):
 
     mm_display = "🔴 ON  — bot paused for users" if mm_on else "🟢 OFF — bot running normally"
     fs_display = f"`{fs_val}`" if fs_val != "Not Set" else "Not Set"
-    dc_display = f"`{dc_val}`" if dc_val != "Not Set" else "Not Set"
 
     text = (
         "╔══════════════════════════╗\n"
@@ -156,9 +133,6 @@ async def view_settings(client, message):
         "━━━  Access Control  ━━━\n"
         f"📢 Force Sub:     {fs_display}\n"
         f"🔧 Maintenance:  {mm_display}\n\n"
-
-        "━━━  Storage  ━━━\n"
-        f"🗑️ Dump Channel:  {dc_display}\n\n"
 
         "━━━  Quotas (free users)  ━━━\n"
         f"📅 Daily limit:    `{DAILY_LIMIT}` downloads / day\n"
@@ -170,8 +144,6 @@ async def view_settings(client, message):
 
         "━━━  Commands  ━━━\n"
         "`/set_force_sub @channel` — set force sub\n"
-        "`/set_dump <channel_id>` — set dump channel\n"
-        "`/unset_dump` — remove dump channel\n"
         "`/set_maintenance on|off` — toggle maintenance"
     )
     await message.reply(text)

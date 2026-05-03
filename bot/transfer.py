@@ -14,11 +14,11 @@ from pyrogram.errors.exceptions.bad_request_400 import (
 from bot.config import API_ID, API_HASH, user_bots
 
 
-# --- Per-user bot management ----------------------------------------------
+# --- Per-user bot management ---
 # Each user registers their own @BotFather bot via /setbot. We instantiate
-# their bot Client lazily on first upload and keep it cached. Their bot is
-# the one that performs the actual file upload — the shared owner bot only
-# routes commands and never uploads bytes.
+# their bot Client lazily on first use and keep it cached. Their bot is the
+# one that performs all uploads and copies — the shared owner bot only routes
+# commands and never uploads bytes.
 
 _user_bot_locks: dict = {}
 
@@ -168,22 +168,6 @@ async def _send_by_ext(
         )
 
 
-# Fallback to user_client (userbot) is intentionally restricted to size-limit /
-# bot-cant-upload-this-file errors only. We do NOT fall back on FloodWait or
-# PEER_FLOOD, because shifting upload load onto the user's irreplaceable Telegram
-# account is more dangerous than waiting on a (replaceable) bot.
-FALLBACK_FAST_FAIL_MARKERS = (
-    "bigger than",          # local size-limit ValueError from save_file (>2 GB)
-    "FILE_PARTS_INVALID",
-    "FILE_PART_TOO_BIG",
-)
-
-
-def _should_fast_fallback(exc: Exception) -> bool:
-    msg = str(exc)
-    return any(marker in msg for marker in FALLBACK_FAST_FAIL_MARKERS)
-
-
 async def upload_media(
     client: Client,
     chat_id,
@@ -196,23 +180,15 @@ async def upload_media(
     height: int = 0,
     progress=None,
     progress_args=(),
-    fallback_client: Client = None,
-    fallback_chat_id=None,
 ):
     """
-    Upload a local file to Telegram and return the sent Message object.
-    Selects the appropriate send method based on file extension.
-    Primary client gets up to 3 attempts on transient errors / FloodWait.
-    The fallback client (if provided) is used **only** for size-limit /
-    FILE_PARTS_INVALID style errors (e.g. >2 GB files where the bot
-    physically can't upload). FloodWait and PEER_FLOOD are absorbed by the
-    primary client — we never shift them to the user's account.
+    Upload a local file to Telegram via the user's own bot and return the
+    sent Message object. Selects the appropriate send method based on file
+    extension. Retries up to 3 times on transient errors and FloodWait.
     """
     safe_cap = truncate_caption(caption)
     ext = os.path.splitext(path)[1].lower()
     kw = dict(caption=safe_cap, progress=progress, progress_args=progress_args)
-    has_fallback = fallback_client is not None and fallback_client is not client
-    fast_fallback_triggered = False
 
     last_exc = None
     for attempt in range(3):
@@ -227,39 +203,9 @@ async def upload_media(
             await asyncio.sleep(e.value)
         except Exception as e:
             last_exc = e
-            if has_fallback and _should_fast_fallback(e):
-                logging.warning(
-                    f"Primary upload hit non-recoverable error ({type(e).__name__}: {e}) "
-                    f"— going straight to fallback"
-                )
-                fast_fallback_triggered = True
-                break
             if attempt == 2:
                 break
             await asyncio.sleep(2 ** attempt)
-
-    # Only use fallback for size-limit class errors. Plain FloodWait or 3-attempt
-    # exhaustion does NOT trigger fallback to the user's account.
-    if has_fallback and fast_fallback_triggered:
-        target_chat = fallback_chat_id if fallback_chat_id is not None else chat_id
-        logging.info(f"Falling back to user_client for upload to {target_chat}")
-        try:
-            return await _send_by_ext(
-                fallback_client, target_chat, path, ext, kw,
-                thumb, file_name, duration, width, height,
-            )
-        except (FloodWait, FloodPremiumWait) as e:
-            logging.warning(f"FloodWait {e.value}s on upload fallback")
-            await asyncio.sleep(e.value)
-            try:
-                return await _send_by_ext(
-                    fallback_client, target_chat, path, ext, kw,
-                    thumb, file_name, duration, width, height,
-                )
-            except Exception as e2:
-                last_exc = e2
-        except Exception as e:
-            last_exc = e
 
     if last_exc is not None:
         raise last_exc

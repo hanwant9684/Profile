@@ -310,15 +310,6 @@ async def remove_bot_token(user_id):
         logger.error(f"Error clearing bot_token for {user_id}: {e}")
 
 
-async def update_user_channel(user_id, channel_id, channel_hash=None):
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute('UPDATE users SET download_channel_id = $1, download_channel_hash = $2, updated_at = $3 WHERE telegram_id = $4',
-                               str(channel_id), channel_hash, datetime.now(), int(user_id))
-        await _redis_del(f"user:{user_id}")
-        logger.info(f"Updated download channel for user {user_id}: {channel_id}")
-    except Exception as e:
-        logger.error(f"Error updating user channel for {user_id}: {e}")
 
 
 async def set_user_role(user_id, role, duration_days=None):
@@ -621,3 +612,22 @@ async def get_user_count():
     except Exception as e:
         logger.error(f"Error getting user count: {e}")
         return 0
+
+
+async def check_user_agreed(user_id) -> bool:
+    """
+    Direct DB lookup — bypasses Redis — to check if the user has accepted T&C.
+    Used exclusively in /start so that deleting a DB row always resets onboarding,
+    even when Redis still holds a stale cache entry.
+    """
+    try:
+        _require_pool()
+        async with pool.acquire() as conn:
+            val = await conn.fetchval(
+                'SELECT is_agreed_terms FROM users WHERE telegram_id = $1',
+                int(user_id)
+            )
+        return bool(val)
+    except Exception as e:
+        logger.error(f"check_user_agreed error for {user_id}: {e}")
+        return False
