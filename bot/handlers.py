@@ -488,9 +488,10 @@ async def download_handler(
                 await update_status(
                     status,
                     "❌ You need a personal upload bot to receive files.\n\n"
-                    "1. Open @BotFather → `/newbot` → copy the token\n"
-                    "2. Run `/setbot <token>` here\n"
-                    "3. Press **Start** on your bot\n\n"
+                    "1. Open @BotFather → `/newbot`\n"
+                    "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+                    "3. Run `/setbot bot_token` here\n"
+                    "4. Press **Start** on your bot\n\n"
                     "All files are delivered directly to your bot's DM.",
                 )
                 active_downloads.discard(user_id)
@@ -631,9 +632,10 @@ async def download_handler(
                     await update_status(
                         status,
                         "❌ You haven't registered an upload bot yet.\n\n"
-                        "1. Open @BotFather → `/newbot` → copy the token\n"
-                        "2. Run `/setbot <token>` here\n"
-                        "3. Press **Start** on your bot",
+                        "1. Open @BotFather → `/newbot`\n"
+                        "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+                        "3. Run `/setbot bot_token` here\n"
+                        "4. Press **Start** on your bot",
                     )
                     return None
 
