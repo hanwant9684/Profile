@@ -19,7 +19,7 @@ from bot.database import get_user
 # After a streak of clean successes, the delay decays back toward the base.
 
 class BatchPacer:
-    BASE_DELAY = 10.0    # seconds between items in steady state
+    BASE_DELAY = 10.0   # seconds between items in steady state
     MAX_DELAY = 60.0    # ceiling for the adaptive delay
     DECAY_AFTER = 5     # consecutive successes before relaxing
     DECAY_FACTOR = 0.7  # delay multiplier per decay step
@@ -206,6 +206,15 @@ async def batch_handler(client, message):
                 skipped += 1
 
             if idx < count:
+                wait_secs = int(pacer.delay)
+                try:
+                    await status.edit_text(
+                        f"✅ **Item {idx}/{count} done**\n\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped}\n\n"
+                        f"⏳ Next item in {wait_secs}s..."
+                    )
+                except Exception:
+                    pass
                 await pacer.wait()
 
         try:
@@ -314,6 +323,15 @@ async def mlinks_handler(client, message):
                 skipped += 1
 
             if idx < count:
+                wait_secs = int(pacer.delay)
+                try:
+                    await status.edit_text(
+                        f"✅ **Link {idx}/{count} done**\n\n"
+                        f"✅ Done: {done} | ❌ Skipped: {skipped}\n\n"
+                        f"⏳ Next link in {wait_secs}s..."
+                    )
+                except Exception:
+                    pass
                 await pacer.wait()
 
         try:
