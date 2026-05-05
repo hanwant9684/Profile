@@ -19,8 +19,8 @@ from bot.database import get_user
 # After a streak of clean successes, the delay decays back toward the base.
 
 class BatchPacer:
-    BASE_DELAY = 1.5    # seconds between items in steady state
-    MAX_DELAY = 10.0    # ceiling for the adaptive delay
+    BASE_DELAY = 10.0    # seconds between items in steady state
+    MAX_DELAY = 60.0    # ceiling for the adaptive delay
     DECAY_AFTER = 5     # consecutive successes before relaxing
     DECAY_FACTOR = 0.7  # delay multiplier per decay step
 
