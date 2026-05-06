@@ -178,6 +178,9 @@ async def batch_handler(client, message):
             except Exception:
                 pass
 
+            if idx > 1:
+                await pacer.wait()
+
             try:
                 from bot.handlers import download_handler
                 result = await download_handler(
@@ -204,18 +207,6 @@ async def batch_handler(client, message):
                 logging.error(f"Batch item error (link={link}): {e}")
                 pacer.on_error()
                 skipped += 1
-
-            if idx < count:
-                wait_secs = int(pacer.delay)
-                try:
-                    await status.edit_text(
-                        f"✅ **Item {idx}/{count} done**\n\n"
-                        f"✅ Done: {done} | ❌ Skipped: {skipped}\n\n"
-                        f"⏳ Next item in {wait_secs}s..."
-                    )
-                except Exception:
-                    pass
-                await pacer.wait()
 
         try:
             await status.edit_text(
@@ -296,6 +287,9 @@ async def mlinks_handler(client, message):
             except Exception:
                 pass
 
+            if idx > 1:
+                await pacer.wait()
+
             try:
                 from bot.handlers import download_handler
                 result = await download_handler(
@@ -321,18 +315,6 @@ async def mlinks_handler(client, message):
                 logging.error(f"mlinks item error (link={link}): {e}")
                 pacer.on_error()
                 skipped += 1
-
-            if idx < count:
-                wait_secs = int(pacer.delay)
-                try:
-                    await status.edit_text(
-                        f"✅ **Link {idx}/{count} done**\n\n"
-                        f"✅ Done: {done} | ❌ Skipped: {skipped}\n\n"
-                        f"⏳ Next link in {wait_secs}s..."
-                    )
-                except Exception:
-                    pass
-                await pacer.wait()
 
         try:
             await status.edit_text(
