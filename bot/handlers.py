@@ -29,6 +29,9 @@ _cleanup_started = False
 MAX_FLOODWAIT_TOLERATE = 60
 _user_floodwait_until: dict = {}
 
+FREE_DOWNLOAD_COOLDOWN = 15 * 60  # 15 minutes in seconds
+_user_last_download_time: dict = {}
+
 
 async def get_user_client(user_id: int, session_str: str) -> Client:
     global _cleanup_started
@@ -361,6 +364,21 @@ async def download_handler(
                 await message.reply(f"❌ {reason}")
             return None
 
+        last_dl = _user_last_download_time.get(user_id, 0)
+        elapsed = time.time() - last_dl
+        if elapsed < FREE_DOWNLOAD_COOLDOWN:
+            wait_left = int(FREE_DOWNLOAD_COOLDOWN - elapsed)
+            mins, secs = divmod(wait_left, 60)
+            wait_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+            if not link_override:
+                await message.reply(
+                    f"⏳ **Please wait {wait_str}** before your next download.\n\n"
+                    f"Free users must wait **15 minutes** between downloads.\n\n"
+                    f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
+                    f"👉 /upgrade"
+                )
+            return None
+
     status = status_msg_override or await message.reply("⏳ Processing...")
     if status is None:
         return None
@@ -510,6 +528,7 @@ async def download_handler(
                     )
                 if not skip_quota and user.get("role", "free") == "free":
                     await increment_quota(user_id)
+                    _user_last_download_time[user_id] = time.time()
                 if not status_msg_override:
                     try:
                         await status.delete()
@@ -705,6 +724,7 @@ async def download_handler(
 
         if not skip_quota and user.get("role", "free") == "free":
             await increment_quota(user_id)
+            _user_last_download_time[user_id] = time.time()
 
         if not status_msg_override:
             try:
