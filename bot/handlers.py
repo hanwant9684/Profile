@@ -768,6 +768,7 @@ async def help_command(client, message):
     await message.reply(
         "📖 **Help**\n\n"
         "🤖 **First-time setup**\n"
+        "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) to get started quickly.\n\n"
         "1. `/setbot <token>` — register your own @BotFather bot. "
         "Your bot delivers files directly to your DM.\n"
         "2. `/login` — connect your Telegram account (only needed for "
@@ -791,6 +792,7 @@ async def help_command(client, message):
             [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
         ]),
+        disable_web_page_preview=True,
     )
 
 

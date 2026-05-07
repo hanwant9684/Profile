@@ -83,8 +83,13 @@ async def start(client, message):
             f"👋 **Welcome back!**\n\n"
             f"Role: **{role}**\n"
             f"Status: {status_line}\n\n"
-            f"Send any Telegram link to download.",
-            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None
+            + (
+                "📹 [Watch the setup guide](https://t.me/Wolfy004/155) to complete your setup.\n\n"
+                if not has_bot else ""
+            )
+            + "Send any Telegram link to download.",
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            disable_web_page_preview=True,
         )
         return
 
@@ -92,6 +97,7 @@ async def start(client, message):
     await message.reply(
         "👋 **Welcome to the Downloader Bot!**\n\n"
         "I can download media from Telegram links — photos, videos, files and more.\n\n"
+        "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) before getting started.\n\n"
         "📋 **Quick Terms:**\n"
         "• No illegal content\n"
         "• You are responsible for what you download\n"
@@ -99,7 +105,8 @@ async def start(client, message):
         "Tap below to accept and get started.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Accept & Get Started", callback_data="accept_terms")]
-        ])
+        ]),
+        disable_web_page_preview=True,
     )
 
 
