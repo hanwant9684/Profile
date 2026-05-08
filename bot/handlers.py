@@ -769,15 +769,15 @@ async def help_command(client, message):
         "📖 **Help**\n\n"
         "🤖 **First-time setup**\n"
         "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) to get started quickly.\n\n"
-        "1. `/setbot <token>` — register your own @BotFather bot. "
+        "1. `/setbot bot_token` — register your own @BotFather bot. "
         "Your bot delivers files directly to your DM.\n"
         "2. `/login` — connect your Telegram account (only needed for "
         "private/restricted links).\n\n"
         "🔗 **Download**\n"
         "Send any t.me link. Both public and private links are sent "
-        "straight to your bot's DM — no shared channels, no dump copies.\n\n"
+        "straight to your bot's DM.\n\n"
         "🤖 **Bot management**\n"
-        "`/setbot <token>` — set or replace your upload bot\n"
+        "`/setbot bot_token` — set or replace your upload bot\n"
         "`/rembot` — remove your upload bot\n\n"
         "📦 **Batch** _(Premium)_\n"
         "`/batch start_link end_link` — range\n"
@@ -785,9 +785,9 @@ async def help_command(client, message):
         "Max 50 files per batch.\n\n"
         "🔗 **Multi-link** _(Premium)_\n"
         "`/mlinks` then paste up to 50 links, one per line.\n\n"
-        "💰 **Quota** _(Free)_\n"
-        "5 files/day · 15 files/month\n"
-        "Premium: unlimited.",
+        "💰 **Quota**\n"
+        "Free: 2 files/day · 5 files/month\n"
+        "Premium: **unlimited**.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
