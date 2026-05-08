@@ -46,6 +46,7 @@ async def main():
     import bot.batch
     import bot.admin
     import bot.info
+    import bot.referral
 
     print("Initializing database...")
     await init_db()
