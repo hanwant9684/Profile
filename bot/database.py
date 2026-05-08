@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 REDIS_URL = os.environ.get("REDIS_URL")
 
-DAILY_LIMIT = 5
-MONTHLY_LIMIT = 15
+DAILY_LIMIT = 2
+MONTHLY_LIMIT = 5
 
 REFERRAL_MILESTONE = 30
 REFERRAL_PREMIUM_DAYS = 30
