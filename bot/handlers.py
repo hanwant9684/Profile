@@ -478,8 +478,29 @@ async def download_handler(
         has_media = bool(getattr(msg, "media", None))
         has_text = bool(getattr(msg, "text", None))
 
+        # Bots can't read public groups — fall back to user session if available
+        if not has_media and not has_text and not is_private and user.get("phone_session_string"):
+            try:
+                user_client = await get_user_client(user_id, user["phone_session_string"])
+                active_sessions.add(user_id)
+                msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+                is_private = True
+                has_media = bool(getattr(msg, "media", None))
+                has_text = bool(getattr(msg, "text", None))
+            except (AuthKeyUnregistered, SessionRevoked):
+                from bot.database import logout_user
+                await logout_user(user_id)
+                await update_status(status, "❌ Your session expired. Please /login again.")
+                return None
+            except Exception as e:
+                logging.warning(f"Public group fallback failed: {e}")
+
         if not has_media and not has_text:
-            await update_status(status, "❌ No content found at this link (message is empty).")
+            await update_status(status,
+                "❌ No content found. This may be a public group — use /login to connect your account and try again."
+                if not is_private and not user.get("phone_session_string")
+                else "❌ No content found at this link (message is empty)."
+            )
             return None
 
         if not is_story and msg.media_group_id:
