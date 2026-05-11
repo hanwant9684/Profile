@@ -432,7 +432,7 @@ async def handle_login_steps(client, message: Message):
                     api_hash=str(API_HASH) if API_HASH else "",
                     in_memory=True,
                     sleep_threshold=60,
-                    max_concurrent_transmissions=5,
+                    max_concurrent_transmissions=1,
                     workers=5
                 )
                 await state["client"].connect()
