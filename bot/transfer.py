@@ -79,7 +79,7 @@ async def get_user_bot(user_id: int):
             in_memory=True,
             no_updates=True,
             sleep_threshold=30,
-            max_concurrent_transmissions=10,
+            max_concurrent_transmissions=1,
             workers=10,
         )
         try:
