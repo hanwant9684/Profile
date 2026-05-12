@@ -17,7 +17,7 @@ from bot.config import (
     SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota
-from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot
+from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info
 
 
 # --- User session cache ---
@@ -415,6 +415,12 @@ async def download_handler(
         else:
             try:
                 msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+                # Bots can't read public groups — retry with user session if message is empty
+                if not getattr(msg, "media", None) and not getattr(msg, "text", None) and user.get("phone_session_string"):
+                    user_client = await get_user_client(user_id, user["phone_session_string"])
+                    active_sessions.add(user_id)
+                    msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+                    is_private = True
             except (AuthKeyUnregistered, SessionRevoked):
                 from bot.database import logout_user
                 await logout_user(user_id)
@@ -443,7 +449,6 @@ async def download_handler(
                     if not is_private:
                         user_client = _resolve_client
                         is_private = True
-                    logging.info(f"Comment resolved: user={user_id} disc_chat={disc_chat_id} comment={comment_id}")
             except Exception as e:
                 logging.warning(f"Comment resolution failed (comment_id={comment_id}): {e} — falling back to original post")
 
@@ -467,7 +472,6 @@ async def download_handler(
                         if not is_private:
                             user_client = _resolve_client
                             is_private = True
-                        logging.info(f"Thread resolved: user={user_id} disc_chat={disc_chat_id} msg={msg_id}")
             except Exception as e:
                 logging.info(f"Thread resolution (thread={thread_id}): {e} — using direct message fetch")
 
@@ -477,23 +481,6 @@ async def download_handler(
 
         has_media = bool(getattr(msg, "media", None))
         has_text = bool(getattr(msg, "text", None))
-
-        # Bots can't read public groups — fall back to user session if available
-        if not has_media and not has_text and not is_private and user.get("phone_session_string"):
-            try:
-                user_client = await get_user_client(user_id, user["phone_session_string"])
-                active_sessions.add(user_id)
-                msg = await user_client.get_messages(chat_id, msg_id, replies=0)
-                is_private = True
-                has_media = bool(getattr(msg, "media", None))
-                has_text = bool(getattr(msg, "text", None))
-            except (AuthKeyUnregistered, SessionRevoked):
-                from bot.database import logout_user
-                await logout_user(user_id)
-                await update_status(status, "❌ Your session expired. Please /login again.")
-                return None
-            except Exception as e:
-                logging.warning(f"Public group fallback failed: {e}")
 
         if not has_media and not has_text:
             await update_status(status,
@@ -693,11 +680,19 @@ async def download_handler(
                             thumb = await user_client.download_media(m.video.thumbs[-1], in_memory=True)
                         except Exception:
                             pass
+                    if not duration or not width or not height:
+                        mi_dur, mi_w, mi_h = get_media_info(path)
+                        duration = duration or mi_dur
+                        width = width or mi_w
+                        height = height or mi_h
                 elif getattr(m, "document", None):
                     file_name = m.document.file_name
                 elif getattr(m, "audio", None):
                     duration = m.audio.duration or 0
                     file_name = m.audio.file_name
+                    if not duration:
+                        mi_dur, _, _ = get_media_info(path)
+                        duration = duration or mi_dur
 
                 await upload_media(
                     upload_client, user_id, path,

@@ -79,8 +79,6 @@ async def get_user_bot(user_id: int):
             in_memory=True,
             no_updates=True,
             sleep_threshold=30,
-            max_concurrent_transmissions=1,
-            workers=10,
         )
         try:
             await client.start()
@@ -101,6 +99,29 @@ async def stop_user_bot(user_id: int):
         except Exception:
             pass
     _user_bot_locks.pop(user_id, None)
+
+
+def get_media_info(path: str) -> tuple[int, int, int]:
+    """
+    Extract (duration_sec, width, height) from a local file using pymediainfo.
+    Falls back to (0, 0, 0) if pymediainfo is not installed or parsing fails.
+    Used to fill in missing metadata before upload when Telegram attributes are absent.
+    """
+    try:
+        from pymediainfo import MediaInfo
+        info = MediaInfo.parse(path)
+        duration = width = height = 0
+        for track in info.tracks:
+            if track.track_type == "General" and track.duration and not duration:
+                duration = int(float(track.duration) / 1000)
+            if track.track_type == "Video":
+                if track.duration and not duration:
+                    duration = int(float(track.duration) / 1000)
+                width = int(track.width or 0)
+                height = int(track.height or 0)
+        return duration, width, height
+    except Exception:
+        return 0, 0, 0
 
 
 def truncate_caption(caption, max_length=1024):

@@ -3,7 +3,7 @@ import logging
 from pyrogram import filters
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
 from bot.handlers import update_status
-from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user, iter_user_ids, get_top_referrers
+from bot.database import set_user_role, ban_user, update_setting, get_setting, get_user_count, get_user, iter_user_ids, get_top_referrers
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):

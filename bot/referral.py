@@ -56,7 +56,6 @@ async def refer_command(client, message):
         "Premium days stack on top of any existing premium you have._"
     )
 
-    share_text = f"Use this bot to download Telegram media! {invite_link}"
     share_url = f"https://t.me/share/url?url={invite_link}&text=Use+this+bot+to+download+Telegram+media!"
 
     await message.reply(

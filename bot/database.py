@@ -2,13 +2,11 @@ import os
 import asyncpg
 import redis.asyncio as redis
 import logging
-import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
-from bot.config import OWNER_ID, SUPPORT_CHAT_LINK
+from typing import Optional, Dict
+from bot.config import OWNER_ID
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -265,31 +263,6 @@ async def logout_user(user_id):
         logger.error(f"Error logging out user {user_id}: {e}")
 
 
-async def update_user(user_id, data: dict):
-    try:
-        if not data:
-            return
-
-        fields = []
-        values = []
-        for i, (k, v) in enumerate(data.items(), start=1):
-            fields.append(f"{k} = ${i}")
-            values.append(v)
-
-        fields.append(f"updated_at = ${len(data) + 1}")
-        values.append(datetime.now())
-        values.append(int(user_id))
-
-        query = f"UPDATE users SET {', '.join(fields)} WHERE telegram_id = ${len(values)}"
-
-        async with pool.acquire() as conn:
-            await conn.execute(query, *values)
-
-        await _redis_del(f"user:{user_id}")
-    except Exception as e:
-        logger.error(f"Error updating user {user_id}: {e}")
-
-
 async def get_bot_token(user_id) -> Optional[str]:
     try:
         user = await get_user(user_id)
@@ -495,41 +468,6 @@ async def increment_quota(user_id, count=1):
         logger.error(f"Error incrementing quota for {user_id}: {e}")
 
 
-async def get_remaining_quota(user_id):
-    try:
-        user = await get_user(user_id)
-        if not user:
-            return 0, False
-
-        if user.get("role") in ['premium', 'admin', 'owner']:
-            return 999999, True
-
-        today = datetime.now().date()
-        this_month_first = today.replace(day=1)
-
-        downloads_today = user.get("downloads_today", 0)
-        last_download_date = None
-        if user.get("last_download_date"):
-            last_download_date = datetime.fromisoformat(user["last_download_date"]).date()
-        if last_download_date != today:
-            downloads_today = 0
-
-        downloads_this_month = user.get("downloads_this_month", 0)
-        last_download_month = None
-        if user.get("last_download_month"):
-            last_download_month = datetime.fromisoformat(user["last_download_month"]).date()
-        if last_download_month != this_month_first:
-            downloads_this_month = 0
-
-        remaining_daily = max(0, DAILY_LIMIT - downloads_today)
-        remaining_monthly = max(0, MONTHLY_LIMIT - downloads_this_month)
-        remaining = min(remaining_daily, remaining_monthly)
-        return remaining, False
-    except Exception as e:
-        logger.error(f"Error getting remaining quota for {user_id}: {e}")
-        return 0, False
-
-
 async def get_setting(key):
     try:
         cache_key = f"setting:{key}"
@@ -569,17 +507,6 @@ async def update_setting(key, value, json_value=None):
         await _redis_del(f"setting:{key}")
     except Exception as e:
         logger.error(f"Error updating setting {key}: {e}")
-
-
-async def get_all_users() -> List[Dict]:
-    try:
-        _require_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch('SELECT * FROM users')
-        return [dict(row) for row in rows]
-    except Exception as e:
-        logger.error(f"Error getting all users: {e}")
-        return []
 
 
 async def iter_user_ids(batch_size: int = 500):
