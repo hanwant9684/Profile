@@ -8,7 +8,7 @@ from collections import deque
 import pyrogram
 from pyrogram import filters, Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
+from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked, UserIsBlocked
 
 from bot.config import (
     app, API_ID, API_HASH,
@@ -118,15 +118,15 @@ async def _cleanup_loop():
 
 # --- Utilities ---
 
-async def update_status(msg, text: str):
+async def update_status(msg, text: str, reply_markup=None):
     if not msg:
         return
     try:
-        await msg.edit_text(text)
+        await msg.edit_text(text, reply_markup=reply_markup)
     except (FloodWait, FloodPremiumWait) as e:
         await asyncio.sleep(min(e.value, 10))
         try:
-            await msg.edit_text(text)
+            await msg.edit_text(text, reply_markup=reply_markup)
         except Exception:
             pass
     except Exception as e:
@@ -306,14 +306,20 @@ async def download_handler(
         parsed = _parse_link(link)
         if not parsed:
             if not link_override:
-                await message.reply("❌ Unsupported link format.")
+                try:
+                    await message.reply("❌ Unsupported link format.")
+                except UserIsBlocked:
+                    pass
             return None
         chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
 
     if _user_floodwait_until.get(user_id, 0) > time.time():
         wait_left = int(_user_floodwait_until[user_id] - time.time())
         if not link_override:
-            await message.reply(f"⏳ Rate limit active. Please try again in {wait_left}s.")
+            try:
+                await message.reply(f"⏳ Rate limit active. Please try again in {wait_left}s.")
+            except UserIsBlocked:
+                pass
         return None
 
     if user_override is not None:
@@ -328,19 +334,25 @@ async def download_handler(
                 f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip(),
             )
 
-    if user.get("role") == "banned":
+    if user.get("is_banned"):
         if not link_override:
-            await message.reply("❌ You are banned from using this bot.")
+            try:
+                await message.reply("❌ You are banned from using this bot.")
+            except UserIsBlocked:
+                pass
         return None
 
     if user.get("role") not in ("admin", "owner"):
         mm = await get_setting("maintenance_mode")
         if mm and mm.get("value") == "on":
             if not link_override:
-                await message.reply(
-                    "🔧 **Bot is under maintenance.**\n\n"
-                    "We'll be back shortly. Please try again later."
-                )
+                try:
+                    await message.reply(
+                        "🔧 **Bot is under maintenance.**\n\n"
+                        "We'll be back shortly. Please try again later."
+                    )
+                except UserIsBlocked:
+                    pass
             return None
 
     if is_topic and not is_private and user.get("phone_session_string"):
@@ -348,20 +360,26 @@ async def download_handler(
 
     if (is_private or is_story) and not user.get("phone_session_string"):
         if not link_override:
-            if is_story:
-                await message.reply(
-                    "❌ Story downloads require your Telegram account.\n"
-                    "Use /login to connect your account first."
-                )
-            else:
-                await message.reply("❌ This link is private. Use /login to connect your account first.")
+            try:
+                if is_story:
+                    await message.reply(
+                        "❌ Story downloads require your Telegram account.\n"
+                        "Use /login to connect your account first."
+                    )
+                else:
+                    await message.reply("❌ This link is private. Use /login to connect your account first.")
+            except UserIsBlocked:
+                pass
         return None
 
     if not skip_quota and user.get("role", "free") == "free":
         can, reason = await check_and_update_quota(user_id)
         if not can:
             if not link_override:
-                await message.reply(f"❌ {reason}")
+                try:
+                    await message.reply(f"❌ {reason}")
+                except UserIsBlocked:
+                    pass
             return None
 
         last_dl = _user_last_download_time.get(user_id, 0)
@@ -371,15 +389,21 @@ async def download_handler(
             mins, secs = divmod(wait_left, 60)
             wait_str = f"{mins}m {secs}s" if mins else f"{secs}s"
             if not link_override:
-                await message.reply(
-                    f"⏳ **Please wait {wait_str}** before your next download.\n\n"
-                    f"Free users must wait **15 minutes** between downloads.\n\n"
-                    f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
-                    f"👉 /upgrade"
-                )
+                try:
+                    await message.reply(
+                        f"⏳ **Please wait {wait_str}** before your next download.\n\n"
+                        f"Free users must wait **15 minutes** between downloads.\n\n"
+                        f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
+                        f"👉 /upgrade"
+                    )
+                except UserIsBlocked:
+                    pass
             return None
 
-    status = status_msg_override or await message.reply("⏳ Processing...")
+    try:
+        status = status_msg_override or await message.reply("⏳ Processing...")
+    except UserIsBlocked:
+        return None
     if status is None:
         return None
 
@@ -513,12 +537,15 @@ async def download_handler(
             if upload_bot is None:
                 await update_status(
                     status,
-                    "❌ You need a personal upload bot to receive files.\n\n"
-                    "1. Open @BotFather → `/newbot`\n"
-                    "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-                    "3. Run `/setbot bot_token` here\n"
-                    "4. Press **Start** on your bot\n\n"
-                    "All files are delivered directly to your bot's DM.",
+                    "❌ **You need a personal upload bot to receive files.**\n\n"
+                    "1. Tap the button below to open @BotFather\n"
+                    "2. Send `/newbot` and follow the steps\n"
+                    "3. Copy the token and run `/setbot <token>` here\n"
+                    "4. Press **Start** on your new bot\n\n"
+                    "All files are delivered through your own bot.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🤖 Open BotFather", url="https://t.me/BotFather?start=newbot")]
+                    ]),
                 )
                 active_downloads.discard(user_id)
                 return None
@@ -557,7 +584,7 @@ async def download_handler(
                 return None
             except Exception as e:
                 error_str = str(e)
-                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
+                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str or "PEER_ID_INVALID" in error_str:
                     bot_url = None
                     try:
                         me = await upload_bot.get_me()
@@ -565,11 +592,12 @@ async def download_handler(
                             bot_url = f"https://t.me/{me.username}?start=start"
                     except Exception:
                         pass
-                    markup = None
-                    if bot_url:
-                        markup = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]
-                        ])
+                    markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "▶️ Start My Bot" if bot_url else "🤖 Open BotFather",
+                            url=bot_url or "https://t.me/BotFather"
+                        )]
+                    ])
                     await update_status(
                         status,
                         "❌ **Your bot couldn't send the file to you.**\n\n"
@@ -658,11 +686,14 @@ async def download_handler(
                 if upload_client is None:
                     await update_status(
                         status,
-                        "❌ You haven't registered an upload bot yet.\n\n"
-                        "1. Open @BotFather → `/newbot`\n"
-                        "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-                        "3. Run `/setbot bot_token` here\n"
-                        "4. Press **Start** on your bot",
+                        "❌ **You need a personal upload bot to receive files.**\n\n"
+                        "1. Tap the button below to open @BotFather\n"
+                        "2. Send `/newbot` and follow the steps\n"
+                        "3. Copy the token and run `/setbot <token>` here\n"
+                        "4. Press **Start** on your new bot",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🤖 Open BotFather", url="https://t.me/BotFather?start=newbot")]
+                        ]),
                     )
                     return None
 
@@ -712,7 +743,7 @@ async def download_handler(
                     await update_status(status, "🛑 Cancelled.")
                     return None
                 error_str = str(e)
-                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
+                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str or "PEER_ID_INVALID" in error_str:
                     bot_url = None
                     try:
                         me = await upload_client.get_me()
@@ -720,11 +751,12 @@ async def download_handler(
                             bot_url = f"https://t.me/{me.username}?start=start"
                     except Exception:
                         pass
-                    markup = None
-                    if bot_url:
-                        markup = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]
-                        ])
+                    markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "▶️ Start My Bot" if bot_url else "🤖 Open BotFather",
+                            url=bot_url or "https://t.me/BotFather"
+                        )]
+                    ])
                     await update_status(
                         status,
                         "❌ **Your bot couldn't send the file to you.**\n\n"
@@ -770,11 +802,14 @@ async def download_handler(
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client, message):
     user_id = message.from_user.id
-    if user_id in active_downloads or user_id in active_sessions:
-        cancel_flags.add(user_id)
-        await message.reply("🛑 Cancelling current download...")
-    else:
-        await message.reply("ℹ️ No active download to cancel.")
+    try:
+        if user_id in active_downloads or user_id in active_sessions:
+            cancel_flags.add(user_id)
+            await message.reply("🛑 Cancelling current download...")
+        else:
+            await message.reply("ℹ️ No active download to cancel.")
+    except UserIsBlocked:
+        pass
 
 
 # --- Commands ---
