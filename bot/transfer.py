@@ -79,6 +79,8 @@ async def get_user_bot(user_id: int):
             in_memory=True,
             no_updates=True,
             sleep_threshold=30,
+            max_concurrent_transmissions=10,
+            workers=10,
         )
         try:
             await client.start()
@@ -99,34 +101,6 @@ async def stop_user_bot(user_id: int):
         except Exception:
             pass
     _user_bot_locks.pop(user_id, None)
-
-
-def get_media_info(path: str) -> tuple[int, int, int]:
-    """
-    Extract (duration_sec, width, height) from a local file using hachoir.
-    Falls back to (0, 0, 0) if parsing fails.
-    Used to fill in missing metadata before upload when Telegram attributes are absent.
-    """
-    try:
-        from hachoir.parser import createParser
-        from hachoir.metadata import extractMetadata
-        parser = createParser(path)
-        if not parser:
-            return 0, 0, 0
-        with parser:
-            metadata = extractMetadata(parser)
-        if not metadata:
-            return 0, 0, 0
-        duration = width = height = 0
-        if metadata.has("duration"):
-            duration = int(metadata.get("duration").total_seconds())
-        if metadata.has("width"):
-            width = int(metadata.get("width"))
-        if metadata.has("height"):
-            height = int(metadata.get("height"))
-        return duration, width, height
-    except Exception:
-        return 0, 0, 0
 
 
 def truncate_caption(caption, max_length=1024):

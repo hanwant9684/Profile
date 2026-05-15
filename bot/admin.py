@@ -3,7 +3,7 @@ import logging
 from pyrogram import filters
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
 from bot.handlers import update_status
-from bot.database import set_user_role, ban_user, update_setting, get_setting, get_user_count, get_user, iter_user_ids, get_top_referrers
+from bot.database import set_user_role, ban_user, update_setting, get_setting, get_all_users, get_user_count, get_user, iter_user_ids
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
@@ -11,21 +11,10 @@ async def stats(client, message):
     if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
     total_users = await get_user_count()
-    top_refs = await get_top_referrers(5)
-
-    ref_lines = ""
-    if top_refs:
-        lines = []
-        for i, r in enumerate(top_refs, 1):
-            name = (r.get("full_name") or r.get("username") or str(r["referrer_id"]))[:18]
-            lines.append(f"  {i}. {name} — `{r['valid_count']}` referrals")
-        ref_lines = "\n🏆 **Top Referrers:**\n" + "\n".join(lines)
-
     await message.reply(
         f"📊 **Bot Statistics**\n\n"
         f"👥 Total Users: `{total_users}`\n"
         f"⚡ Active Downloads: `{len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}`"
-        f"{ref_lines}"
     )
 
 @app.on_message(filters.command("killall") & filters.private)
@@ -233,31 +222,7 @@ async def broadcast(client, message):
 PREMIUM_PAGE_SIZE = 8
 
 
-async def _fetch_premium_users(show_all: bool) -> list:
-    from bot.database import pool
-    from datetime import datetime
-    async with pool.acquire() as conn:
-        if show_all:
-            rows = await conn.fetch(
-                "SELECT telegram_id, username, full_name, premium_expiry_date "
-                "FROM users WHERE role = 'premium' "
-                "ORDER BY "
-                "  CASE WHEN premium_expiry_date IS NULL OR premium_expiry_date >= $1 THEN 0 ELSE 1 END ASC, "
-                "  premium_expiry_date DESC NULLS FIRST",
-                datetime.now()
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT telegram_id, username, full_name, premium_expiry_date "
-                "FROM users WHERE role = 'premium' "
-                "AND (premium_expiry_date IS NULL OR premium_expiry_date >= $1) "
-                "ORDER BY premium_expiry_date ASC NULLS LAST",
-                datetime.now()
-            )
-    return [dict(row) for row in rows]
-
-
-def _build_premium_page(users: list, page: int, total: int, show_all: bool) -> tuple[str, object]:
+def _build_premium_page(users: list, page: int, total: int) -> tuple[str, object]:
     from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     from datetime import datetime, timezone
 
@@ -267,23 +232,12 @@ def _build_premium_page(users: list, page: int, total: int, show_all: bool) -> t
 
     now = datetime.now(timezone.utc)
 
-    active_count = sum(
-        1 for u in users
-        if u.get("premium_expiry_date") is None or u["premium_expiry_date"] >= now.replace(tzinfo=None)
-    )
-    expired_count = total - active_count
-
-    filter_label = "All (active + expired)" if show_all else "Active only"
-    toggle_label = "👁 Show Expired Too" if not show_all else "✅ Active Only"
-    toggle_filter = "all" if not show_all else "active"
-
     lines = [
         "╔══════════════════════════╗",
-        "║  💎  Premium Members List  ║",
+        f"║  💎  Premium Members List  ║",
         "╚══════════════════════════╝",
         "",
-        f"  Filter: **{filter_label}**",
-        f"  Active: **{active_count}** · Expired: **{expired_count}**",
+        f"  Total: **{total}** active premium users",
         f"  Page **{page + 1}** of **{pages}**",
         "",
         "─────────────────────────────",
@@ -298,9 +252,10 @@ def _build_premium_page(users: list, page: int, total: int, show_all: bool) -> t
         if expiry is None:
             expiry_str = "♾️ Lifetime"
         else:
-            if hasattr(expiry, "tzinfo") and expiry.tzinfo is None:
-                expiry = expiry.replace(tzinfo=timezone.utc)
-            elif not hasattr(expiry, "tzinfo"):
+            if hasattr(expiry, "tzinfo"):
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+            else:
                 try:
                     from datetime import datetime as dt
                     expiry = dt.fromisoformat(str(expiry)).replace(tzinfo=timezone.utc)
@@ -311,7 +266,7 @@ def _build_premium_page(users: list, page: int, total: int, show_all: bool) -> t
                 diff = expiry - now
                 days_left = diff.days
                 if days_left < 0:
-                    expiry_str = f"❌ Expired {abs(days_left)}d ago"
+                    expiry_str = "⚠️ Expired"
                 elif days_left == 0:
                     expiry_str = "⏳ Expires today"
                 elif days_left <= 7:
@@ -334,18 +289,14 @@ def _build_premium_page(users: list, page: int, total: int, show_all: bool) -> t
 
     text = "\n".join(lines)
 
-    cur_filter = "all" if show_all else "active"
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀ Prev", callback_data=f"prem_page:{page - 1}:{cur_filter}"))
+        nav_buttons.append(InlineKeyboardButton("◀ Prev", callback_data=f"prem_page:{page - 1}"))
     nav_buttons.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="prem_noop"))
     if page < pages - 1:
-        nav_buttons.append(InlineKeyboardButton("Next ▶", callback_data=f"prem_page:{page + 1}:{cur_filter}"))
+        nav_buttons.append(InlineKeyboardButton("Next ▶", callback_data=f"prem_page:{page + 1}"))
 
-    rows = [nav_buttons] if nav_buttons else []
-    rows.append([InlineKeyboardButton(toggle_label, callback_data=f"prem_page:0:{toggle_filter}")])
-
-    keyboard = InlineKeyboardMarkup(rows)
+    keyboard = InlineKeyboardMarkup([nav_buttons]) if nav_buttons else None
     return text, keyboard
 
 
@@ -355,29 +306,39 @@ async def list_premium_users(client, message):
     user = await get_user(user_id)
     if (OWNER_ID is None or int(user_id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
-    args = message.text.split()
-    show_all = len(args) > 1 and args[1].lower() in ("all", "expired")
     try:
-        users = await _fetch_premium_users(show_all)
-        total = len(users)
+        from bot.database import pool
+        from datetime import datetime
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT telegram_id, username, full_name, premium_expiry_date "
+                "FROM users WHERE role = 'premium' "
+                "AND (premium_expiry_date IS NULL OR premium_expiry_date >= $1) "
+                "ORDER BY premium_expiry_date ASC NULLS LAST",
+                datetime.now()
+            )
+        premium_users = [dict(row) for row in rows]
+        total = len(premium_users)
         if total == 0:
-            label = "premium users" if show_all else "active premium users"
             await message.reply(
                 "╔══════════════════════╗\n"
                 "║  💎  Premium Members  ║\n"
                 "╚══════════════════════╝\n\n"
-                f"No {label} found."
+                "No active premium users found."
             )
             message.stop_propagation()
             return
-        text, keyboard = _build_premium_page(users, 0, total, show_all)
+
+        app._premium_cache = premium_users
+
+        text, keyboard = _build_premium_page(premium_users, 0, total)
         await message.reply(text, reply_markup=keyboard)
     except Exception as e:
         await message.reply(f"❌ Error fetching premium list: {e}")
     message.stop_propagation()
 
 
-@app.on_callback_query(filters.regex(r"^prem_page:(\d+):(all|active)$"))
+@app.on_callback_query(filters.regex(r"^prem_page:(\d+)$"))
 async def premium_page_callback(client, callback_query):
     user_id = callback_query.from_user.id
     user = await get_user(user_id)
@@ -386,28 +347,24 @@ async def premium_page_callback(client, callback_query):
         return
 
     page = int(callback_query.matches[0].group(1))
-    show_all = callback_query.matches[0].group(2) == "all"
+    premium_users = getattr(app, "_premium_cache", None)
 
-    try:
-        users = await _fetch_premium_users(show_all)
-    except Exception as e:
-        await callback_query.answer(f"DB error: {e}", show_alert=True)
+    if not premium_users:
+        await callback_query.answer("Session expired. Run /premium_users again.", show_alert=True)
         return
 
-    total = len(users)
+    total = len(premium_users)
     pages = max(1, (total + PREMIUM_PAGE_SIZE - 1) // PREMIUM_PAGE_SIZE)
     if page < 0 or page >= pages:
-        page = 0
+        await callback_query.answer("Invalid page.", show_alert=True)
+        return
 
-    text, keyboard = _build_premium_page(users, page, total, show_all)
+    text, keyboard = _build_premium_page(premium_users, page, total)
     try:
         await callback_query.message.edit_text(text, reply_markup=keyboard)
     except Exception:
         pass
-    try:
-        await callback_query.answer()
-    except Exception:
-        pass
+    await callback_query.answer()
 
 
 @app.on_callback_query(filters.regex(r"^prem_noop$"))

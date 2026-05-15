@@ -1,12 +1,11 @@
 import time
 from pyrogram import filters, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid, UserIsBlocked, QueryIdInvalid
+from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
 from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import (
     get_user, create_user, update_user_terms, save_session_string, logout_user,
     set_bot_token, remove_bot_token, get_bot_token, check_user_agreed,
-    record_referral, validate_and_credit_referral,
 )
 from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
@@ -28,41 +27,22 @@ async def start(client, message):
     if role_pre not in ("admin", "owner"):
         mm = await get_setting("maintenance_mode")
         if mm and mm.get("value") == "on":
-            try:
-                await message.reply(
-                    "🔧 **Bot is under maintenance.**\n\n"
-                    "We'll be back shortly. Please try again later."
-                )
-            except UserIsBlocked:
-                pass
+            await message.reply(
+                "🔧 **Bot is under maintenance.**\n\n"
+                "We'll be back shortly. Please try again later."
+            )
             return
 
     is_subbed, channel = await verify_force_sub(client, user_id)
     if not is_subbed:
         channel_url = channel.replace('@', '') if channel else ''
-        try:
-            await message.reply(
-                f"⛔ You must join our channel to use this bot.\n\n👉 {channel}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Join Channel", url=f"https://t.me/{channel_url}")]
-                ])
-            )
-        except UserIsBlocked:
-            pass
+        await message.reply(
+            f"⛔ You must join our channel to use this bot.\n\n👉 {channel}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Join Channel", url=f"https://t.me/{channel_url}")]
+            ])
+        )
         return
-
-    # Parse referral parameter (e.g. /start ref_12345678)
-    start_args = message.text.split(maxsplit=1)
-    referrer_id = None
-    if len(start_args) > 1:
-        param = start_args[1].strip()
-        if param.startswith("ref_"):
-            try:
-                referrer_id = int(param[4:])
-            except ValueError:
-                referrer_id = None
-
-    is_new_user = not await check_user_agreed(user_id) and not await get_user(user_id)
 
     user = await get_user(user_id)
     if not user:
@@ -73,11 +53,6 @@ async def start(client, message):
         if user.get("username") != username or user.get("full_name") != full_name:
             await create_user(user_id, username, full_name)
             user = await get_user(user_id) or user
-
-    # Record referral for brand new users only (can't be referred if already in DB)
-    if referrer_id and is_new_user:
-        import asyncio as _asyncio
-        _asyncio.create_task(record_referral(referrer_id, user_id))
 
     # Always check DB directly (not Redis) so deleting a row always resets T&C
     is_agreed = await check_user_agreed(user_id)
@@ -104,41 +79,35 @@ async def start(client, message):
             buttons.append([InlineKeyboardButton("🔐 Connect Account (private links)", callback_data="onboard_login")])
         buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
 
-        try:
-            await message.reply(
-                f"👋 **Welcome back!**\n\n"
-                f"Role: **{role}**\n"
-                f"Status: {status_line}\n\n"
-                + (
-                    "📹 [Watch the setup guide](https://t.me/Wolfy004/155) to complete your setup.\n\n"
-                    if not has_bot else ""
-                )
-                + "Send any Telegram link to download.",
-                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
-                disable_web_page_preview=True,
+        await message.reply(
+            f"👋 **Welcome back!**\n\n"
+            f"Role: **{role}**\n"
+            f"Status: {status_line}\n\n"
+            + (
+                "📹 [Watch the setup guide](https://t.me/Wolfy004/155) to complete your setup.\n\n"
+                if not has_bot else ""
             )
-        except UserIsBlocked:
-            pass
+            + "Send any Telegram link to download.",
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            disable_web_page_preview=True,
+        )
         return
 
     # New user — welcome + T&C
-    try:
-        await message.reply(
-            "👋 **Welcome to the Downloader Bot!**\n\n"
-            "I can download media from Telegram links — photos, videos, files and more.\n\n"
-            "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) before getting started.\n\n"
-            "📋 **Quick Terms:**\n"
-            "• No illegal content\n"
-            "• You are responsible for what you download\n"
-            "• Use responsibly\n\n"
-            "Tap below to accept and get started.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Accept & Get Started", callback_data="accept_terms")]
-            ]),
-            disable_web_page_preview=True,
-        )
-    except UserIsBlocked:
-        pass
+    await message.reply(
+        "👋 **Welcome to the Downloader Bot!**\n\n"
+        "I can download media from Telegram links — photos, videos, files and more.\n\n"
+        "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) before getting started.\n\n"
+        "📋 **Quick Terms:**\n"
+        "• No illegal content\n"
+        "• You are responsible for what you download\n"
+        "• Use responsibly\n\n"
+        "Tap below to accept and get started.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Accept & Get Started", callback_data="accept_terms")]
+        ]),
+        disable_web_page_preview=True,
+    )
 
 
 # ─── Accept T&C → Step 1: Set up upload bot (required) ───────────────────────
@@ -168,10 +137,7 @@ async def accept_terms(client, callback_query):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"accept_terms edit error: {e}")
-    try:
-        await callback_query.answer()
-    except QueryIdInvalid:
-        pass
+    await callback_query.answer()
 
 
 # ─── Onboarding: skip bot setup ──────────────────────────────────────────────
@@ -194,10 +160,7 @@ async def onboard_skip_bot(client, callback_query):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"onboard_skip_bot edit error: {e}")
-    try:
-        await callback_query.answer()
-    except QueryIdInvalid:
-        pass
+    await callback_query.answer()
 
 
 # ─── Onboarding: skip login (after bot is set up) ────────────────────────────
@@ -214,10 +177,7 @@ async def onboard_skip_login(client, callback_query):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"onboard_skip_login edit error: {e}")
-    try:
-        await callback_query.answer()
-    except QueryIdInvalid:
-        pass
+    await callback_query.answer()
 
 
 # ─── Onboarding: start login ──────────────────────────────────────────────────
@@ -247,10 +207,7 @@ async def onboard_login(client, callback_query):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"onboard_login edit error: {e}")
-    try:
-        await callback_query.answer()
-    except QueryIdInvalid:
-        pass
+    await callback_query.answer()
 
 
 # ─── Onboarding: set up bot from welcome-back button ─────────────────────────
@@ -275,10 +232,7 @@ async def onboard_setbot(client, callback_query):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"onboard_setbot edit error: {e}")
-    try:
-        await callback_query.answer()
-    except QueryIdInvalid:
-        pass
+    await callback_query.answer()
 
 
 # ─── Show myinfo from welcome-back button ────────────────────────────────────
@@ -311,13 +265,10 @@ async def show_myinfo_callback(client, callback_query):
             dl_month = 0
         quota_info = f"{dl_today}/{DAILY_LIMIT} today · {dl_month}/{MONTHLY_LIMIT} this month"
 
-    try:
-        await callback_query.answer(
-            f"👤 {user_id} | Role: {role_raw.upper()}\n{quota_info}",
-            show_alert=True
-        )
-    except QueryIdInvalid:
-        pass
+    await callback_query.answer(
+        f"👤 {user_id} | Role: {role_raw.upper()}\n{quota_info}",
+        show_alert=True
+    )
 
 
 # ─── /login command ───────────────────────────────────────────────────────────
@@ -328,40 +279,28 @@ async def login_start(client, message):
     user = await get_user(user_id)
 
     if not user or not user.get("is_agreed_terms"):
-        try:
-            await message.reply("Please run /start first.")
-        except UserIsBlocked:
-            pass
+        await message.reply("Please run /start first.")
         return
 
     if user and user.get("phone_session_string"):
-        try:
-            await message.reply(
-                "✅ You're already logged in.\n\n"
-                "Use /logout first if you want to re-login."
-            )
-        except UserIsBlocked:
-            pass
+        await message.reply(
+            "✅ You're already logged in.\n\n"
+            "Use /logout first if you want to re-login."
+        )
         return
 
     if len(login_states) >= 10:
-        try:
-            await message.reply("⚠️ Too many active login attempts. Please try again in a few minutes.")
-        except UserIsBlocked:
-            pass
+        await message.reply("⚠️ Too many active login attempts. Please try again in a few minutes.")
         return
 
     login_states[user_id] = {"step": "PHONE", "timestamp": time.time()}
-    try:
-        await message.reply(
-            "📱 **Connect Your Account**\n\n"
-            "Send your phone number in international format:\n"
-            "`+1234567890`\n\n"
-            "⏳ Session expires in 5 minutes if inactive.\n"
-            "_Type /cancel\\_login to abort._"
-        )
-    except UserIsBlocked:
-        pass
+    await message.reply(
+        "📱 **Connect Your Account**\n\n"
+        "Send your phone number in international format:\n"
+        "`+1234567890`\n\n"
+        "⏳ Session expires in 5 minutes if inactive.\n"
+        "_Type /cancel\\_login to abort._"
+    )
 
 
 # ─── Login step handler ───────────────────────────────────────────────────────
@@ -373,7 +312,7 @@ async def login_start(client, message):
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
         "settings", "set_force_sub", "set_maintenance",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
-        "setbot", "rembot", "refer",
+        "setbot", "rembot",
     ])
     & ~filters.regex(r"https://t\.me/")
 )
@@ -411,22 +350,6 @@ async def handle_login_steps(client, message: Message):
         await stop_user_bot(user_id)
         await set_bot_token(user_id, token)
         login_states.pop(user_id, None)
-
-        # Validate referral now that the user has proven they're genuine
-        ref_result = await validate_and_credit_referral(user_id)
-        if ref_result:
-            referrer_id_notif, milestone_hit, total_valid = ref_result
-            if milestone_hit:
-                try:
-                    await client.send_message(
-                        referrer_id_notif,
-                        f"🎉 **Referral Milestone Reached!**\n\n"
-                        f"You've hit **{total_valid} valid referrals**!\n"
-                        f"**30 days of Premium** have been added to your account. 🚀\n\n"
-                        f"Use /refer to check your stats."
-                    )
-                except Exception:
-                    pass
 
         bot_username = f"@{me.username}" if me.username else str(me.id)
 
@@ -474,6 +397,8 @@ async def handle_login_steps(client, message: Message):
                     api_hash=str(API_HASH) if API_HASH else "",
                     in_memory=True,
                     sleep_threshold=60,
+                    max_concurrent_transmissions=5,
+                    workers=5
                 )
                 await state["client"].connect()
                 sent_code = await state["client"].send_code(phone_number)
@@ -662,22 +587,6 @@ async def setbot_command(client, message: Message):
 
     await stop_user_bot(user_id)
     await set_bot_token(user_id, token)
-
-    # Validate referral now that the user has proven they're genuine
-    ref_result = await validate_and_credit_referral(user_id)
-    if ref_result:
-        referrer_id_notif, milestone_hit, total_valid = ref_result
-        if milestone_hit:
-            try:
-                await client.send_message(
-                    referrer_id_notif,
-                    f"🎉 **Referral Milestone Reached!**\n\n"
-                    f"You've hit **{total_valid} valid referrals**!\n"
-                    f"**30 days of Premium** have been added to your account. 🚀\n\n"
-                    f"Use /refer to check your stats."
-                )
-            except Exception:
-                pass
 
     bot_username = f"@{me.username}" if me.username else str(me.id)
     await status.edit_text(

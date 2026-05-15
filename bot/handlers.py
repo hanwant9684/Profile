@@ -8,7 +8,7 @@ from collections import deque
 import pyrogram
 from pyrogram import filters, Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked, UserIsBlocked
+from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
 
 from bot.config import (
     app, API_ID, API_HASH,
@@ -17,7 +17,7 @@ from bot.config import (
     SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota
-from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info
+from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot
 
 
 # --- User session cache ---
@@ -118,15 +118,15 @@ async def _cleanup_loop():
 
 # --- Utilities ---
 
-async def update_status(msg, text: str, reply_markup=None):
+async def update_status(msg, text: str):
     if not msg:
         return
     try:
-        await msg.edit_text(text, reply_markup=reply_markup)
+        await msg.edit_text(text)
     except (FloodWait, FloodPremiumWait) as e:
         await asyncio.sleep(min(e.value, 10))
         try:
-            await msg.edit_text(text, reply_markup=reply_markup)
+            await msg.edit_text(text)
         except Exception:
             pass
     except Exception as e:
@@ -306,20 +306,14 @@ async def download_handler(
         parsed = _parse_link(link)
         if not parsed:
             if not link_override:
-                try:
-                    await message.reply("❌ Unsupported link format.")
-                except UserIsBlocked:
-                    pass
+                await message.reply("❌ Unsupported link format.")
             return None
         chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
 
     if _user_floodwait_until.get(user_id, 0) > time.time():
         wait_left = int(_user_floodwait_until[user_id] - time.time())
         if not link_override:
-            try:
-                await message.reply(f"⏳ Rate limit active. Please try again in {wait_left}s.")
-            except UserIsBlocked:
-                pass
+            await message.reply(f"⏳ Rate limit active. Please try again in {wait_left}s.")
         return None
 
     if user_override is not None:
@@ -334,25 +328,19 @@ async def download_handler(
                 f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip(),
             )
 
-    if user.get("is_banned"):
+    if user.get("role") == "banned":
         if not link_override:
-            try:
-                await message.reply("❌ You are banned from using this bot.")
-            except UserIsBlocked:
-                pass
+            await message.reply("❌ You are banned from using this bot.")
         return None
 
     if user.get("role") not in ("admin", "owner"):
         mm = await get_setting("maintenance_mode")
         if mm and mm.get("value") == "on":
             if not link_override:
-                try:
-                    await message.reply(
-                        "🔧 **Bot is under maintenance.**\n\n"
-                        "We'll be back shortly. Please try again later."
-                    )
-                except UserIsBlocked:
-                    pass
+                await message.reply(
+                    "🔧 **Bot is under maintenance.**\n\n"
+                    "We'll be back shortly. Please try again later."
+                )
             return None
 
     if is_topic and not is_private and user.get("phone_session_string"):
@@ -360,26 +348,20 @@ async def download_handler(
 
     if (is_private or is_story) and not user.get("phone_session_string"):
         if not link_override:
-            try:
-                if is_story:
-                    await message.reply(
-                        "❌ Story downloads require your Telegram account.\n"
-                        "Use /login to connect your account first."
-                    )
-                else:
-                    await message.reply("❌ This link is private. Use /login to connect your account first.")
-            except UserIsBlocked:
-                pass
+            if is_story:
+                await message.reply(
+                    "❌ Story downloads require your Telegram account.\n"
+                    "Use /login to connect your account first."
+                )
+            else:
+                await message.reply("❌ This link is private. Use /login to connect your account first.")
         return None
 
     if not skip_quota and user.get("role", "free") == "free":
         can, reason = await check_and_update_quota(user_id)
         if not can:
             if not link_override:
-                try:
-                    await message.reply(f"❌ {reason}")
-                except UserIsBlocked:
-                    pass
+                await message.reply(f"❌ {reason}")
             return None
 
         last_dl = _user_last_download_time.get(user_id, 0)
@@ -389,21 +371,15 @@ async def download_handler(
             mins, secs = divmod(wait_left, 60)
             wait_str = f"{mins}m {secs}s" if mins else f"{secs}s"
             if not link_override:
-                try:
-                    await message.reply(
-                        f"⏳ **Please wait {wait_str}** before your next download.\n\n"
-                        f"Free users must wait **15 minutes** between downloads.\n\n"
-                        f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
-                        f"👉 /upgrade"
-                    )
-                except UserIsBlocked:
-                    pass
+                await message.reply(
+                    f"⏳ **Please wait {wait_str}** before your next download.\n\n"
+                    f"Free users must wait **15 minutes** between downloads.\n\n"
+                    f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
+                    f"👉 /upgrade"
+                )
             return None
 
-    try:
-        status = status_msg_override or await message.reply("⏳ Processing...")
-    except UserIsBlocked:
-        return None
+    status = status_msg_override or await message.reply("⏳ Processing...")
     if status is None:
         return None
 
@@ -439,12 +415,6 @@ async def download_handler(
         else:
             try:
                 msg = await user_client.get_messages(chat_id, msg_id, replies=0)
-                # Bots can't read public groups — retry with user session if message is empty
-                if not getattr(msg, "media", None) and not getattr(msg, "text", None) and user.get("phone_session_string"):
-                    user_client = await get_user_client(user_id, user["phone_session_string"])
-                    active_sessions.add(user_id)
-                    msg = await user_client.get_messages(chat_id, msg_id, replies=0)
-                    is_private = True
             except (AuthKeyUnregistered, SessionRevoked):
                 from bot.database import logout_user
                 await logout_user(user_id)
@@ -473,6 +443,7 @@ async def download_handler(
                     if not is_private:
                         user_client = _resolve_client
                         is_private = True
+                    logging.info(f"Comment resolved: user={user_id} disc_chat={disc_chat_id} comment={comment_id}")
             except Exception as e:
                 logging.warning(f"Comment resolution failed (comment_id={comment_id}): {e} — falling back to original post")
 
@@ -496,6 +467,7 @@ async def download_handler(
                         if not is_private:
                             user_client = _resolve_client
                             is_private = True
+                        logging.info(f"Thread resolved: user={user_id} disc_chat={disc_chat_id} msg={msg_id}")
             except Exception as e:
                 logging.info(f"Thread resolution (thread={thread_id}): {e} — using direct message fetch")
 
@@ -507,11 +479,7 @@ async def download_handler(
         has_text = bool(getattr(msg, "text", None))
 
         if not has_media and not has_text:
-            await update_status(status,
-                "❌ No content found. This may be a public group — use /login to connect your account and try again."
-                if not is_private and not user.get("phone_session_string")
-                else "❌ No content found at this link (message is empty)."
-            )
+            await update_status(status, "❌ No content found at this link (message is empty).")
             return None
 
         if not is_story and msg.media_group_id:
@@ -537,15 +505,12 @@ async def download_handler(
             if upload_bot is None:
                 await update_status(
                     status,
-                    "❌ **You need a personal upload bot to receive files.**\n\n"
-                    "1. Tap the button below to open @BotFather\n"
-                    "2. Send `/newbot` and follow the steps\n"
-                    "3. Copy the token and run `/setbot <token>` here\n"
-                    "4. Press **Start** on your new bot\n\n"
-                    "All files are delivered through your own bot.",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🤖 Open BotFather", url="https://t.me/BotFather?start=newbot")]
-                    ]),
+                    "❌ You need a personal upload bot to receive files.\n\n"
+                    "1. Open @BotFather → `/newbot`\n"
+                    "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+                    "3. Run `/setbot bot_token` here\n"
+                    "4. Press **Start** on your bot\n\n"
+                    "All files are delivered directly to your bot's DM.",
                 )
                 active_downloads.discard(user_id)
                 return None
@@ -584,7 +549,7 @@ async def download_handler(
                 return None
             except Exception as e:
                 error_str = str(e)
-                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str or "PEER_ID_INVALID" in error_str:
+                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
                     bot_url = None
                     try:
                         me = await upload_bot.get_me()
@@ -592,12 +557,11 @@ async def download_handler(
                             bot_url = f"https://t.me/{me.username}?start=start"
                     except Exception:
                         pass
-                    markup = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
-                            "▶️ Start My Bot" if bot_url else "🤖 Open BotFather",
-                            url=bot_url or "https://t.me/BotFather"
-                        )]
-                    ])
+                    markup = None
+                    if bot_url:
+                        markup = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]
+                        ])
                     await update_status(
                         status,
                         "❌ **Your bot couldn't send the file to you.**\n\n"
@@ -686,14 +650,11 @@ async def download_handler(
                 if upload_client is None:
                     await update_status(
                         status,
-                        "❌ **You need a personal upload bot to receive files.**\n\n"
-                        "1. Tap the button below to open @BotFather\n"
-                        "2. Send `/newbot` and follow the steps\n"
-                        "3. Copy the token and run `/setbot <token>` here\n"
-                        "4. Press **Start** on your new bot",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🤖 Open BotFather", url="https://t.me/BotFather?start=newbot")]
-                        ]),
+                        "❌ You haven't registered an upload bot yet.\n\n"
+                        "1. Open @BotFather → `/newbot`\n"
+                        "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+                        "3. Run `/setbot bot_token` here\n"
+                        "4. Press **Start** on your bot",
                     )
                     return None
 
@@ -711,19 +672,11 @@ async def download_handler(
                             thumb = await user_client.download_media(m.video.thumbs[-1], in_memory=True)
                         except Exception:
                             pass
-                    if not duration or not width or not height:
-                        mi_dur, mi_w, mi_h = get_media_info(path)
-                        duration = duration or mi_dur
-                        width = width or mi_w
-                        height = height or mi_h
                 elif getattr(m, "document", None):
                     file_name = m.document.file_name
                 elif getattr(m, "audio", None):
                     duration = m.audio.duration or 0
                     file_name = m.audio.file_name
-                    if not duration:
-                        mi_dur, _, _ = get_media_info(path)
-                        duration = duration or mi_dur
 
                 await upload_media(
                     upload_client, user_id, path,
@@ -743,7 +696,7 @@ async def download_handler(
                     await update_status(status, "🛑 Cancelled.")
                     return None
                 error_str = str(e)
-                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str or "PEER_ID_INVALID" in error_str:
+                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
                     bot_url = None
                     try:
                         me = await upload_client.get_me()
@@ -751,12 +704,11 @@ async def download_handler(
                             bot_url = f"https://t.me/{me.username}?start=start"
                     except Exception:
                         pass
-                    markup = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
-                            "▶️ Start My Bot" if bot_url else "🤖 Open BotFather",
-                            url=bot_url or "https://t.me/BotFather"
-                        )]
-                    ])
+                    markup = None
+                    if bot_url:
+                        markup = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]
+                        ])
                     await update_status(
                         status,
                         "❌ **Your bot couldn't send the file to you.**\n\n"
@@ -802,14 +754,11 @@ async def download_handler(
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client, message):
     user_id = message.from_user.id
-    try:
-        if user_id in active_downloads or user_id in active_sessions:
-            cancel_flags.add(user_id)
-            await message.reply("🛑 Cancelling current download...")
-        else:
-            await message.reply("ℹ️ No active download to cancel.")
-    except UserIsBlocked:
-        pass
+    if user_id in active_downloads or user_id in active_sessions:
+        cancel_flags.add(user_id)
+        await message.reply("🛑 Cancelling current download...")
+    else:
+        await message.reply("ℹ️ No active download to cancel.")
 
 
 # --- Commands ---
@@ -820,15 +769,15 @@ async def help_command(client, message):
         "📖 **Help**\n\n"
         "🤖 **First-time setup**\n"
         "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) to get started quickly.\n\n"
-        "1. `/setbot bot_token` — register your own @BotFather bot. "
+        "1. `/setbot <token>` — register your own @BotFather bot. "
         "Your bot delivers files directly to your DM.\n"
         "2. `/login` — connect your Telegram account (only needed for "
         "private/restricted links).\n\n"
         "🔗 **Download**\n"
         "Send any t.me link. Both public and private links are sent "
-        "straight to your bot's DM.\n\n"
+        "straight to your bot's DM — no shared channels, no dump copies.\n\n"
         "🤖 **Bot management**\n"
-        "`/setbot bot_token` — set or replace your upload bot\n"
+        "`/setbot <token>` — set or replace your upload bot\n"
         "`/rembot` — remove your upload bot\n\n"
         "📦 **Batch** _(Premium)_\n"
         "`/batch start_link end_link` — range\n"
@@ -836,9 +785,9 @@ async def help_command(client, message):
         "Max 50 files per batch.\n\n"
         "🔗 **Multi-link** _(Premium)_\n"
         "`/mlinks` then paste up to 50 links, one per line.\n\n"
-        "💰 **Quota**\n"
-        "Free: 2 files/day · 5 files/month\n"
-        "Premium: **unlimited**.",
+        "💰 **Quota** _(Free)_\n"
+        "5 files/day · 15 files/month\n"
+        "Premium: unlimited.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],

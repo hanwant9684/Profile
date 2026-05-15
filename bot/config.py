@@ -72,5 +72,8 @@ app = Client(
     bot_token=BOT_TOKEN,
     in_memory=True,
     sleep_threshold=30,
+    no_updates=False,
     skip_updates=True,
+    max_concurrent_transmissions=10,
+    workers=10,
 )
