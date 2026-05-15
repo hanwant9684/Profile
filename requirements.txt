@@ -3,11 +3,11 @@ aiohttp
 asyncpg
 certifi
 flask
+hachoir
 psutil
 pyrofork
 python-dotenv
 pyyaml
 redis
 tgcrypto-pyrofork
-pymediainfo-pyrofork
 uvloop
