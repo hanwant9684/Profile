@@ -106,4 +106,5 @@ Settings table stores key-value pairs (e.g., `force_sub_channel`)
 - `pyyaml` — YAML parsing
 - `redis` — Redis client
 - `tgcrypto-pyrofork` — fast crypto for Telegram (pyrofork-bundled fork)
+- `pymediainfo-pyrofork` — media metadata (pyrofork-bundled fork)
 - `uvloop` — fast event loop
