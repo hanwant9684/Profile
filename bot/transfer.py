@@ -103,22 +103,27 @@ async def stop_user_bot(user_id: int):
 
 def get_media_info(path: str) -> tuple[int, int, int]:
     """
-    Extract (duration_sec, width, height) from a local file using pymediainfo.
-    Falls back to (0, 0, 0) if pymediainfo is not installed or parsing fails.
+    Extract (duration_sec, width, height) from a local file using hachoir.
+    Falls back to (0, 0, 0) if parsing fails.
     Used to fill in missing metadata before upload when Telegram attributes are absent.
     """
     try:
-        from pymediainfo import MediaInfo
-        info = MediaInfo.parse(path)
+        from hachoir.parser import createParser
+        from hachoir.metadata import extractMetadata
+        parser = createParser(path)
+        if not parser:
+            return 0, 0, 0
+        with parser:
+            metadata = extractMetadata(parser)
+        if not metadata:
+            return 0, 0, 0
         duration = width = height = 0
-        for track in info.tracks:
-            if track.track_type == "General" and track.duration and not duration:
-                duration = int(float(track.duration) / 1000)
-            if track.track_type == "Video":
-                if track.duration and not duration:
-                    duration = int(float(track.duration) / 1000)
-                width = int(track.width or 0)
-                height = int(track.height or 0)
+        if metadata.has("duration"):
+            duration = int(metadata.get("duration").total_seconds())
+        if metadata.has("width"):
+            width = int(metadata.get("width"))
+        if metadata.has("height"):
+            height = int(metadata.get("height"))
         return duration, width, height
     except Exception:
         return 0, 0, 0
