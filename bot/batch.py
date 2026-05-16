@@ -3,49 +3,8 @@ import re
 import logging
 
 from pyrogram import filters
-from pyrogram.errors import FloodWait, FloodPremiumWait
-
 from bot.config import app, batch_cancel_flags, batch_sessions
 from bot.database import get_user
-
-
-# --- Adaptive inter-item pacer ---
-#
-# Keeps the per-account RPC rate under Telegram's limit during batch operations
-# without picking magic numbers. Steady state = 1.5 s/item (~0.7 calls/sec into
-# messages.copyMessage / sendMedia, comfortably under the limit). When pyrofork
-# raises a FloodWait, we use the exact e.value Telegram returned and also bump
-# our future per-item delay so the next items don't crash into the same wall.
-# After a streak of clean successes, the delay decays back toward the base.
-
-class BatchPacer:
-    BASE_DELAY = 10.0   # seconds between items in steady state
-    MAX_DELAY = 60.0    # ceiling for the adaptive delay
-    DECAY_AFTER = 5     # consecutive successes before relaxing
-    DECAY_FACTOR = 0.7  # delay multiplier per decay step
-
-    def __init__(self):
-        self.delay = self.BASE_DELAY
-        self.success_streak = 0
-
-    def on_success(self):
-        self.success_streak += 1
-        if self.success_streak >= self.DECAY_AFTER and self.delay > self.BASE_DELAY:
-            self.delay = max(self.BASE_DELAY, self.delay * self.DECAY_FACTOR)
-            self.success_streak = 0
-
-    def on_flood(self, wait_seconds: int):
-        # Inflate the per-item delay so subsequent iterations stay clear of the limit.
-        self.success_streak = 0
-        proposed = max(self.delay * 2, wait_seconds / 5 + 1)
-        self.delay = min(self.MAX_DELAY, proposed)
-
-    def on_error(self):
-        # Non-flood errors don't change the delay but reset the success streak.
-        self.success_streak = 0
-
-    async def wait(self):
-        await asyncio.sleep(self.delay)
 
 
 # --- Link parsing helpers (batch-specific) ---
@@ -155,7 +114,6 @@ async def batch_handler(client, message):
 
     processed_albums = set()
     done = skipped = 0
-    pacer = BatchPacer()
     batch_sessions.add(user_id)
 
     try:
@@ -179,7 +137,7 @@ async def batch_handler(client, message):
                 pass
 
             if idx > 1:
-                await pacer.wait()
+                await asyncio.sleep(10)
 
             try:
                 from bot.handlers import download_handler
@@ -193,19 +151,10 @@ async def batch_handler(client, message):
                 )
                 if result is not None:
                     done += 1
-                    pacer.on_success()
                 else:
                     skipped += 1
-                    pacer.on_error()
-            except (FloodWait, FloodPremiumWait) as e:
-                # Telegram explicitly told us to wait e.value seconds.
-                logging.warning(f"Batch hit FloodWait {e.value}s (link={link}); pacing up.")
-                pacer.on_flood(e.value)
-                await asyncio.sleep(e.value)
-                skipped += 1
             except Exception as e:
                 logging.error(f"Batch item error (link={link}): {e}")
-                pacer.on_error()
                 skipped += 1
 
         try:
@@ -265,7 +214,6 @@ async def mlinks_handler(client, message):
 
     processed_albums = set()
     done = skipped = 0
-    pacer = BatchPacer()
     batch_sessions.add(user_id)
 
     try:
@@ -288,7 +236,7 @@ async def mlinks_handler(client, message):
                 pass
 
             if idx > 1:
-                await pacer.wait()
+                await asyncio.sleep(10)
 
             try:
                 from bot.handlers import download_handler
@@ -302,18 +250,10 @@ async def mlinks_handler(client, message):
                 )
                 if result is not None:
                     done += 1
-                    pacer.on_success()
                 else:
                     skipped += 1
-                    pacer.on_error()
-            except (FloodWait, FloodPremiumWait) as e:
-                logging.warning(f"mlinks hit FloodWait {e.value}s (link={link}); pacing up.")
-                pacer.on_flood(e.value)
-                await asyncio.sleep(e.value)
-                skipped += 1
             except Exception as e:
                 logging.error(f"mlinks item error (link={link}): {e}")
-                pacer.on_error()
                 skipped += 1
 
         try:

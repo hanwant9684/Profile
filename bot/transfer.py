@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 from pyrogram import Client
-from pyrogram.errors import FloodWait, FloodPremiumWait
 from pyrogram.errors.exceptions.bad_request_400 import (
     PhotoExtInvalid,
     PhotoInvalidDimensions,
@@ -144,9 +143,6 @@ async def download_media(client, message, progress=None, progress_args=()):
                 progress=progress,
                 progress_args=progress_args,
             )
-        except (FloodWait, FloodPremiumWait) as e:
-            logging.warning(f"FloodWait {e.value}s on download (attempt {attempt + 1}/3)")
-            await asyncio.sleep(e.value)
         except (FileReferenceExpired, FileReferenceInvalid):
             raise
         except Exception as e:
@@ -218,14 +214,11 @@ async def upload_media(
                 client, chat_id, path, ext, kw,
                 thumb, file_name, duration, width, height,
             )
-        except (FloodWait, FloodPremiumWait) as e:
-            last_exc = e
-            logging.warning(f"FloodWait {e.value}s on upload (attempt {attempt + 1}/3)")
-            await asyncio.sleep(e.value)
         except Exception as e:
             last_exc = e
             if attempt == 2:
                 break
+            logging.warning(f"Upload attempt {attempt + 1} failed: {e}, retrying")
             await asyncio.sleep(2 ** attempt)
 
     if last_exc is not None:

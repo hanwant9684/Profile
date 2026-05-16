@@ -8,7 +8,8 @@ from collections import deque
 import pyrogram
 from pyrogram import filters, Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, FloodPremiumWait, AuthKeyUnregistered, SessionRevoked
+from pyrogram import StopTransmission
+from pyrogram.errors import AuthKeyUnregistered, SessionRevoked
 
 from bot.config import (
     app, API_ID, API_HASH,
@@ -25,9 +26,6 @@ from bot.transfer import download_media, upload_media, truncate_caption, get_use
 user_clients: dict = {}
 active_sessions: set = set()
 _cleanup_started = False
-
-MAX_FLOODWAIT_TOLERATE = 60
-_user_floodwait_until: dict = {}
 
 FREE_DOWNLOAD_COOLDOWN = 15 * 60  # 15 minutes in seconds
 _user_last_download_time: dict = {}
@@ -118,17 +116,54 @@ async def _cleanup_loop():
 
 # --- Utilities ---
 
-async def update_status(msg, text: str):
+class _LazyStatus:
+    """
+    For single downloads (no status_msg_override): sends no message at all on
+    fast/happy paths. The first call to edit_text() fires a reply; subsequent
+    calls edit that message. delete() is a no-op if nothing was ever sent.
+    """
+    def __init__(self, message):
+        self._message = message
+        self._sent = None
+
+    @property
+    def chat(self):
+        # Delegate to the original triggering message so progress_bar's
+        # cancel-flag check (msg.chat.id in cancel_flags) works correctly.
+        return self._message.chat
+
+    @property
+    def id(self):
+        # Use the sent message id once available; fall back to the triggering
+        # message id so progress_bar can use it as a stable dedup key.
+        return self._sent.id if self._sent else self._message.id
+
+    async def edit_text(self, text, reply_markup=None):
+        if self._sent is None:
+            try:
+                self._sent = await self._message.reply(text, reply_markup=reply_markup)
+            except Exception as e:
+                logging.debug(f"_LazyStatus.reply: {e}")
+        else:
+            try:
+                await self._sent.edit_text(text, reply_markup=reply_markup)
+            except Exception as e:
+                if "MESSAGE_NOT_MODIFIED" not in str(e):
+                    logging.debug(f"_LazyStatus.edit_text: {e}")
+
+    async def delete(self):
+        if self._sent:
+            try:
+                await self._sent.delete()
+            except Exception:
+                pass
+
+
+async def update_status(msg, text: str, reply_markup=None):
     if not msg:
         return
     try:
-        await msg.edit_text(text)
-    except (FloodWait, FloodPremiumWait) as e:
-        await asyncio.sleep(min(e.value, 10))
-        try:
-            await msg.edit_text(text)
-        except Exception:
-            pass
+        await msg.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logging.debug(f"update_status: {e}")
@@ -154,7 +189,7 @@ async def progress_bar(current: int, total: int, msg, label: str):
     if total == 0:
         return
     if msg.chat.id in cancel_flags:
-        raise Exception("StopProcess")
+        raise StopTransmission
 
     if not hasattr(progress_bar, "_data"):
         progress_bar._data = {}
@@ -310,12 +345,6 @@ async def download_handler(
             return None
         chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
 
-    if _user_floodwait_until.get(user_id, 0) > time.time():
-        wait_left = int(_user_floodwait_until[user_id] - time.time())
-        if not link_override:
-            await message.reply(f"⏳ Rate limit active. Please try again in {wait_left}s.")
-        return None
-
     if user_override is not None:
         user = user_override
     else:
@@ -370,18 +399,15 @@ async def download_handler(
             wait_left = int(FREE_DOWNLOAD_COOLDOWN - elapsed)
             mins, secs = divmod(wait_left, 60)
             wait_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-            if not link_override:
-                await message.reply(
-                    f"⏳ **Please wait {wait_str}** before your next download.\n\n"
-                    f"Free users must wait **15 minutes** between downloads.\n\n"
-                    f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
-                    f"👉 /upgrade"
-                )
+            await message.reply(
+                f"⏳ **Please wait {wait_str}** before your next download.\n\n"
+                f"Free users must wait **15 minutes** between downloads.\n\n"
+                f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
+                f"👉 /upgrade"
+            )
             return None
 
-    status = status_msg_override or await message.reply("⏳ Processing...")
-    if status is None:
-        return None
+    status = status_msg_override or _LazyStatus(message)
 
     async with global_download_semaphore:
         if user_id in active_downloads:
@@ -546,15 +572,6 @@ async def download_handler(
                 return msg
             except (AuthKeyUnregistered, SessionRevoked):
                 raise
-            except (FloodWait, FloodPremiumWait) as e:
-                wait_secs = e.value
-                logging.warning(f"FloodWait {wait_secs}s on direct extraction for user {user_id}")
-                if wait_secs > MAX_FLOODWAIT_TOLERATE:
-                    _user_floodwait_until[user_id] = time.time() + wait_secs
-                    await update_status(status, f"⏳ Rate limit hit ({wait_secs}s). Please try again later.")
-                    return None
-                await asyncio.sleep(wait_secs + 2)
-                return None
             except Exception as e:
                 error_str = str(e)
                 if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
@@ -707,10 +724,6 @@ async def download_handler(
                 )
 
             except Exception as e:
-                if str(e) == "StopProcess":
-                    cancel_flags.discard(user_id)
-                    await update_status(status, "🛑 Cancelled.")
-                    return None
                 error_str = str(e)
                 if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
                     bot_url = None
