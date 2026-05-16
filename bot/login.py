@@ -6,6 +6,7 @@ from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import (
     get_user, create_user, update_user_terms, save_session_string, logout_user,
     set_bot_token, remove_bot_token, get_bot_token, check_user_agreed,
+    record_referral, validate_and_credit_referral,
 )
 from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
@@ -44,6 +45,19 @@ async def start(client, message):
         )
         return
 
+    # Parse referral parameter (e.g. /start ref_12345678)
+    start_args = message.text.split(maxsplit=1)
+    referrer_id = None
+    if len(start_args) > 1:
+        param = start_args[1].strip()
+        if param.startswith("ref_"):
+            try:
+                referrer_id = int(param[4:])
+            except ValueError:
+                referrer_id = None
+
+    is_new_user = not await check_user_agreed(user_id) and not await get_user(user_id)
+
     user = await get_user(user_id)
     if not user:
         user = await create_user(user_id, username, full_name)
@@ -53,6 +67,11 @@ async def start(client, message):
         if user.get("username") != username or user.get("full_name") != full_name:
             await create_user(user_id, username, full_name)
             user = await get_user(user_id) or user
+
+    # Record referral for brand new users only (can't be referred if already in DB)
+    if referrer_id and is_new_user:
+        import asyncio as _asyncio
+        _asyncio.create_task(record_referral(referrer_id, user_id))
 
     # Always check DB directly (not Redis) so deleting a row always resets T&C
     is_agreed = await check_user_agreed(user_id)
@@ -312,7 +331,7 @@ async def login_start(client, message):
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
         "settings", "set_force_sub", "set_maintenance",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
-        "setbot", "rembot",
+        "setbot", "rembot", "refer",
     ])
     & ~filters.regex(r"https://t\.me/")
 )
@@ -350,6 +369,22 @@ async def handle_login_steps(client, message: Message):
         await stop_user_bot(user_id)
         await set_bot_token(user_id, token)
         login_states.pop(user_id, None)
+
+        # Validate referral now that the user has proven they're genuine
+        ref_result = await validate_and_credit_referral(user_id)
+        if ref_result:
+            referrer_id_notif, milestone_hit, total_valid = ref_result
+            if milestone_hit:
+                try:
+                    await client.send_message(
+                        referrer_id_notif,
+                        f"🎉 **Referral Milestone Reached!**\n\n"
+                        f"You've hit **{total_valid} valid referrals**!\n"
+                        f"**30 days of Premium** have been added to your account. 🚀\n\n"
+                        f"Use /refer to check your stats."
+                    )
+                except Exception:
+                    pass
 
         bot_username = f"@{me.username}" if me.username else str(me.id)
 
@@ -397,8 +432,6 @@ async def handle_login_steps(client, message: Message):
                     api_hash=str(API_HASH) if API_HASH else "",
                     in_memory=True,
                     sleep_threshold=60,
-                    max_concurrent_transmissions=5,
-                    workers=5
                 )
                 await state["client"].connect()
                 sent_code = await state["client"].send_code(phone_number)
@@ -587,6 +620,22 @@ async def setbot_command(client, message: Message):
 
     await stop_user_bot(user_id)
     await set_bot_token(user_id, token)
+
+    # Validate referral now that the user has proven they're genuine
+    ref_result = await validate_and_credit_referral(user_id)
+    if ref_result:
+        referrer_id_notif, milestone_hit, total_valid = ref_result
+        if milestone_hit:
+            try:
+                await client.send_message(
+                    referrer_id_notif,
+                    f"🎉 **Referral Milestone Reached!**\n\n"
+                    f"You've hit **{total_valid} valid referrals**!\n"
+                    f"**30 days of Premium** have been added to your account. 🚀\n\n"
+                    f"Use /refer to check your stats."
+                )
+            except Exception:
+                pass
 
     bot_username = f"@{me.username}" if me.username else str(me.id)
     await status.edit_text(

@@ -2,17 +2,21 @@ import os
 import asyncpg
 import redis.asyncio as redis
 import logging
-import asyncio
 import json
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List
-from bot.config import OWNER_ID, SUPPORT_CHAT_LINK
+from typing import Optional, Dict
+from bot.config import OWNER_ID
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 REDIS_URL = os.environ.get("REDIS_URL")
+
+DAILY_LIMIT = 2
+MONTHLY_LIMIT = 5
+
+REFERRAL_MILESTONE = 30
+REFERRAL_PREMIUM_DAYS = 30
 
 pool: Optional[asyncpg.Pool] = None
 redis_client: Optional[redis.Redis] = None
@@ -97,12 +101,8 @@ async def init_db():
                     last_download_month DATE,
                     is_agreed_terms BOOLEAN DEFAULT FALSE,
                     phone_session_string TEXT,
-                    download_channel_id TEXT,
-                    download_channel_hash TEXT,
                     premium_expiry_date TIMESTAMP WITH TIME ZONE,
                     is_banned BOOLEAN DEFAULT FALSE,
-                    ads_today INTEGER DEFAULT 0,
-                    last_ad_date DATE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
@@ -114,6 +114,10 @@ async def init_db():
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS downloads_this_month INTEGER DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_download_month DATE")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_token TEXT")
+                await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS ads_today")
+                await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS last_ad_date")
+                await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS download_channel_id")
+                await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS download_channel_hash")
             except Exception as e:
                 logger.info(f"Migration notice (likely columns already exist): {e}")
 
@@ -126,6 +130,19 @@ async def init_db():
                 )
             ''')
 
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id SERIAL PRIMARY KEY,
+                    referrer_id BIGINT NOT NULL,
+                    referee_id BIGINT NOT NULL UNIQUE,
+                    referred_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    validated_at TIMESTAMP WITH TIME ZONE,
+                    is_valid BOOLEAN DEFAULT FALSE
+                )
+            ''')
+
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id)')
+            await conn.execute('CREATE INDEX IF NOT EXISTS idx_referrals_valid ON referrals(referrer_id, is_valid)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_role_expiry ON users(role, premium_expiry_date)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)')
 
@@ -161,8 +178,6 @@ async def get_user(user_id) -> Optional[Dict]:
                 user['last_download_date'] = user['last_download_date'].isoformat()
             if user.get('last_download_month'):
                 user['last_download_month'] = user['last_download_month'].isoformat()
-            if user.get('last_ad_date'):
-                user['last_ad_date'] = user['last_ad_date'].isoformat()
 
             await _redis_set(cache_key, 600, json.dumps(user))
             return user
@@ -189,8 +204,8 @@ async def create_user(user_id, username=None, full_name=None) -> Optional[Dict]:
         async with pool.acquire() as conn:
             await conn.execute('''
                 INSERT INTO users (telegram_id, username, full_name, role, downloads_today, last_download_date,
-                                   is_agreed_terms, is_banned, ads_today, created_at, updated_at)
-                VALUES ($1, $2, $3, 'free', 0, $4, FALSE, FALSE, 0, $5, $6)
+                                   is_agreed_terms, is_banned, created_at, updated_at)
+                VALUES ($1, $2, $3, 'free', 0, $4, FALSE, FALSE, $5, $6)
                 ON CONFLICT (telegram_id) DO UPDATE SET
                     username = EXCLUDED.username,
                     full_name = EXCLUDED.full_name,
@@ -211,9 +226,9 @@ async def update_user_terms(user_id, agreed=True, username=None, full_name=None)
         async with pool.acquire() as conn:
             await conn.execute(
                 '''INSERT INTO users (telegram_id, username, full_name, role, downloads_today,
-                                     last_download_date, is_agreed_terms, is_banned, ads_today,
+                                     last_download_date, is_agreed_terms, is_banned,
                                      created_at, updated_at)
-                   VALUES ($1, $2, $3, 'free', 0, $4, $5, FALSE, 0, $6, $6)
+                   VALUES ($1, $2, $3, 'free', 0, $4, $5, FALSE, $6, $6)
                    ON CONFLICT (telegram_id) DO UPDATE SET
                        is_agreed_terms = EXCLUDED.is_agreed_terms,
                        updated_at = EXCLUDED.updated_at''',
@@ -239,38 +254,13 @@ async def logout_user(user_id):
     try:
         async with pool.acquire() as conn:
             await conn.execute(
-                'UPDATE users SET phone_session_string = NULL, download_channel_id = NULL, download_channel_hash = NULL, updated_at = $1 WHERE telegram_id = $2',
+                'UPDATE users SET phone_session_string = NULL, updated_at = $1 WHERE telegram_id = $2',
                 datetime.now(), int(user_id)
             )
         await _redis_del(f"user:{user_id}")
-        logger.info(f"User {user_id} logged out and channel data cleared")
+        logger.info(f"User {user_id} logged out")
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
-
-
-async def update_user(user_id, data: dict):
-    try:
-        if not data:
-            return
-
-        fields = []
-        values = []
-        for i, (k, v) in enumerate(data.items(), start=1):
-            fields.append(f"{k} = ${i}")
-            values.append(v)
-
-        fields.append(f"updated_at = ${len(data) + 1}")
-        values.append(datetime.now())
-        values.append(int(user_id))
-
-        query = f"UPDATE users SET {', '.join(fields)} WHERE telegram_id = ${len(values)}"
-
-        async with pool.acquire() as conn:
-            await conn.execute(query, *values)
-
-        await _redis_del(f"user:{user_id}")
-    except Exception as e:
-        logger.error(f"Error updating user {user_id}: {e}")
 
 
 async def get_bot_token(user_id) -> Optional[str]:
@@ -310,8 +300,6 @@ async def remove_bot_token(user_id):
         logger.error(f"Error clearing bot_token for {user_id}: {e}")
 
 
-
-
 async def set_user_role(user_id, role, duration_days=None):
     try:
         expiry_date = None
@@ -326,6 +314,33 @@ async def set_user_role(user_id, role, duration_days=None):
         logger.error(f"Error setting role for {user_id}: {e}")
 
 
+async def extend_premium(user_id: int, days: int):
+    """Add premium days on top of any existing expiry (stacking, not resetting)."""
+    try:
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        async with pool.acquire() as conn:
+            current_expiry = await conn.fetchval(
+                'SELECT premium_expiry_date FROM users WHERE telegram_id = $1',
+                int(user_id)
+            )
+
+        if current_expiry and current_expiry > now:
+            new_expiry = current_expiry + timedelta(days=days)
+        else:
+            new_expiry = now + timedelta(days=days)
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET role = 'premium', premium_expiry_date = $1, updated_at = $2 WHERE telegram_id = $3",
+                new_expiry, datetime.now(), int(user_id)
+            )
+        await _redis_del(f"user:{user_id}")
+        logger.info(f"Extended premium for user {user_id} by {days} days → new expiry: {new_expiry}")
+    except Exception as e:
+        logger.error(f"extend_premium error for {user_id}: {e}")
+
+
 async def ban_user(user_id, is_banned=True):
     try:
         async with pool.acquire() as conn:
@@ -335,9 +350,6 @@ async def ban_user(user_id, is_banned=True):
     except Exception as e:
         logger.error(f"Error banning user {user_id}: {e}")
 
-
-DAILY_LIMIT = 5
-MONTHLY_LIMIT = 15
 
 async def check_and_update_quota(user_id):
     try:
@@ -377,7 +389,6 @@ async def check_and_update_quota(user_id):
         if user.get("role") in ['premium', 'admin', 'owner']:
             return True, "Unlimited"
 
-        # Determine what needs resetting (daily and/or monthly) — do it in one query
         last_download_date = None
         if user.get("last_download_date"):
             last_download_date = datetime.fromisoformat(user["last_download_date"]).date()
@@ -457,80 +468,6 @@ async def increment_quota(user_id, count=1):
         logger.error(f"Error incrementing quota for {user_id}: {e}")
 
 
-async def increment_ad_count(user_id):
-    try:
-        today = datetime.now().date()
-        async with pool.acquire() as conn:
-            await conn.execute('UPDATE users SET ads_today = ads_today + 1, last_ad_date = $1 WHERE telegram_id = $2',
-                               today, int(user_id))
-        await _redis_del(f"user:{user_id}")
-    except Exception as e:
-        logger.error(f"Error incrementing ad count for {user_id}: {e}")
-
-
-async def get_ad_count_today(user_id):
-    try:
-        user = await get_user(user_id)
-        if not user:
-            return 0
-
-        today = datetime.now().date()
-        last_ad_date = None
-
-        if user.get("last_ad_date"):
-            try:
-                last_ad_date = datetime.fromisoformat(user["last_ad_date"]).date()
-            except (ValueError, TypeError):
-                last_ad_date = None
-
-        if last_ad_date != today:
-            async with pool.acquire() as conn:
-                await conn.execute('UPDATE users SET ads_today = 0, last_ad_date = $1 WHERE telegram_id = $2',
-                                   today, int(user_id))
-            await _redis_del(f"user:{user_id}")
-            return 0
-
-        return user.get("ads_today", 0)
-    except Exception as e:
-        logger.error(f"Error getting ad count for {user_id}: {e}")
-        return 0
-
-
-async def get_remaining_quota(user_id):
-    try:
-        user = await get_user(user_id)
-        if not user:
-            return 0, False
-
-        if user.get("role") in ['premium', 'admin', 'owner']:
-            return 999999, True
-
-        today = datetime.now().date()
-        this_month_first = today.replace(day=1)
-
-        downloads_today = user.get("downloads_today", 0)
-        last_download_date = None
-        if user.get("last_download_date"):
-            last_download_date = datetime.fromisoformat(user["last_download_date"]).date()
-        if last_download_date != today:
-            downloads_today = 0
-
-        downloads_this_month = user.get("downloads_this_month", 0)
-        last_download_month = None
-        if user.get("last_download_month"):
-            last_download_month = datetime.fromisoformat(user["last_download_month"]).date()
-        if last_download_month != this_month_first:
-            downloads_this_month = 0
-
-        remaining_daily = max(0, DAILY_LIMIT - downloads_today)
-        remaining_monthly = max(0, MONTHLY_LIMIT - downloads_this_month)
-        remaining = min(remaining_daily, remaining_monthly)
-        return remaining, False
-    except Exception as e:
-        logger.error(f"Error getting remaining quota for {user_id}: {e}")
-        return 0, False
-
-
 async def get_setting(key):
     try:
         cache_key = f"setting:{key}"
@@ -572,19 +509,8 @@ async def update_setting(key, value, json_value=None):
         logger.error(f"Error updating setting {key}: {e}")
 
 
-async def get_all_users() -> List[Dict]:
-    try:
-        _require_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch('SELECT * FROM users')
-        return [dict(row) for row in rows]
-    except Exception as e:
-        logger.error(f"Error getting all users: {e}")
-        return []
-
-
 async def iter_user_ids(batch_size: int = 500):
-    """Async generator that yields user telegram_ids in batches — safe for large user bases."""
+    """Async generator that yields user telegram_ids in batches."""
     try:
         _require_pool()
         offset = 0
@@ -631,3 +557,140 @@ async def check_user_agreed(user_id) -> bool:
     except Exception as e:
         logger.error(f"check_user_agreed error for {user_id}: {e}")
         return False
+
+
+# ── Referral system ────────────────────────────────────────────────────────────
+
+async def record_referral(referrer_id: int, referee_id: int) -> bool:
+    """
+    Record a pending referral when a new user joins via a referral link.
+    Returns True if recorded, False if rejected by any anti-abuse check.
+
+    Anti-abuse:
+    - Self-referral blocked
+    - One referral per referee (UNIQUE constraint)
+    - Referrer must exist in DB
+    - Daily cap: referrer can gain at most REFERRAL_DAILY_CAP new referrals per day
+    """
+    try:
+        if int(referrer_id) == int(referee_id):
+            return False
+
+        referrer = await get_user(referrer_id)
+        if not referrer:
+            return False
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO referrals (referrer_id, referee_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                int(referrer_id), int(referee_id)
+            )
+
+        logger.info(f"Recorded referral: referrer={referrer_id} referee={referee_id}")
+        return True
+    except Exception as e:
+        logger.error(f"record_referral error: {e}")
+        return False
+
+
+async def validate_and_credit_referral(referee_id: int) -> Optional[tuple]:
+    """
+    Called when a referee successfully sets their bot token.
+    Marks the referral valid, then checks if the referrer hit a 30-referral milestone.
+
+    Returns (referrer_id, milestone_hit, total_valid) or None if no pending referral.
+    """
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT referrer_id FROM referrals WHERE referee_id = $1 AND is_valid = FALSE",
+                int(referee_id)
+            )
+            if not row:
+                return None
+
+            referrer_id = row['referrer_id']
+            now = datetime.now()
+
+            await conn.execute(
+                "UPDATE referrals SET is_valid = TRUE, validated_at = $1 WHERE referee_id = $2",
+                now, int(referee_id)
+            )
+
+            total_valid = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1 AND is_valid = TRUE",
+                int(referrer_id)
+            ) or 0
+
+        milestone_hit = (total_valid > 0 and total_valid % REFERRAL_MILESTONE == 0)
+
+        if milestone_hit:
+            await extend_premium(referrer_id, REFERRAL_PREMIUM_DAYS)
+
+        await _redis_del(f"ref_stats:{referrer_id}")
+        logger.info(f"Referral validated: referee={referee_id} referrer={referrer_id} total_valid={total_valid} milestone={milestone_hit}")
+        return referrer_id, milestone_hit, total_valid
+    except Exception as e:
+        logger.error(f"validate_and_credit_referral error: {e}")
+        return None
+
+
+async def get_referral_stats(user_id: int) -> dict:
+    """Return referral stats for a user."""
+    try:
+        cache_key = f"ref_stats:{user_id}"
+        cached = await _redis_get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        async with pool.acquire() as conn:
+            total_valid = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1 AND is_valid = TRUE",
+                int(user_id)
+            ) or 0
+            total_pending = await conn.fetchval(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id = $1 AND is_valid = FALSE",
+                int(user_id)
+            ) or 0
+
+        milestones_reached = total_valid // REFERRAL_MILESTONE
+        progress = total_valid % REFERRAL_MILESTONE
+
+        stats = {
+            "total_valid": total_valid,
+            "total_pending": total_pending,
+            "milestones_reached": milestones_reached,
+            "progress": progress,
+            "next_milestone_in": REFERRAL_MILESTONE - progress,
+        }
+        await _redis_set(cache_key, 300, json.dumps(stats))
+        return stats
+    except Exception as e:
+        logger.error(f"get_referral_stats error: {e}")
+        return {
+            "total_valid": 0, "total_pending": 0,
+            "milestones_reached": 0, "progress": 0,
+            "next_milestone_in": REFERRAL_MILESTONE,
+        }
+
+
+async def get_top_referrers(limit: int = 5) -> list:
+    """Return top referrers by valid referral count."""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT r.referrer_id, u.username, u.full_name, COUNT(*) AS valid_count
+                FROM referrals r
+                LEFT JOIN users u ON u.telegram_id = r.referrer_id
+                WHERE r.is_valid = TRUE
+                GROUP BY r.referrer_id, u.username, u.full_name
+                ORDER BY valid_count DESC
+                LIMIT $1
+                """,
+                limit
+            )
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"get_top_referrers error: {e}")
+        return []

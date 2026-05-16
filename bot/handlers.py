@@ -17,7 +17,7 @@ from bot.config import (
     SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota
-from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot
+from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info
 
 
 # --- User session cache ---
@@ -415,6 +415,12 @@ async def download_handler(
         else:
             try:
                 msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+                # Bots can't read public groups — retry with user session if message is empty
+                if not getattr(msg, "media", None) and not getattr(msg, "text", None) and user.get("phone_session_string"):
+                    user_client = await get_user_client(user_id, user["phone_session_string"])
+                    active_sessions.add(user_id)
+                    msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+                    is_private = True
             except (AuthKeyUnregistered, SessionRevoked):
                 from bot.database import logout_user
                 await logout_user(user_id)
@@ -443,7 +449,6 @@ async def download_handler(
                     if not is_private:
                         user_client = _resolve_client
                         is_private = True
-                    logging.info(f"Comment resolved: user={user_id} disc_chat={disc_chat_id} comment={comment_id}")
             except Exception as e:
                 logging.warning(f"Comment resolution failed (comment_id={comment_id}): {e} — falling back to original post")
 
@@ -467,7 +472,6 @@ async def download_handler(
                         if not is_private:
                             user_client = _resolve_client
                             is_private = True
-                        logging.info(f"Thread resolved: user={user_id} disc_chat={disc_chat_id} msg={msg_id}")
             except Exception as e:
                 logging.info(f"Thread resolution (thread={thread_id}): {e} — using direct message fetch")
 
@@ -479,7 +483,11 @@ async def download_handler(
         has_text = bool(getattr(msg, "text", None))
 
         if not has_media and not has_text:
-            await update_status(status, "❌ No content found at this link (message is empty).")
+            await update_status(status,
+                "❌ No content found. This may be a public group — use /login to connect your account and try again."
+                if not is_private and not user.get("phone_session_string")
+                else "❌ No content found at this link (message is empty)."
+            )
             return None
 
         if not is_story and msg.media_group_id:
@@ -672,11 +680,19 @@ async def download_handler(
                             thumb = await user_client.download_media(m.video.thumbs[-1], in_memory=True)
                         except Exception:
                             pass
+                    if not duration or not width or not height:
+                        mi_dur, mi_w, mi_h = get_media_info(path)
+                        duration = duration or mi_dur
+                        width = width or mi_w
+                        height = height or mi_h
                 elif getattr(m, "document", None):
                     file_name = m.document.file_name
                 elif getattr(m, "audio", None):
                     duration = m.audio.duration or 0
                     file_name = m.audio.file_name
+                    if not duration:
+                        mi_dur, _, _ = get_media_info(path)
+                        duration = duration or mi_dur
 
                 await upload_media(
                     upload_client, user_id, path,
@@ -769,15 +785,15 @@ async def help_command(client, message):
         "📖 **Help**\n\n"
         "🤖 **First-time setup**\n"
         "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) to get started quickly.\n\n"
-        "1. `/setbot <token>` — register your own @BotFather bot. "
+        "1. `/setbot bot_token` — register your own @BotFather bot. "
         "Your bot delivers files directly to your DM.\n"
         "2. `/login` — connect your Telegram account (only needed for "
         "private/restricted links).\n\n"
         "🔗 **Download**\n"
         "Send any t.me link. Both public and private links are sent "
-        "straight to your bot's DM — no shared channels, no dump copies.\n\n"
+        "straight to your bot's DM.\n\n"
         "🤖 **Bot management**\n"
-        "`/setbot <token>` — set or replace your upload bot\n"
+        "`/setbot bot_token` — set or replace your upload bot\n"
         "`/rembot` — remove your upload bot\n\n"
         "📦 **Batch** _(Premium)_\n"
         "`/batch start_link end_link` — range\n"
@@ -785,9 +801,9 @@ async def help_command(client, message):
         "Max 50 files per batch.\n\n"
         "🔗 **Multi-link** _(Premium)_\n"
         "`/mlinks` then paste up to 50 links, one per line.\n\n"
-        "💰 **Quota** _(Free)_\n"
-        "5 files/day · 15 files/month\n"
-        "Premium: unlimited.",
+        "💰 **Quota**\n"
+        "Free: 2 files/day · 5 files/month\n"
+        "Premium: **unlimited**.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
