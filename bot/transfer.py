@@ -207,6 +207,8 @@ async def upload_media(
     ext = os.path.splitext(path)[1].lower()
     kw = dict(caption=safe_cap, progress=progress, progress_args=progress_args)
 
+    _NO_RETRY_CODES = ("USER_IS_BLOCKED", "INPUT_USER_DEACTIVATED", "PEER_ID_INVALID")
+
     last_exc = None
     for attempt in range(3):
         try:
@@ -216,7 +218,7 @@ async def upload_media(
             )
         except Exception as e:
             last_exc = e
-            if attempt == 2:
+            if attempt == 2 or any(code in str(e) for code in _NO_RETRY_CODES):
                 break
             logging.warning(f"Upload attempt {attempt + 1} failed: {e}, retrying")
             await asyncio.sleep(2 ** attempt)

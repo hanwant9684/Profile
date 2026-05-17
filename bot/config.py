@@ -1,6 +1,6 @@
 import os
 import asyncio
-import aiohttp
+import httpx
 from bot.logger import setup_logger
 from pyrogram import Client
 from dotenv import load_dotenv
@@ -54,15 +54,14 @@ login_states: dict = {}
 # Each user registers their own bot via /setbot; we instantiate and reuse it.
 user_bots: dict = {}
 
-_shared_session = None
+_shared_client: httpx.AsyncClient | None = None
 
 
-async def get_shared_session() -> aiohttp.ClientSession:
-    global _shared_session
-    if _shared_session is None or _shared_session.closed:
-        timeout = aiohttp.ClientTimeout(total=30, connect=10)
-        _shared_session = aiohttp.ClientSession(timeout=timeout)
-    return _shared_session
+async def get_shared_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
+    return _shared_client
 
 
 app = Client(

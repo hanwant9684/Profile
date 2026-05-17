@@ -574,12 +574,11 @@ async def download_handler(
                 raise
             except Exception as e:
                 error_str = str(e)
-                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
+                if any(code in error_str for code in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
                     bot_url = None
                     try:
                         me = await upload_bot.get_me()
-                        if me.username:
-                            bot_url = f"https://t.me/{me.username}?start=start"
+                        bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
                     except Exception:
                         pass
                     markup = None
@@ -725,12 +724,11 @@ async def download_handler(
 
             except Exception as e:
                 error_str = str(e)
-                if "USER_IS_BLOCKED" in error_str or "BotStartCommandMissing" in error_str:
+                if any(code in error_str for code in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
                     bot_url = None
                     try:
                         me = await upload_client.get_me()
-                        if me.username:
-                            bot_url = f"https://t.me/{me.username}?start=start"
+                        bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
                     except Exception:
                         pass
                     markup = None
