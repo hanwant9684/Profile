@@ -15,7 +15,7 @@ from bot.config import (
     app, API_ID, API_HASH,
     active_downloads, global_download_semaphore,
     cancel_flags, batch_sessions, login_states,
-    SUPPORT_CHAT_LINK, USE_PER_USER_BOT,
+    SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota
 from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info
@@ -533,24 +533,21 @@ async def download_handler(
         else:
             messages = [msg]
 
-        # --- Public content: server-side copy ---
+        # --- Public content: server-side copy via user's own bot to their DM ---
         if not is_private:
-            if USE_PER_USER_BOT:
-                upload_bot = await get_user_bot(user_id)
-                if upload_bot is None:
-                    await update_status(
-                        status,
-                        "❌ You need a personal upload bot to receive files.\n\n"
-                        "1. Open @BotFather → `/newbot`\n"
-                        "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-                        "3. Run `/setbot bot_token` here\n"
-                        "4. Press **Start** on your bot\n\n"
-                        "All files are delivered directly to your bot's DM.",
-                    )
-                    active_downloads.discard(user_id)
-                    return None
-            else:
-                upload_bot = client
+            upload_bot = await get_user_bot(user_id)
+            if upload_bot is None:
+                await update_status(
+                    status,
+                    "❌ You need a personal upload bot to receive files.\n\n"
+                    "1. Open @BotFather → `/newbot`\n"
+                    "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+                    "3. Run `/setbot bot_token` here\n"
+                    "4. Press **Start** on your bot\n\n"
+                    "All files are delivered directly to your bot's DM.",
+                )
+                active_downloads.discard(user_id)
+                return None
 
             media_group_id = getattr(msg, "media_group_id", None)
             try:
@@ -627,15 +624,12 @@ async def download_handler(
                 logging.error(f"Direct extraction failed: {e}")
                 await update_status(status, "⚠️ Direct extraction failed, trying download/upload...")
 
-        # --- Text-only private message: send to user DM ---
+        # --- Text-only private message: send via user's own bot DM ---
         if not has_media:
             text = getattr(msg, "text", None) or ""
             entities = getattr(msg, "entities", None) or []
-            if USE_PER_USER_BOT:
-                upload_bot = await get_user_bot(user_id)
-                sender = upload_bot if upload_bot is not None else client
-            else:
-                sender = client
+            upload_bot = await get_user_bot(user_id)
+            sender = upload_bot if upload_bot is not None else client
             try:
                 await update_status(status, "✍️ Copying text message...")
                 await sender.send_message(
@@ -676,20 +670,17 @@ async def download_handler(
                     await update_status(status, "🛑 Cancelled.")
                     return None
 
-                if USE_PER_USER_BOT:
-                    upload_client = await get_user_bot(user_id)
-                    if upload_client is None:
-                        await update_status(
-                            status,
-                            "❌ You haven't registered an upload bot yet.\n\n"
-                            "1. Open @BotFather → `/newbot`\n"
-                            "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-                            "3. Run `/setbot bot_token` here\n"
-                            "4. Press **Start** on your bot",
-                        )
-                        return None
-                else:
-                    upload_client = client
+                upload_client = await get_user_bot(user_id)
+                if upload_client is None:
+                    await update_status(
+                        status,
+                        "❌ You haven't registered an upload bot yet.\n\n"
+                        "1. Open @BotFather → `/newbot`\n"
+                        "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
+                        "3. Run `/setbot bot_token` here\n"
+                        "4. Press **Start** on your bot",
+                    )
+                    return None
 
                 caption = truncate_caption(m.caption or "")
                 duration = width = height = 0
@@ -801,32 +792,20 @@ async def cancel_handler(client, message):
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
-    if USE_PER_USER_BOT:
-        setup_section = (
-            "🤖 **First-time setup**\n"
-            "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) to get started quickly.\n\n"
-            "1. `/setbot bot_token` — register your own @BotFather bot. "
-            "Your bot delivers files directly to your DM.\n"
-            "2. `/login` — connect your Telegram account (only needed for "
-            "private/restricted links).\n\n"
-            "🔗 **Download**\n"
-            "Send any t.me link. Both public and private links are sent "
-            "straight to your bot's DM.\n\n"
-            "🤖 **Bot management**\n"
-            "`/setbot bot_token` — set or replace your upload bot\n"
-            "`/rembot` — remove your upload bot\n\n"
-        )
-    else:
-        setup_section = (
-            "🚀 **Getting started**\n"
-            "1. `/login` — connect your Telegram account (needed for "
-            "private/restricted links).\n\n"
-            "🔗 **Download**\n"
-            "Send any t.me link and files are delivered straight to this chat.\n\n"
-        )
     await message.reply(
         "📖 **Help**\n\n"
-        + setup_section +
+        "🤖 **First-time setup**\n"
+        "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) to get started quickly.\n\n"
+        "1. `/setbot bot_token` — register your own @BotFather bot. "
+        "Your bot delivers files directly to your DM.\n"
+        "2. `/login` — connect your Telegram account (only needed for "
+        "private/restricted links).\n\n"
+        "🔗 **Download**\n"
+        "Send any t.me link. Both public and private links are sent "
+        "straight to your bot's DM.\n\n"
+        "🤖 **Bot management**\n"
+        "`/setbot bot_token` — set or replace your upload bot\n"
+        "`/rembot` — remove your upload bot\n\n"
         "📦 **Batch** _(Premium)_\n"
         "`/batch start_link end_link` — range\n"
         "`/batch start_link 50` — count mode\n"
