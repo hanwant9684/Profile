@@ -2,7 +2,7 @@ import time
 from pyrogram import filters, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
-from bot.config import app, login_states, API_ID, API_HASH
+from bot.config import app, login_states, API_ID, API_HASH, USE_PER_USER_BOT
 from bot.database import (
     get_user, create_user, update_user_terms, save_session_string, logout_user,
     set_bot_token, remove_bot_token, get_bot_token, check_user_agreed,
@@ -78,34 +78,39 @@ async def start(client, message):
 
     # Already accepted T&C — show welcome back
     if is_agreed:
-        has_bot = bool(user.get("bot_token"))
         logged_in = bool(user.get("phone_session_string"))
         role = user.get("role", "free").capitalize()
 
-        if has_bot and logged_in:
-            status_line = "🤖 Bot set · 🔐 Account connected"
-        elif has_bot:
-            status_line = "🤖 Bot set · public links ready"
-        elif logged_in:
-            status_line = "🔐 Account connected · ⚠️ No upload bot"
+        if USE_PER_USER_BOT:
+            has_bot = bool(user.get("bot_token"))
+            if has_bot and logged_in:
+                status_line = "🤖 Bot set · 🔐 Account connected"
+            elif has_bot:
+                status_line = "🤖 Bot set · public links ready"
+            elif logged_in:
+                status_line = "🔐 Account connected · ⚠️ No upload bot"
+            else:
+                status_line = "⚠️ Upload bot not set up yet"
+            buttons = []
+            if not has_bot:
+                buttons.append([InlineKeyboardButton("🤖 Set Up Upload Bot", callback_data="onboard_setbot")])
+            if has_bot and not logged_in:
+                buttons.append([InlineKeyboardButton("🔐 Connect Account (private links)", callback_data="onboard_login")])
+            buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
+            extra_note = "📹 [Watch the setup guide](https://t.me/Wolfy004/155) to complete your setup.\n\n" if not has_bot else ""
         else:
-            status_line = "⚠️ Upload bot not set up yet"
-
-        buttons = []
-        if not has_bot:
-            buttons.append([InlineKeyboardButton("🤖 Set Up Upload Bot", callback_data="onboard_setbot")])
-        if has_bot and not logged_in:
-            buttons.append([InlineKeyboardButton("🔐 Connect Account (private links)", callback_data="onboard_login")])
-        buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
+            status_line = "🔐 Account connected" if logged_in else "⚠️ No account connected (private links won't work)"
+            buttons = []
+            if not logged_in:
+                buttons.append([InlineKeyboardButton("🔐 Connect Account (private links)", callback_data="onboard_login")])
+            buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
+            extra_note = ""
 
         await message.reply(
             f"👋 **Welcome back!**\n\n"
             f"Role: **{role}**\n"
             f"Status: {status_line}\n\n"
-            + (
-                "📹 [Watch the setup guide](https://t.me/Wolfy004/155) to complete your setup.\n\n"
-                if not has_bot else ""
-            )
+            + extra_note
             + "Send any Telegram link to download.",
             reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
             disable_web_page_preview=True,
@@ -138,24 +143,36 @@ async def accept_terms(client, callback_query):
     full_name = f"{callback_query.from_user.first_name or ''} {callback_query.from_user.last_name or ''}".strip()
     await update_user_terms(user_id, True, username=username, full_name=full_name)
 
-    login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
-    try:
-        await callback_query.message.edit_text(
-            "✅ **You're in!**\n\n"
-            "**Step 1 of 2 — Set Up Your Upload Bot**\n\n"
-            "All files are sent to you through your own personal bot. "
-            "This is required for both public and private links.\n\n"
-            "1. Open @BotFather → `/newbot`\n"
-            "2. Pick a name and username for it\n"
-            "3. Copy the token and paste it here\n\n"
-            "_Token looks like: `123456789:AABbCc...`_",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏭ Skip for now", callback_data="onboard_skip_bot")]
-            ])
-        )
-    except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
-            logger.error(f"accept_terms edit error: {e}")
+    if USE_PER_USER_BOT:
+        login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
+        try:
+            await callback_query.message.edit_text(
+                "✅ **You're in!**\n\n"
+                "**Step 1 of 2 — Set Up Your Upload Bot**\n\n"
+                "All files are sent to you through your own personal bot. "
+                "This is required for both public and private links.\n\n"
+                "1. Open @BotFather → `/newbot`\n"
+                "2. Pick a name and username for it\n"
+                "3. Copy the token and paste it here\n\n"
+                "_Token looks like: `123456789:AABbCc...`_",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏭ Skip for now", callback_data="onboard_skip_bot")]
+                ])
+            )
+        except Exception as e:
+            if "MESSAGE_NOT_MODIFIED" not in str(e):
+                logger.error(f"accept_terms edit error: {e}")
+    else:
+        login_states.pop(user_id, None)
+        try:
+            await callback_query.message.edit_text(
+                "✅ **You're all set!**\n\n"
+                "Send any public Telegram link to start downloading right away.\n\n"
+                "Need private or restricted links? Run /login to connect your account."
+            )
+        except Exception as e:
+            if "MESSAGE_NOT_MODIFIED" not in str(e):
+                logger.error(f"accept_terms edit error: {e}")
     await callback_query.answer()
 
 
@@ -233,8 +250,11 @@ async def onboard_login(client, callback_query):
 
 @app.on_callback_query(filters.regex("onboard_setbot"))
 async def onboard_setbot(client, callback_query):
-    user_id = callback_query.from_user.id
+    if not USE_PER_USER_BOT:
+        await callback_query.answer("Upload bot setup is not available right now.", show_alert=True)
+        return
 
+    user_id = callback_query.from_user.id
     login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
     try:
         await callback_query.message.edit_text(
@@ -584,6 +604,10 @@ async def cancel_login(client, message):
 
 @app.on_message(filters.command("setbot") & filters.private)
 async def setbot_command(client, message: Message):
+    if not USE_PER_USER_BOT:
+        await message.reply("ℹ️ Personal upload bots are not required right now. Files are delivered directly through this bot.")
+        return
+
     user_id = message.from_user.id
     user = await get_user(user_id)
     if not user or not user.get("is_agreed_terms"):
@@ -651,6 +675,10 @@ async def setbot_command(client, message: Message):
 
 @app.on_message(filters.command("rembot") & filters.private)
 async def rembot_command(client, message: Message):
+    if not USE_PER_USER_BOT:
+        await message.reply("ℹ️ Personal upload bots are not required right now. Nothing to remove.")
+        return
+
     user_id = message.from_user.id
     token = await get_bot_token(user_id)
     if not token:

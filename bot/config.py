@@ -41,6 +41,10 @@ if missing_vars:
     print(f"CRITICAL ERROR: Missing environment variables: {', '.join(missing_vars)}")
     sys.exit(1)
 
+# Set to False to use the shared owner bot for all uploads (current mode).
+# Set to True to require each user to register their own bot via /setbot.
+USE_PER_USER_BOT = False
+
 MAX_CONCURRENT_DOWNLOADS = 10
 
 active_downloads: set = set()
