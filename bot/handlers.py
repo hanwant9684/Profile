@@ -27,7 +27,7 @@ user_clients: dict = {}
 active_sessions: set = set()
 _cleanup_started = False
 
-FREE_DOWNLOAD_COOLDOWN = 15 * 60  # 15 minutes in seconds
+FREE_DOWNLOAD_COOLDOWN = 2 * 60  # 2 minutes in seconds
 _user_last_download_time: dict = {}
 
 
@@ -401,7 +401,7 @@ async def download_handler(
             wait_str = f"{mins}m {secs}s" if mins else f"{secs}s"
             await message.reply(
                 f"⏳ **Please wait {wait_str}** before your next download.\n\n"
-                f"Free users must wait **15 minutes** between downloads.\n\n"
+                f"Free users must wait **2 minutes** between downloads.\n\n"
                 f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
                 f"👉 /upgrade"
             )
@@ -533,31 +533,17 @@ async def download_handler(
         else:
             messages = [msg]
 
-        # --- Public content: server-side copy via user's own bot to their DM ---
+        # --- Public content: server-side copy via main bot to user's DM ---
         if not is_private:
-            upload_bot = await get_user_bot(user_id)
-            if upload_bot is None:
-                await update_status(
-                    status,
-                    "❌ You need a personal upload bot to receive files.\n\n"
-                    "1. Open @BotFather → `/newbot`\n"
-                    "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-                    "3. Run `/setbot bot_token` here\n"
-                    "4. Press **Start** on your bot\n\n"
-                    "All files are delivered directly to your bot's DM.",
-                )
-                active_downloads.discard(user_id)
-                return None
-
             media_group_id = getattr(msg, "media_group_id", None)
             try:
                 await update_status(status, "🚀 Extracting directly...")
                 if media_group_id:
-                    await upload_bot.copy_media_group(
+                    await client.copy_media_group(
                         chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
                     )
                 else:
-                    await upload_bot.copy_message(
+                    await client.copy_message(
                         chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
                     )
                 if not skip_quota and user.get("role", "free") == "free":
@@ -574,36 +560,15 @@ async def download_handler(
                 raise
             except Exception as e:
                 error_str = str(e)
-                if any(code in error_str for code in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
-                    bot_url = None
-                    try:
-                        me = await upload_bot.get_me()
-                        bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
-                    except Exception:
-                        pass
-                    markup = None
-                    if bot_url:
-                        markup = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]
-                        ])
-                    await update_status(
-                        status,
-                        "❌ **Your bot couldn't send the file to you.**\n\n"
-                        "You haven't started your bot yet. "
-                        "Tap the button below, press **Start**, then resend the link.",
-                        reply_markup=markup,
-                    )
-                    active_downloads.discard(user_id)
-                    return None
                 if "MEDIA_CAPTION_TOO_LONG" in error_str:
                     try:
                         if media_group_id:
-                            await upload_bot.copy_media_group(
+                            await client.copy_media_group(
                                 chat_id=user_id, from_chat_id=chat_id,
                                 message_id=msg_id, captions=""
                             )
                         else:
-                            await upload_bot.copy_message(
+                            await client.copy_message(
                                 chat_id=user_id, from_chat_id=chat_id,
                                 message_id=msg_id, caption=""
                             )
@@ -794,15 +759,13 @@ async def cancel_handler(client, message):
 async def help_command(client, message):
     await message.reply(
         "📖 **Help**\n\n"
-        "🤖 **First-time setup**\n"
-        "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) to get started quickly.\n\n"
-        "1. `/setbot bot_token` — register your own @BotFather bot. "
-        "Your bot delivers files directly to your DM.\n"
-        "2. `/login` — connect your Telegram account (only needed for "
-        "private/restricted links).\n\n"
-        "🔗 **Download**\n"
-        "Send any t.me link. Both public and private links are sent "
-        "straight to your bot's DM.\n\n"
+        "🔗 **Public links** — just send any public `t.me` link. "
+        "Files are delivered straight to this chat by the bot.\n\n"
+        "🔒 **Private / restricted links** require two extra steps:\n"
+        "1. `/setbot bot_token` — register your own @BotFather bot "
+        "(handles the upload for private content).\n"
+        "2. `/login` — connect your Telegram account so the bot can "
+        "read the restricted channel.\n\n"
         "🤖 **Bot management**\n"
         "`/setbot bot_token` — set or replace your upload bot\n"
         "`/rembot` — remove your upload bot\n\n"

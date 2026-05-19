@@ -83,18 +83,18 @@ async def start(client, message):
         role = user.get("role", "free").capitalize()
 
         if has_bot and logged_in:
-            status_line = "🤖 Bot set · 🔐 Account connected"
+            status_line = "🤖 Bot set · 🔐 Account connected · all links work"
         elif has_bot:
-            status_line = "🤖 Bot set · public links ready"
+            status_line = "🤖 Bot set · ⚠️ No account connected (private links won't work)"
         elif logged_in:
-            status_line = "🔐 Account connected · ⚠️ No upload bot"
+            status_line = "🔐 Account connected · ⚠️ No upload bot (private links won't work)"
         else:
-            status_line = "⚠️ Upload bot not set up yet"
+            status_line = "✅ Public links ready · set up bot + account for private links"
 
         buttons = []
         if not has_bot:
-            buttons.append([InlineKeyboardButton("🤖 Set Up Upload Bot", callback_data="onboard_setbot")])
-        if has_bot and not logged_in:
+            buttons.append([InlineKeyboardButton("🤖 Set Up Upload Bot (private links)", callback_data="onboard_setbot")])
+        if not logged_in:
             buttons.append([InlineKeyboardButton("🔐 Connect Account (private links)", callback_data="onboard_login")])
         buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
 
@@ -103,8 +103,8 @@ async def start(client, message):
             f"Role: **{role}**\n"
             f"Status: {status_line}\n\n"
             + (
-                "📹 [Watch the setup guide](https://t.me/Wolfy004/155) to complete your setup.\n\n"
-                if not has_bot else ""
+                "📹 [Setup guide for private links](https://t.me/Wolfy004/155)\n\n"
+                if not (has_bot and logged_in) else ""
             )
             + "Send any Telegram link to download.",
             reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
@@ -142,15 +142,15 @@ async def accept_terms(client, callback_query):
     try:
         await callback_query.message.edit_text(
             "✅ **You're in!**\n\n"
-            "**Step 1 of 2 — Set Up Your Upload Bot**\n\n"
-            "All files are sent to you through your own personal bot. "
-            "This is required for both public and private links.\n\n"
+            "📎 **Public links already work** — just send any public `t.me` link and you'll get the file here.\n\n"
+            "🔒 **For private / restricted links**, you need two extra things:\n\n"
+            "**Step 1 — Upload Bot** _(optional, for private links only)_\n"
             "1. Open @BotFather → `/newbot`\n"
             "2. Pick a name and username for it\n"
             "3. Copy the token and paste it here\n\n"
             "_Token looks like: `123456789:AABbCc...`_",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏭ Skip for now", callback_data="onboard_skip_bot")]
+                [InlineKeyboardButton("⏭ Skip — public links only", callback_data="onboard_skip_bot")]
             ])
         )
     except Exception as e:
@@ -167,14 +167,13 @@ async def onboard_skip_bot(client, callback_query):
     login_states.pop(user_id, None)
     try:
         await callback_query.message.edit_text(
-            "⚠️ **Bot setup skipped.**\n\n"
-            "You won't be able to download anything until you register an upload bot.\n\n"
-            "When you're ready:\n"
-            "1. Open @BotFather → `/newbot`\n"
-            "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-            "3. Run `/setbot bot_token` here\n"
-            "4. Press **Start** on your bot\n\n"
-            "Then send any Telegram link to download."
+            "✅ **You're all set for public links!**\n\n"
+            "Send any public `t.me` link and the file will be delivered here.\n\n"
+            "🔒 **Need private or restricted links later?**\n"
+            "1. Open @BotFather → `/newbot` and copy the token\n"
+            "2. Run `/setbot bot_token` here\n"
+            "3. Run `/login` to connect your Telegram account\n\n"
+            "Both steps are required for private/restricted content."
         )
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
@@ -189,9 +188,9 @@ async def onboard_skip_login(client, callback_query):
     login_states.pop(callback_query.from_user.id, None)
     try:
         await callback_query.message.edit_text(
-            "🚀 **You're all set for public links!**\n\n"
-            "Send any public Telegram link to start downloading.\n\n"
-            "Need private or restricted links later? Run /login to connect your account."
+            "✅ **Upload bot registered!**\n\n"
+            "Your bot is set up and public links are ready to go.\n\n"
+            "🔒 When you need **private or restricted** links, run /login to connect your Telegram account."
         )
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
@@ -238,8 +237,9 @@ async def onboard_setbot(client, callback_query):
     login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
     try:
         await callback_query.message.edit_text(
-            "🤖 **Set Up Your Upload Bot**\n\n"
-            "All files — public and private — are delivered through your own bot.\n\n"
+            "🤖 **Set Up Your Upload Bot** _(for private links)_\n\n"
+            "This is only needed for **private or restricted** links.\n"
+            "Public links are already delivered here by the main bot.\n\n"
             "1. Open @BotFather → `/newbot`\n"
             "2. Choose a name and username\n"
             "3. Copy the token and paste it here\n\n"
