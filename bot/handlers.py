@@ -15,7 +15,7 @@ from bot.config import (
     app, API_ID, API_HASH,
     active_downloads, global_download_semaphore,
     cancel_flags, batch_sessions, login_states,
-    SUPPORT_CHAT_LINK,
+    SUPPORT_CHAT_LINK, DUMP_CHANNEL_ID,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota
 from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info
@@ -313,6 +313,22 @@ def _parse_link(link: str):
     return None
 
 
+# --- Dump channel logger ---
+
+async def _log_to_dump_channel(client, user_id: int, username, link: str, link_type: str):
+    if not DUMP_CHANNEL_ID:
+        return
+    try:
+        u = f"@{username}" if username else str(user_id)
+        await client.send_message(
+            DUMP_CHANNEL_ID,
+            f"👤 {u} (`{user_id}`) · {link_type}\n{link}",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logging.warning(f"Dump channel log failed: {e}")
+
+
 # --- Core download handler ---
 
 @app.on_message(filters.regex(r"https?://t\.me/") & filters.private & ~filters.regex(r"^/"))
@@ -356,6 +372,15 @@ async def download_handler(
                 message.from_user.username,
                 f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip(),
             )
+
+    # Log direct user requests only; batch/mlinks log their own summary
+    if not link_override:
+        link_type = "Story" if is_story else ("Private" if is_private else "Public")
+        asyncio.create_task(_log_to_dump_channel(
+            client, user_id,
+            message.from_user.username,
+            link, link_type,
+        ))
 
     if user.get("role") == "banned":
         if not link_override:
