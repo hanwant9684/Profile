@@ -611,7 +611,12 @@ async def download_handler(
                 elif "Unknown media" in error_str or "unknown media" in error_str.lower():
                     await update_status(status, "❌ This media type is not supported for direct extraction.")
                     return None
-                logging.error(f"Direct extraction failed: {e}")
+                elif "topics" in error_str and "__init__" in error_str:
+                    # pyrofork version mismatch — Telegram added 'topics' field, older lib can't parse it
+                    # falls through silently to download/upload path
+                    logging.debug(f"Direct extraction skipped (pyrofork version mismatch): {e}")
+                else:
+                    logging.error(f"Direct extraction failed: {e}")
                 await update_status(status, "⚠️ Direct extraction failed, trying download/upload...")
 
         # --- Text-only private message: send via user's own bot DM ---

@@ -62,7 +62,7 @@ async def backup_to_github_async():
                                 "message": f"Deleting old backup: {old_backup['name']}",
                                 "sha": old_backup['sha']
                             }
-                            del_resp = await client.delete(del_url, json=del_data, headers=headers)
+                            del_resp = await client.request("DELETE", del_url, json=del_data, headers=headers)
                             if del_resp.status_code == 200:
                                 logger.info(f"Deleted old backup: {old_backup['name']}")
             except Exception as e:
