@@ -156,8 +156,9 @@ async def download_media(client, message, progress=None, progress_args=()):
 async def _send_by_ext(
     client: Client, chat_id, path: str, ext: str, kw: dict,
     thumb, file_name, duration, width, height,
+    force_document: bool = False,
 ):
-    if ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
+    if not force_document and ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
         return await client.send_video(
             chat_id, path,
             thumb=thumb, duration=duration, width=width, height=height,
@@ -197,6 +198,7 @@ async def upload_media(
     height: int = 0,
     progress=None,
     progress_args=(),
+    force_document: bool = False,
 ):
     """
     Upload a local file to Telegram via the user's own bot and return the
@@ -215,6 +217,7 @@ async def upload_media(
             return await _send_by_ext(
                 client, chat_id, path, ext, kw,
                 thumb, file_name, duration, width, height,
+                force_document=force_document,
             )
         except Exception as e:
             last_exc = e

@@ -715,6 +715,7 @@ async def download_handler(
                     height=height,
                     progress=progress_bar,
                     progress_args=(status, "📤 Uploading"),
+                    force_document=(m.media == enums.MessageMediaType.DOCUMENT),
                 )
 
             except Exception as e:
