@@ -1,6 +1,6 @@
 asyncpg
 httpx
-kurigram
+pyrotgfork
 pymediainfo
 python-dotenv
 redis
