@@ -1,8 +1,8 @@
 asyncpg
 httpx
-pymediainfo-pyrofork
-pyrofork
+hydrogram
+pymediainfo
 python-dotenv
 redis
-tgcrypto-pyrofork
+tgcrypto
 uvloop

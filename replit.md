@@ -38,7 +38,7 @@ Preferred communication style: Simple, everyday language.
 ## System Architecture
 
 ### Bot Framework
-- **Framework**: pyrofork (Pyrogram fork by Mayuri-Chan) — imports as `pyrogram` namespace, installed as `pyrofork` package
+- **Framework**: pyrotgfork (Pyrogram fork) — imports as `pyrogram` namespace, installed as `pyrotgfork` package
 - **Entry Point**: `main.py` initializes the database and starts the bot
 - **Modular Design**: Handlers are split across multiple files and imported to register with the bot client
 
@@ -96,7 +96,7 @@ Users table stores:
 Settings table stores key-value pairs (e.g., `force_sub_channel`)
 
 ## Dependencies (Python)
-- `pyrofork` — Pyrogram fork (Mayuri-Chan) for Telegram, imports as `pyrogram` namespace.
+- `pyrotgfork` — Pyrogram fork for Telegram, imports as `pyrogram` namespace.
 - `aiofiles`, `aiohttp` — async file/HTTP operations
 - `asyncpg` — async PostgreSQL client
 - `certifi` — SSL certificates
@@ -105,6 +105,6 @@ Settings table stores key-value pairs (e.g., `force_sub_channel`)
 - `python-dotenv` — environment variable loading
 - `pyyaml` — YAML parsing
 - `redis` — Redis client
-- `tgcrypto-pyrofork` — fast crypto for Telegram (pyrofork-bundled fork)
-- `pymediainfo-pyrofork` — media metadata (pyrofork-bundled fork)
+- `tgcrypto` — fast crypto for Telegram
+- `pymediainfo` — media metadata
 - `uvloop` — fast event loop
