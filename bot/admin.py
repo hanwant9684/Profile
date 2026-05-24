@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from hydrogram import filters
+from pyrogram import filters
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
 from bot.handlers import update_status
 from bot.database import set_user_role, ban_user, update_setting, get_setting, get_user_count, get_user, iter_user_ids, get_top_referrers
@@ -234,7 +234,7 @@ PREMIUM_PAGE_SIZE = 8
 
 
 def _build_premium_page(users: list, page: int, total: int) -> tuple[str, object]:
-    from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     from datetime import datetime, timezone
 
     pages = max(1, (total + PREMIUM_PAGE_SIZE - 1) // PREMIUM_PAGE_SIZE)

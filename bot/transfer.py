@@ -1,8 +1,8 @@
 import os
 import asyncio
 import logging
-from hydrogram import Client
-from hydrogram.errors.exceptions.bad_request_400 import (
+from pyrogram import Client
+from pyrogram.errors.exceptions.bad_request_400 import (
     PhotoExtInvalid,
     PhotoInvalidDimensions,
     PhotoSaveFileInvalid,

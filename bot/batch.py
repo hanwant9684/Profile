@@ -2,7 +2,7 @@ import asyncio
 import re
 import logging
 
-from hydrogram import filters
+from pyrogram import filters
 from bot.config import app, batch_cancel_flags, batch_sessions, DUMP_CHANNEL_ID
 from bot.database import get_user
 

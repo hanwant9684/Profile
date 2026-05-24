@@ -20,5 +20,5 @@ def setup_logger():
         handlers=[file_handler, console_handler]
     )
 
-    logging.getLogger("hydrogram.session.session").setLevel(logging.ERROR)
-    logging.getLogger("hydrogram.connection.connection").setLevel(logging.ERROR)
+    logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)
+    logging.getLogger("pyrogram.connection.connection").setLevel(logging.ERROR)

@@ -5,11 +5,11 @@ import time
 import logging
 from collections import deque
 
-import hydrogram as pyrogram
-from hydrogram import filters, Client, enums
-from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from hydrogram import StopTransmission
-from hydrogram.errors import AuthKeyUnregistered, SessionRevoked
+import pyrogram
+from pyrogram import filters, Client, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram import StopTransmission
+from pyrogram.errors import AuthKeyUnregistered, SessionRevoked
 
 from bot.config import (
     app, API_ID, API_HASH,
@@ -250,7 +250,7 @@ async def verify_force_sub(client: Client, user_id: int):
         if member.status in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED):
             return False, channel
         return True, None
-    except pyrogram.errors.exceptions.bad_request_400.UserNotParticipant:
+    except pyrogram.errors.UserNotParticipant:
         return False, channel
     except Exception as e:
         logging.error(f"Force sub check error: {e}")

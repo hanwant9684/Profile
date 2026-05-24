@@ -2,7 +2,7 @@ import os
 import asyncio
 import httpx
 from bot.logger import setup_logger
-from hydrogram import Client
+from pyrogram import Client
 from dotenv import load_dotenv
 
 setup_logger()
@@ -74,5 +74,5 @@ app = Client(
     bot_token=BOT_TOKEN,
     in_memory=True,
     sleep_threshold=30,
-    no_updates=False,
+    skip_updates=True,
 )
