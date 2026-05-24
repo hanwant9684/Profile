@@ -1,5 +1,5 @@
-from pyrogram import filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from hydrogram import filters
+from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.config import app
 from bot.database import get_user, get_referral_stats, REFERRAL_MILESTONE, REFERRAL_PREMIUM_DAYS
 

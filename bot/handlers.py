@@ -5,11 +5,11 @@ import time
 import logging
 from collections import deque
 
-import pyrogram
-from pyrogram import filters, Client, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram import StopTransmission
-from pyrogram.errors import AuthKeyUnregistered, SessionRevoked
+import hydrogram as pyrogram
+from hydrogram import filters, Client, enums
+from hydrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from hydrogram import StopTransmission
+from hydrogram.errors import AuthKeyUnregistered, SessionRevoked
 
 from bot.config import (
     app, API_ID, API_HASH,
@@ -250,7 +250,7 @@ async def verify_force_sub(client: Client, user_id: int):
         if member.status in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED):
             return False, channel
         return True, None
-    except pyrogram.errors.UserNotParticipant:
+    except pyrogram.errors.exceptions.bad_request_400.UserNotParticipant:
         return False, channel
     except Exception as e:
         logging.error(f"Force sub check error: {e}")
@@ -612,9 +612,9 @@ async def download_handler(
                     await update_status(status, "❌ This media type is not supported for direct extraction.")
                     return None
                 elif "topics" in error_str and "__init__" in error_str:
-                    # pyrofork version mismatch — Telegram added 'topics' field, older lib can't parse it
+                    # pyrotgfork version mismatch — Telegram added 'topics' field, older lib can't parse it
                     # falls through silently to download/upload path
-                    logging.debug(f"Direct extraction skipped (pyrofork version mismatch): {e}")
+                    logging.debug(f"Direct extraction skipped (pyrotgfork version mismatch): {e}")
                 else:
                     logging.error(f"Direct extraction failed: {e}")
                 await update_status(status, "⚠️ Direct extraction failed, trying download/upload...")
