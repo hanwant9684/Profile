@@ -9,7 +9,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from dotenv import load_dotenv
 load_dotenv()
 
-logging.getLogger("hydrogram").setLevel(logging.WARNING)
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 
 async def main():
@@ -65,7 +65,7 @@ async def main():
     print("Starting bot...")
 
     await app.start()
-    from hydrogram.methods.utilities.idle import idle
+    from pyrogram.methods.utilities.idle import idle
     await idle()
     await app.stop()
 
