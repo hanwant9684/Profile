@@ -173,7 +173,7 @@ async def onboard_login(client, callback_query):
             "Send your phone number in international format:\n"
             "`+1234567890`\n\n"
             "⏳ This session expires in 5 minutes if inactive.\n\n"
-            "_Type /cancel\\_login to abort at any time._"
+            "_Type /cancel_login to abort at any time._"
         )
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
