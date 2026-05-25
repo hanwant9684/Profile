@@ -3,26 +3,8 @@ import re
 import logging
 
 from pyrogram import filters
-from bot.config import app, batch_cancel_flags, batch_sessions, DUMP_CHANNEL_ID
+from bot.config import app, batch_cancel_flags, batch_sessions
 from bot.database import get_user
-
-
-async def _log_batch_summary(user_id: int, username, label: str, links: list):
-    if not DUMP_CHANNEL_ID:
-        return
-    try:
-        u = f"@{username}" if username else str(user_id)
-        count = len(links)
-        shown = links[:3]
-        body = "\n".join(shown)
-        extra = f"\n+{count - 3} more" if count > 3 else ""
-        await app.send_message(
-            DUMP_CHANNEL_ID,
-            f"👤 {u} (`{user_id}`) · {label} ({count} links)\n{body}{extra}",
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        logging.warning(f"Dump channel batch log failed: {e}")
 
 
 # --- Link parsing helpers (batch-specific) ---
@@ -125,7 +107,6 @@ async def batch_handler(client, message):
             return
 
     preview_links = [_build_batch_link(info, mid) for mid in range(start_id, min(start_id + 3, end_id + 1))]
-    asyncio.create_task(_log_batch_summary(user_id, message.from_user.username, "Batch", preview_links + ([f"+{count - len(preview_links)} more"] if count > len(preview_links) else [])))
 
     status = await message.reply(
         f"🚀 **Batch started** — {count} item(s)\n\n"
@@ -227,7 +208,6 @@ async def mlinks_handler(client, message):
         await message.reply("⚠️ More than 50 links provided. Only the first 50 will be processed.")
 
     count = len(links)
-    asyncio.create_task(_log_batch_summary(user_id, message.from_user.username, "Multi-link", links))
 
     status = await message.reply(
         f"🚀 **Multi-link** — {count} link(s)\n\n"

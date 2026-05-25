@@ -22,8 +22,6 @@ OWNER_ID_RAW = os.environ.get("OWNER_ID")
 OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW and OWNER_ID_RAW.isdigit() else None
 SUPPORT_CHAT_LINK = os.environ.get("SUPPORT_CHAT_LINK", "https://t.me/Wolfy004chatbot")
 
-DUMP_CHANNEL_ID_RAW = os.environ.get("DUMP_CHANNEL_ID")
-DUMP_CHANNEL_ID = int(DUMP_CHANNEL_ID_RAW) if DUMP_CHANNEL_ID_RAW and DUMP_CHANNEL_ID_RAW.strip().lstrip("-").isdigit() else None
 
 PAYPAL_LINK = os.environ.get("PAYPAL_LINK", "Contact Owner")
 UPI_ID = os.environ.get("UPI_ID", "Contact Owner")

@@ -3,7 +3,7 @@ import logging
 from pyrogram import filters
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
 from bot.handlers import update_status
-from bot.database import set_user_role, ban_user, update_setting, get_setting, get_user_count, get_user, iter_user_ids, get_top_referrers
+from bot.database import set_user_role, ban_user, update_setting, get_setting, get_user_count, get_user, iter_user_ids
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats(client, message):
@@ -11,21 +11,11 @@ async def stats(client, message):
     if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
         return
     total_users = await get_user_count()
-    top_refs = await get_top_referrers(5)
-
-    ref_lines = ""
-    if top_refs:
-        lines = []
-        for i, r in enumerate(top_refs, 1):
-            name = (r.get("full_name") or r.get("username") or str(r["referrer_id"]))[:18]
-            lines.append(f"  {i}. {name} — `{r['valid_count']}` referrals")
-        ref_lines = "\n🏆 **Top Referrers:**\n" + "\n".join(lines)
 
     await message.reply(
         f"📊 **Bot Statistics**\n\n"
         f"👥 Total Users: `{total_users}`\n"
         f"⚡ Active Downloads: `{len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}`"
-        f"{ref_lines}"
     )
 
 @app.on_message(filters.command("killall") & filters.private)

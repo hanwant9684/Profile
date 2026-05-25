@@ -4,9 +4,8 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
 from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import (
-    get_user, create_user, update_user_terms, save_session_string, logout_user,
-    set_bot_token, remove_bot_token, get_bot_token, check_user_agreed,
-    record_referral, validate_and_credit_referral,
+    get_user, create_user, save_session_string, logout_user,
+    set_bot_token, remove_bot_token, get_bot_token,
 )
 from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
@@ -38,58 +37,41 @@ async def start(client, message):
     if not is_subbed:
         channel_url = channel.replace('@', '') if channel else ''
         await message.reply(
-            f"⛔ You must join our channel to use this bot.\n\n👉 {channel}",
+            f"⛔ **You must join our channel to use this bot.**\n\n"
+            f"👉 {channel}\n\n"
+            f"📋 **Terms of Use**\n"
+            f"By joining the channel and using this bot, you confirm that:\n"
+            f"• You will not download or share illegal content\n"
+            f"• You are solely responsible for what you download\n"
+            f"• You will use the bot responsibly and in line with Telegram's ToS\n\n"
+            f"_Joining the channel means you have read and accepted these terms._",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Join Channel", url=f"https://t.me/{channel_url}")]
+                [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{channel_url}")]
             ])
         )
         return
-
-    # Parse referral parameter (e.g. /start ref_12345678)
-    start_args = message.text.split(maxsplit=1)
-    referrer_id = None
-    if len(start_args) > 1:
-        param = start_args[1].strip()
-        if param.startswith("ref_"):
-            try:
-                referrer_id = int(param[4:])
-            except ValueError:
-                referrer_id = None
-
-    is_new_user = not await check_user_agreed(user_id) and not await get_user(user_id)
 
     user = await get_user(user_id)
     if not user:
         user = await create_user(user_id, username, full_name)
         if not user:
-            user = {"telegram_id": user_id, "is_agreed_terms": False, "role": "free"}
+            user = {"telegram_id": user_id, "role": "free"}
     else:
         if user.get("username") != username or user.get("full_name") != full_name:
             await create_user(user_id, username, full_name)
             user = await get_user(user_id) or user
 
-    # Record referral for brand new users only (can't be referred if already in DB)
-    if referrer_id and is_new_user:
-        import asyncio as _asyncio
-        _asyncio.create_task(record_referral(referrer_id, user_id))
+    has_bot = bool(user.get("bot_token"))
+    logged_in = bool(user.get("phone_session_string"))
+    role_display = user.get("role", "free").capitalize()
 
-    # Always check DB directly (not Redis) so deleting a row always resets T&C
-    is_agreed = await check_user_agreed(user_id)
-
-    # Already accepted T&C — show welcome back
-    if is_agreed:
-        has_bot = bool(user.get("bot_token"))
-        logged_in = bool(user.get("phone_session_string"))
-        role = user.get("role", "free").capitalize()
-
+    if has_bot or logged_in:
         if has_bot and logged_in:
             status_line = "🤖 Bot set · 🔐 Account connected · all links work"
         elif has_bot:
             status_line = "🤖 Bot set · ⚠️ No account connected (private links won't work)"
-        elif logged_in:
-            status_line = "🔐 Account connected · ⚠️ No upload bot (private links won't work)"
         else:
-            status_line = "✅ Public links ready · set up bot + account for private links"
+            status_line = "🔐 Account connected · ⚠️ No upload bot (private links won't work)"
 
         buttons = []
         if not has_bot:
@@ -100,7 +82,7 @@ async def start(client, message):
 
         await message.reply(
             f"👋 **Welcome back!**\n\n"
-            f"Role: **{role}**\n"
+            f"Role: **{role_display}**\n"
             f"Status: {status_line}\n\n"
             + (
                 "📹 [Setup guide for private links](https://t.me/Wolfy004/155)\n\n"
@@ -112,51 +94,23 @@ async def start(client, message):
         )
         return
 
-    # New user — welcome + T&C
+    login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
     await message.reply(
         "👋 **Welcome to the Downloader Bot!**\n\n"
         "I can download media from Telegram links — photos, videos, files and more.\n\n"
         "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) before getting started.\n\n"
-        "📋 **Quick Terms:**\n"
-        "• No illegal content\n"
-        "• You are responsible for what you download\n"
-        "• Use responsibly\n\n"
-        "Tap below to accept and get started.",
+        "📎 **Public links already work** — just send any public `t.me` link.\n\n"
+        "🔒 **For private / restricted links**, you need two extra steps:\n\n"
+        "**Step 1 — Upload Bot** _(optional, for private links only)_\n"
+        "1. Open @BotFather → `/newbot`\n"
+        "2. Pick a name and username for it\n"
+        "3. Copy the token and paste it here\n\n"
+        "_Token looks like: `123456789:AABbCc...`_",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Accept & Get Started", callback_data="accept_terms")]
+            [InlineKeyboardButton("⏭ Skip — public links only", callback_data="onboard_skip_bot")]
         ]),
         disable_web_page_preview=True,
     )
-
-
-# ─── Accept T&C → Step 1: Set up upload bot (required) ───────────────────────
-
-@app.on_callback_query(filters.regex("accept_terms"))
-async def accept_terms(client, callback_query):
-    user_id = callback_query.from_user.id
-    username = callback_query.from_user.username
-    full_name = f"{callback_query.from_user.first_name or ''} {callback_query.from_user.last_name or ''}".strip()
-    await update_user_terms(user_id, True, username=username, full_name=full_name)
-
-    login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
-    try:
-        await callback_query.message.edit_text(
-            "✅ **You're in!**\n\n"
-            "📎 **Public links already work** — just send any public `t.me` link and you'll get the file here.\n\n"
-            "🔒 **For private / restricted links**, you need two extra things:\n\n"
-            "**Step 1 — Upload Bot** _(optional, for private links only)_\n"
-            "1. Open @BotFather → `/newbot`\n"
-            "2. Pick a name and username for it\n"
-            "3. Copy the token and paste it here\n\n"
-            "_Token looks like: `123456789:AABbCc...`_",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⏭ Skip — public links only", callback_data="onboard_skip_bot")]
-            ])
-        )
-    except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
-            logger.error(f"accept_terms edit error: {e}")
-    await callback_query.answer()
 
 
 # ─── Onboarding: skip bot setup ──────────────────────────────────────────────
@@ -297,7 +251,7 @@ async def login_start(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
 
-    if not user or not user.get("is_agreed_terms"):
+    if not user:
         await message.reply("Please run /start first.")
         return
 
@@ -331,7 +285,7 @@ async def login_start(client, message):
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
         "settings", "set_force_sub", "set_maintenance",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
-        "setbot", "rembot", "refer",
+        "setbot", "rembot",
     ])
     & ~filters.regex(r"https://t\.me/")
 )
@@ -343,7 +297,6 @@ async def handle_login_steps(client, message: Message):
     state = login_states[user_id]
     step = state["step"]
 
-    # ── Step 1: Bot token collection ───────────────────────────────────────
     if step == "AWAITING_BOT_TOKEN":
         state["timestamp"] = time.time()
         token = message.text.strip()
@@ -370,25 +323,8 @@ async def handle_login_steps(client, message: Message):
         await set_bot_token(user_id, token)
         login_states.pop(user_id, None)
 
-        # Validate referral now that the user has proven they're genuine
-        ref_result = await validate_and_credit_referral(user_id)
-        if ref_result:
-            referrer_id_notif, milestone_hit, total_valid = ref_result
-            if milestone_hit:
-                try:
-                    await client.send_message(
-                        referrer_id_notif,
-                        f"🎉 **Referral Milestone Reached!**\n\n"
-                        f"You've hit **{total_valid} valid referrals**!\n"
-                        f"**30 days of Premium** have been added to your account. 🚀\n\n"
-                        f"Use /refer to check your stats."
-                    )
-                except Exception:
-                    pass
-
         bot_username = f"@{me.username}" if me.username else str(me.id)
 
-        # Check if already logged in — if so, fully set up
         user = await get_user(user_id)
         if user and user.get("phone_session_string"):
             await status.edit_text(
@@ -398,7 +334,6 @@ async def handle_login_steps(client, message: Message):
                 disable_web_page_preview=True,
             )
         else:
-            # Step 2: Offer login for private links
             await status.edit_text(
                 f"✅ **Bot registered:** {bot_username}\n\n"
                 f"Open {bot_username} and press **Start** so it can DM you.\n\n"
@@ -413,7 +348,6 @@ async def handle_login_steps(client, message: Message):
             )
         return
 
-    # ── Step 2: Telegram account login ─────────────────────────────────────
     try:
         if step == "PHONE":
             state["timestamp"] = time.time()
@@ -530,7 +464,6 @@ async def handle_login_steps(client, message: Message):
 
 
 async def _finish_login(user_id: int, temp_client, message: Message):
-    """Save session string and guide user to the next step."""
     session_string = await temp_client.export_session_string()
     await save_session_string(user_id, session_string)
     try:
@@ -539,7 +472,6 @@ async def _finish_login(user_id: int, temp_client, message: Message):
         pass
     login_states.pop(user_id, None)
 
-    # If bot is already set up → fully done
     existing_token = await get_bot_token(user_id)
     if existing_token:
         await message.reply(
@@ -548,7 +480,6 @@ async def _finish_login(user_id: int, temp_client, message: Message):
         )
         return
 
-    # No bot yet → prompt for bot setup (it's required)
     login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
     await message.reply(
         "✅ **Account connected!**\n\n"
@@ -586,7 +517,7 @@ async def cancel_login(client, message):
 async def setbot_command(client, message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-    if not user or not user.get("is_agreed_terms"):
+    if not user:
         await message.reply("Please run /start first.")
         return
 
@@ -620,22 +551,6 @@ async def setbot_command(client, message: Message):
 
     await stop_user_bot(user_id)
     await set_bot_token(user_id, token)
-
-    # Validate referral now that the user has proven they're genuine
-    ref_result = await validate_and_credit_referral(user_id)
-    if ref_result:
-        referrer_id_notif, milestone_hit, total_valid = ref_result
-        if milestone_hit:
-            try:
-                await client.send_message(
-                    referrer_id_notif,
-                    f"🎉 **Referral Milestone Reached!**\n\n"
-                    f"You've hit **{total_valid} valid referrals**!\n"
-                    f"**30 days of Premium** have been added to your account. 🚀\n\n"
-                    f"Use /refer to check your stats."
-                )
-            except Exception:
-                pass
 
     bot_username = f"@{me.username}" if me.username else str(me.id)
     await status.edit_text(
