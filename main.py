@@ -13,19 +13,6 @@ logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
 
 async def main():
-    import subprocess
-
-    try:
-        subprocess.run(["redis-cli", "ping"], capture_output=True, check=True)
-        print("✅ Redis is already running.")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("🚀 Starting Redis server...")
-        subprocess.Popen(
-            ["redis-server", "--bind", "127.0.0.1", "--port", "6379",
-             "--daemonize", "yes", "--dir", "/tmp", "--logfile", "/tmp/redis.log"]
-        )
-        await asyncio.sleep(3)
-
     os.makedirs("downloads", exist_ok=True)
     for name in os.listdir("downloads"):
         fp = os.path.join("downloads", name)
@@ -46,7 +33,6 @@ async def main():
     import bot.batch
     import bot.admin
     import bot.info
-    import bot.referral
 
     print("Initializing database...")
     await init_db()

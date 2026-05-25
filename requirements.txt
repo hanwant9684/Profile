@@ -3,6 +3,5 @@ httpx
 pyrotgfork
 pymediainfo
 python-dotenv
-redis
 tgcrypto
 uvloop
