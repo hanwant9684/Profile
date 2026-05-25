@@ -9,6 +9,19 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
+def _read_and_encode(path: str) -> str:
+    """Read a file and base64-encode it. Runs in a thread pool executor."""
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def _write_file(path: str, content: bytes) -> None:
+    """Write bytes to a file. Runs in a thread pool executor."""
+    with open(path, "wb") as f:
+        f.write(content)
+
+
 async def backup_to_github_async():
     """Backup PostgreSQL database to GitHub"""
     try:
@@ -34,8 +47,8 @@ async def backup_to_github_async():
             return False
 
         try:
-            with open(backup_file, "rb") as f:
-                content = base64.b64encode(f.read()).decode()
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(None, _read_and_encode, backup_file)
         finally:
             if os.path.exists(backup_file):
                 os.remove(backup_file)
@@ -107,8 +120,8 @@ async def restore_from_github_async():
 
         temp_path = "temp_restore.sql"
         try:
-            with open(temp_path, "wb") as f:
-                f.write(backup_content)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _write_file, temp_path, backup_content)
 
             process = await asyncio.create_subprocess_exec(
                 'psql', '-d', str(DATABASE_URL), '-f', temp_path,

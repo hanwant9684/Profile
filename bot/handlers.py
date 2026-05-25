@@ -41,7 +41,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
             entry["last_used"] = now
             return entry["client"]
         try:
-            await entry["client"].stop()
+            await asyncio.wait_for(entry["client"].stop(), timeout=10)
         except Exception:
             pass
         del user_clients[user_id]
@@ -55,7 +55,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
             oldest = min(idle, key=lambda x: x[1])[0]
             old = user_clients.pop(oldest)
             try:
-                await old["client"].stop()
+                await asyncio.wait_for(old["client"].stop(), timeout=10)
             except Exception:
                 pass
 
@@ -68,7 +68,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
         sleep_threshold=30,
         no_updates=True,
     )
-    await client.start()
+    await asyncio.wait_for(client.start(), timeout=30)
     user_clients[user_id] = {"client": client, "last_used": now}
 
     if not _cleanup_started:
@@ -93,7 +93,7 @@ async def _cleanup_loop():
             entry = user_clients.pop(uid, None)
             if entry:
                 try:
-                    await entry["client"].stop()
+                    await asyncio.wait_for(entry["client"].stop(), timeout=10)
                 except Exception:
                     pass
 
@@ -652,10 +652,13 @@ async def download_handler(
             path = None
             thumb = None
             try:
-                path = await download_media(
-                    user_client, m,
-                    progress=progress_bar,
-                    progress_args=(status, "📥 Downloading"),
+                path = await asyncio.wait_for(
+                    download_media(
+                        user_client, m,
+                        progress=progress_bar,
+                        progress_args=(status, "📥 Downloading"),
+                    ),
+                    timeout=1800,
                 )
                 if not path:
                     continue
@@ -692,7 +695,7 @@ async def download_handler(
                         except Exception:
                             pass
                     if not duration or not width or not height:
-                        mi_dur, mi_w, mi_h = get_media_info(path)
+                        mi_dur, mi_w, mi_h = await get_media_info(path)
                         duration = duration or mi_dur
                         width = width or mi_w
                         height = height or mi_h
@@ -702,22 +705,27 @@ async def download_handler(
                     duration = m.audio.duration or 0
                     file_name = m.audio.file_name
                     if not duration:
-                        mi_dur, _, _ = get_media_info(path)
+                        mi_dur, _, _ = await get_media_info(path)
                         duration = duration or mi_dur
 
-                await upload_media(
-                    upload_client, user_id, path,
-                    caption=caption,
-                    thumb=thumb,
-                    file_name=file_name,
-                    duration=duration,
-                    width=width,
-                    height=height,
-                    progress=progress_bar,
-                    progress_args=(status, "📤 Uploading"),
-                    force_document=(m.media == enums.MessageMediaType.DOCUMENT),
+                await asyncio.wait_for(
+                    upload_media(
+                        upload_client, user_id, path,
+                        caption=caption,
+                        thumb=thumb,
+                        file_name=file_name,
+                        duration=duration,
+                        width=width,
+                        height=height,
+                        progress=progress_bar,
+                        progress_args=(status, "📤 Uploading"),
+                        force_document=(m.media == enums.MessageMediaType.DOCUMENT),
+                    ),
+                    timeout=1800,
                 )
 
+            except asyncio.TimeoutError:
+                await update_status(status, "❌ Transfer timed out (30 min limit). Please try again.")
             except Exception as e:
                 error_str = str(e)
                 if any(code in error_str for code in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):

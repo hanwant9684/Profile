@@ -43,12 +43,12 @@ async def validate_bot_token(bot_token: str):
         no_updates=True,
     )
     try:
-        await probe.start()
-        me = await probe.get_me()
+        await asyncio.wait_for(probe.start(), timeout=20)
+        me = await asyncio.wait_for(probe.get_me(), timeout=10)
         return me
     finally:
         try:
-            await probe.stop()
+            await asyncio.wait_for(probe.stop(), timeout=10)
         except Exception:
             pass
 
@@ -80,7 +80,7 @@ async def get_user_bot(user_id: int):
             sleep_threshold=30,
         )
         try:
-            await client.start()
+            await asyncio.wait_for(client.start(), timeout=30)
         except Exception as e:
             logging.error(f"Failed to start user bot for {user_id}: {e}")
             return None
@@ -100,12 +100,7 @@ async def stop_user_bot(user_id: int):
     _user_bot_locks.pop(user_id, None)
 
 
-def get_media_info(path: str) -> tuple[int, int, int]:
-    """
-    Extract (duration_sec, width, height) from a local file using pymediainfo.
-    Falls back to (0, 0, 0) if pymediainfo is not installed or parsing fails.
-    Used to fill in missing metadata before upload when Telegram attributes are absent.
-    """
+def _parse_media_info_sync(path: str) -> tuple[int, int, int]:
     try:
         from pymediainfo import MediaInfo
         info = MediaInfo.parse(path)
@@ -121,6 +116,16 @@ def get_media_info(path: str) -> tuple[int, int, int]:
         return duration, width, height
     except Exception:
         return 0, 0, 0
+
+
+async def get_media_info(path: str) -> tuple[int, int, int]:
+    """
+    Extract (duration_sec, width, height) from a local file using pymediainfo.
+    Runs in a thread pool executor to avoid blocking the async event loop.
+    Falls back to (0, 0, 0) if pymediainfo is not installed or parsing fails.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _parse_media_info_sync, path)
 
 
 def truncate_caption(caption, max_length=1024):
