@@ -27,8 +27,6 @@ user_clients: dict = {}
 active_sessions: set = set()
 _cleanup_started = False
 
-FREE_DOWNLOAD_COOLDOWN = 2 * 60  # 2 minutes in seconds
-_user_last_download_time: dict = {}
 
 
 async def get_user_client(user_id: int, session_str: str) -> Client:
@@ -393,20 +391,6 @@ async def download_handler(
                 await message.reply(f"❌ {reason}")
             return None
 
-        last_dl = _user_last_download_time.get(user_id, 0)
-        elapsed = time.time() - last_dl
-        if elapsed < FREE_DOWNLOAD_COOLDOWN:
-            wait_left = int(FREE_DOWNLOAD_COOLDOWN - elapsed)
-            mins, secs = divmod(wait_left, 60)
-            wait_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-            await message.reply(
-                f"⏳ **Please wait {wait_str}** before your next download.\n\n"
-                f"Free users must wait **2 minutes** between downloads.\n\n"
-                f"💎 Upgrade to **Premium** for unlimited downloads with no waiting time.\n"
-                f"👉 /upgrade"
-            )
-            return None
-
     status = status_msg_override or _LazyStatus(message)
 
     async with global_download_semaphore:
@@ -548,7 +532,6 @@ async def download_handler(
                     )
                 if not skip_quota and user.get("role", "free") == "free":
                     await increment_quota(user_id)
-                    _user_last_download_time[user_id] = time.time()
                 if not status_msg_override:
                     try:
                         await status.delete()
@@ -643,17 +626,23 @@ async def download_handler(
                     await update_status(status, "🛑 Cancelled.")
                     return None
 
-                upload_client = await get_user_bot(user_id)
-                if upload_client is None:
+                is_premium = user.get("role") in ("premium", "admin", "owner")
+                user_bot = await get_user_bot(user_id)
+
+                if user_bot is None and is_premium:
                     await update_status(
                         status,
-                        "❌ You haven't registered an upload bot yet.\n\n"
+                        "❌ **Upload bot not set up.**\n\n"
+                        "Premium users need to register their own upload bot.\n"
+                        "Use `/setbot <token>` to set one up.\n\n"
                         "1. Open @BotFather → `/newbot`\n"
-                        "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-                        "3. Run `/setbot bot_token` here\n"
+                        "2. Copy the token\n"
+                        "3. Send `/setbot token` here\n"
                         "4. Press **Start** on your bot",
                     )
                     return None
+
+                upload_client = user_bot if user_bot is not None else client
 
                 caption = truncate_caption(m.caption or "")
                 duration = width = height = 0
@@ -683,46 +672,46 @@ async def download_handler(
                         mi_dur, _, _ = await get_media_info(path)
                         duration = duration or mi_dur
 
-                await asyncio.wait_for(
-                    upload_media(
-                        upload_client, user_id, path,
-                        caption=caption,
-                        thumb=thumb,
-                        file_name=file_name,
-                        duration=duration,
-                        width=width,
-                        height=height,
-                        progress=progress_bar,
-                        progress_args=(status, "📤 Uploading"),
-                        force_document=(m.media == enums.MessageMediaType.DOCUMENT),
-                    ),
-                    timeout=1800,
+                upload_kwargs = dict(
+                    chat_id=user_id, path=path,
+                    caption=caption, thumb=thumb, file_name=file_name,
+                    duration=duration, width=width, height=height,
+                    progress=progress_bar, progress_args=(status, "📤 Uploading"),
+                    force_document=(m.media == enums.MessageMediaType.DOCUMENT),
                 )
+
+                _uploaded = False
+                if upload_client is not client:
+                    try:
+                        await asyncio.wait_for(upload_media(upload_client, **upload_kwargs), timeout=1800)
+                        _uploaded = True
+                    except Exception as bot_exc:
+                        error_str = str(bot_exc)
+                        if any(c in error_str for c in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
+                            bot_url = None
+                            try:
+                                me = await upload_client.get_me()
+                                bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
+                            except Exception:
+                                pass
+                            markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]]) if bot_url else None
+                            await update_status(
+                                status,
+                                "❌ **Your bot couldn't send the file.**\n\n"
+                                "You haven't started your bot yet. "
+                                "Tap the button below, press **Start**, then resend the link.",
+                                reply_markup=markup,
+                            )
+                            return None
+                        logging.warning(f"User bot upload failed for {user_id}, falling back to main bot: {bot_exc}")
+                        await update_status(status, "⚠️ Your bot failed, retrying with main bot...")
+
+                if not _uploaded:
+                    await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
 
             except asyncio.TimeoutError:
                 await update_status(status, "❌ Transfer timed out (30 min limit). Please try again.")
             except Exception as e:
-                error_str = str(e)
-                if any(code in error_str for code in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
-                    bot_url = None
-                    try:
-                        me = await upload_client.get_me()
-                        bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
-                    except Exception:
-                        pass
-                    markup = None
-                    if bot_url:
-                        markup = InlineKeyboardMarkup([
-                            [InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]
-                        ])
-                    await update_status(
-                        status,
-                        "❌ **Your bot couldn't send the file to you.**\n\n"
-                        "You haven't started your bot yet. "
-                        "Tap the button below, press **Start**, then resend the link.",
-                        reply_markup=markup,
-                    )
-                    return None
                 logging.error(f"Download/upload error for user {user_id}: {e}")
             finally:
                 if path and os.path.exists(path):
@@ -730,7 +719,6 @@ async def download_handler(
 
         if not skip_quota and user.get("role", "free") == "free":
             await increment_quota(user_id)
-            _user_last_download_time[user_id] = time.time()
 
         if not status_msg_override:
             try:
@@ -771,27 +759,40 @@ async def cancel_handler(client, message):
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    role = (user.get("role", "free") if user else "free")
+    is_premium = role in ("premium", "admin", "owner")
+
+    if is_premium:
+        text = (
+            "📖 **Help**\n\n"
+            "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
+            "🔒 **Private / restricted links** — requires two steps:\n"
+            "`/login` — connect your Telegram account\n"
+            "`/setbot token` — register your upload bot\n\n"
+            "🤖 **Bot commands**\n"
+            "`/setbot token` — set or replace your upload bot\n"
+            "`/rembot` — remove your upload bot\n\n"
+            "📦 **Batch**\n"
+            "`/batch start_link end_link` — download a range\n"
+            "`/batch start_link 50` — download next 50\n\n"
+            "🔗 **Multi-link**\n"
+            "`/mlinks` — paste up to 50 links at once\n\n"
+            "`/cancel` — stop an active download"
+        )
+    else:
+        text = (
+            "📖 **Help**\n\n"
+            "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
+            "🔒 **Private / restricted links** — use `/login` to connect your Telegram account.\n\n"
+            "💰 **Quota** — 2 files/day · 5 files/month\n\n"
+            "`/cancel` — stop an active download\n\n"
+            "💎 **Want unlimited downloads?** → /upgrade"
+        )
+
     await message.reply(
-        "📖 **Help**\n\n"
-        "🔗 **Public links** — just send any public `t.me` link. "
-        "Files are delivered straight to this chat by the bot.\n\n"
-        "🔒 **Private / restricted links** require two extra steps:\n"
-        "1. `/setbot bot_token` — register your own @BotFather bot "
-        "(handles the upload for private content).\n"
-        "2. `/login` — connect your Telegram account so the bot can "
-        "read the restricted channel.\n\n"
-        "🤖 **Bot management**\n"
-        "`/setbot bot_token` — set or replace your upload bot\n"
-        "`/rembot` — remove your upload bot\n\n"
-        "📦 **Batch** _(Premium)_\n"
-        "`/batch start_link end_link` — range\n"
-        "`/batch start_link 50` — count mode\n"
-        "Max 50 files per batch.\n\n"
-        "🔗 **Multi-link** _(Premium)_\n"
-        "`/mlinks` then paste up to 50 links, one per line.\n\n"
-        "💰 **Quota**\n"
-        "Free: 2 files/day · 5 files/month\n"
-        "Premium: **unlimited**.",
+        text,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],

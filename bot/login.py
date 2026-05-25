@@ -52,6 +52,7 @@ async def start(client, message):
         return
 
     user = await get_user(user_id)
+    is_new_user = not user
     if not user:
         user = await create_user(user_id, username, full_name)
         if not user:
@@ -63,52 +64,54 @@ async def start(client, message):
 
     has_bot = bool(user.get("bot_token"))
     logged_in = bool(user.get("phone_session_string"))
-    role_display = user.get("role", "free").capitalize()
+    role = user.get("role", "free")
+    role_display = role.capitalize()
+    is_premium = role in ("premium", "admin", "owner")
 
-    if has_bot or logged_in:
-        if has_bot and logged_in:
-            status_line = "🤖 Bot set · 🔐 Account connected · all links work"
-        elif has_bot:
-            status_line = "🤖 Bot set · ⚠️ No account connected (private links won't work)"
-        else:
-            status_line = "🔐 Account connected · ⚠️ No upload bot (private links won't work)"
-
+    if not is_new_user or has_bot or logged_in or is_premium:
         buttons = []
-        if not has_bot:
-            buttons.append([InlineKeyboardButton("🤖 Set Up Upload Bot (private links)", callback_data="onboard_setbot")])
-        if not logged_in:
-            buttons.append([InlineKeyboardButton("🔐 Connect Account (private links)", callback_data="onboard_login")])
+
+        if is_premium:
+            if has_bot and logged_in:
+                status_line = "✅ All set · private links enabled"
+            elif has_bot:
+                status_line = "🤖 Bot set · ⚠️ Connect account for private links"
+            elif logged_in:
+                status_line = "🔐 Account connected · ⚠️ Set up your bot for private links"
+            else:
+                status_line = "⚠️ Set up your bot and connect account for private links"
+            if not has_bot:
+                buttons.append([InlineKeyboardButton("🤖 Set Up Upload Bot", callback_data="onboard_setbot")])
+            if not logged_in:
+                buttons.append([InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")])
+        else:
+            if logged_in:
+                status_line = "🔐 Account connected · private links enabled"
+            else:
+                status_line = "⚠️ Connect your account to access private links"
+            if not logged_in:
+                buttons.append([InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")])
+
         buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
+        needs_setup = is_premium and not (has_bot and logged_in)
 
         await message.reply(
             f"👋 **Welcome back!**\n\n"
             f"Role: **{role_display}**\n"
             f"Status: {status_line}\n\n"
-            + (
-                "📹 [Setup guide for private links](https://t.me/Wolfy004/155)\n\n"
-                if not (has_bot and logged_in) else ""
-            )
+            + ("📹 [Setup guide for private links](https://t.me/Wolfy004/155)\n\n" if needs_setup else "")
             + "Send any Telegram link to download.",
             reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
             disable_web_page_preview=True,
         )
         return
 
-    login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
     await message.reply(
         "👋 **Welcome to the Downloader Bot!**\n\n"
         "I can download media from Telegram links — photos, videos, files and more.\n\n"
-        "📹 [Watch the full setup guide](https://t.me/Wolfy004/155) before getting started.\n\n"
-        "📎 **Public links already work** — just send any public `t.me` link.\n\n"
-        "🔒 **For private / restricted links**, you need two extra steps:\n\n"
-        "**Step 1 — Upload Bot** _(optional, for private links only)_\n"
-        "1. Open @BotFather → `/newbot`\n"
-        "2. Pick a name and username for it\n"
-        "3. Copy the token and paste it here\n\n"
-        "_Token looks like: `123456789:AABbCc...`_",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏭ Skip — public links only", callback_data="onboard_skip_bot")]
-        ]),
+        "📎 **Public links work right away** — just send any `t.me` link.\n\n"
+        "🔒 **For private / restricted links**, connect your Telegram account with /login.\n\n"
+        "Send a link to get started!",
         disable_web_page_preview=True,
     )
 
@@ -121,13 +124,9 @@ async def onboard_skip_bot(client, callback_query):
     login_states.pop(user_id, None)
     try:
         await callback_query.message.edit_text(
-            "✅ **You're all set for public links!**\n\n"
+            "✅ **You're all set!**\n\n"
             "Send any public `t.me` link and the file will be delivered here.\n\n"
-            "🔒 **Need private or restricted links later?**\n"
-            "1. Open @BotFather → `/newbot` and copy the token\n"
-            "2. Run `/setbot bot_token` here\n"
-            "3. Run `/login` to connect your Telegram account\n\n"
-            "Both steps are required for private/restricted content."
+            "🔒 **For private or restricted links**, use /login to connect your account."
         )
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
@@ -187,6 +186,10 @@ async def onboard_login(client, callback_query):
 @app.on_callback_query(filters.regex("onboard_setbot"))
 async def onboard_setbot(client, callback_query):
     user_id = callback_query.from_user.id
+    user = await get_user(user_id)
+    if not user or user.get("role") not in ("premium", "admin", "owner"):
+        await callback_query.answer("❌ /setbot is a Premium feature.", show_alert=True)
+        return
 
     login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
     try:
@@ -472,11 +475,14 @@ async def _finish_login(user_id: int, temp_client, message: Message):
         pass
     login_states.pop(user_id, None)
 
+    user = await get_user(user_id)
+    is_premium = user and user.get("role") in ("premium", "admin", "owner")
+
     existing_token = await get_bot_token(user_id)
-    if existing_token:
+    if existing_token or not is_premium:
         await message.reply(
             "✅ **Account connected!**\n\n"
-            "🚀 You're fully set up! Send any Telegram link to start downloading."
+            "🚀 You're all set! Send any Telegram link to start downloading."
         )
         return
 
@@ -484,7 +490,7 @@ async def _finish_login(user_id: int, temp_client, message: Message):
     await message.reply(
         "✅ **Account connected!**\n\n"
         "One more step: register your upload bot.\n"
-        "All files are delivered through it — this is required to download anything.\n\n"
+        "This is required for downloading private / restricted links.\n\n"
         "1. Open @BotFather → `/newbot`\n"
         "2. Copy the token (e.g. `123456789:AABbCc...`)\n"
         "3. Paste it here",
@@ -519,6 +525,15 @@ async def setbot_command(client, message: Message):
     user = await get_user(user_id)
     if not user:
         await message.reply("Please run /start first.")
+        return
+
+    if user.get("role") not in ("premium", "admin", "owner"):
+        await message.reply(
+            "❌ **/setbot is a Premium feature.**\n\n"
+            "Free users are served directly by the main bot — no setup needed.\n\n"
+            "Upgrade to Premium to register your own upload bot.\n"
+            "👉 /upgrade"
+        )
         return
 
     parts = message.text.split(maxsplit=1)
@@ -567,6 +582,11 @@ async def setbot_command(client, message: Message):
 @app.on_message(filters.command("rembot") & filters.private)
 async def rembot_command(client, message: Message):
     user_id = message.from_user.id
+    user = await get_user(user_id)
+    if not user or user.get("role") not in ("premium", "admin", "owner"):
+        await message.reply("❌ /rembot is only available to Premium users.")
+        return
+
     token = await get_bot_token(user_id)
     if not token:
         await message.reply("ℹ️ No bot registered. Use /setbot to add one.")
