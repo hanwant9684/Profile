@@ -275,7 +275,7 @@ async def login_start(client, message):
         "Send your phone number in international format:\n"
         "`+1234567890`\n\n"
         "⏳ Session expires in 5 minutes if inactive.\n"
-        "_Type /cancel\\_login to abort._"
+        "_Type /cancel_login to abort._"
     )
 
 
