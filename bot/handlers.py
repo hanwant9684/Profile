@@ -7,7 +7,7 @@ from collections import deque
 
 import pyrogram
 from pyrogram import filters, Client, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 from pyrogram import StopTransmission
 from pyrogram.errors import AuthKeyUnregistered, SessionRevoked
 
@@ -110,6 +110,19 @@ async def _cleanup_loop():
                 await app.send_message(uid, "⚠️ Login session expired due to inactivity.")
             except Exception:
                 pass
+
+        from bot.config import user_bots, user_bots_last_used
+        from bot.transfer import stop_user_bot
+        stale_bots = [
+            uid for uid, last in list(user_bots_last_used.items())
+            if uid not in active_sessions
+            and uid not in batch_sessions
+            and now - last > 3600
+        ]
+        for uid in stale_bots:
+            user_bots_last_used.pop(uid, None)
+            await stop_user_bot(uid)
+            logging.info(f"Evicted idle user bot for user {uid}")
 
 
 # --- Utilities ---
@@ -588,7 +601,7 @@ async def download_handler(
                 await sender.send_message(
                     user_id, text,
                     entities=entities,
-                    disable_web_page_preview=False,
+                    link_preview_options=LinkPreviewOptions(is_disabled=False),
                 )
                 if not status_msg_override:
                     try:
@@ -797,7 +810,7 @@ async def help_command(client, message):
             [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
         ]),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
@@ -824,7 +837,7 @@ async def upgrade_command(client, message):
         f"🍎 [Apple Pay]({APPLE_PAY_ID})\n"
         f"💳 [Card]({CARD_PAYMENT_LINK})\n\n"
         "After payment send screenshot to **@Owner_Wolfy**.",
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
             [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],

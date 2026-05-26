@@ -10,7 +10,8 @@ from pyrogram.errors.exceptions.bad_request_400 import (
     FileReferenceInvalid,
 )
 
-from bot.config import API_ID, API_HASH, user_bots
+import time
+from bot.config import API_ID, API_HASH, user_bots, user_bots_last_used
 
 
 # --- Per-user bot management ---
@@ -59,6 +60,7 @@ async def get_user_bot(user_id: int):
     """
     cached = user_bots.get(user_id)
     if cached is not None:
+        user_bots_last_used[user_id] = time.time()
         return cached
 
     from bot.database import get_bot_token  # lazy to avoid circular import
@@ -85,6 +87,7 @@ async def get_user_bot(user_id: int):
             logging.error(f"Failed to start user bot for {user_id}: {e}")
             return None
         user_bots[user_id] = client
+        user_bots_last_used[user_id] = time.time()
         logging.info(f"Started per-user bot client for user {user_id}")
         return client
 
