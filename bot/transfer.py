@@ -42,6 +42,7 @@ async def validate_bot_token(bot_token: str):
         bot_token=bot_token,
         in_memory=True,
         no_updates=True,
+        workers=100,
     )
     try:
         await asyncio.wait_for(probe.start(), timeout=20)
@@ -80,6 +81,7 @@ async def get_user_bot(user_id: int):
             in_memory=True,
             no_updates=True,
             sleep_threshold=30,
+            workers=100,
         )
         try:
             await asyncio.wait_for(client.start(), timeout=30)
@@ -131,6 +133,36 @@ async def get_media_info(path: str) -> tuple[int, int, int]:
     return await loop.run_in_executor(None, _parse_media_info_sync, path)
 
 
+def _parse_audio_tags_sync(path: str) -> tuple[str, str]:
+    try:
+        from pymediainfo import MediaInfo
+        info = MediaInfo.parse(path)
+        for track in info.tracks:
+            if track.track_type == "General":
+                performer = (
+                    getattr(track, "performer", "") or
+                    getattr(track, "album_performer", "") or
+                    getattr(track, "composer", "") or ""
+                )
+                title = (
+                    getattr(track, "track_name", "") or
+                    getattr(track, "title", "") or ""
+                )
+                return performer.strip(), title.strip()
+        return "", ""
+    except Exception:
+        return "", ""
+
+
+async def get_audio_tags(path: str) -> tuple[str, str]:
+    """
+    Extract (performer, title) audio tags from a local file using pymediainfo.
+    Returns ("", "") on failure.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _parse_audio_tags_sync, path)
+
+
 def truncate_caption(caption, max_length=1024):
     if not caption:
         return ""
@@ -165,6 +197,8 @@ async def _send_by_ext(
     client: Client, chat_id, path: str, ext: str, kw: dict,
     thumb, file_name, duration, width, height,
     force_document: bool = False,
+    performer: str = "",
+    title: str = "",
 ):
     if not force_document and ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
         return await client.send_video(
@@ -177,7 +211,8 @@ async def _send_by_ext(
     elif ext in (".mp3", ".m4a", ".flac"):
         return await client.send_audio(
             chat_id, path,
-            thumb=thumb, duration=duration, file_name=file_name, **kw
+            thumb=thumb, duration=duration, file_name=file_name,
+            performer=performer or None, title=title or None, **kw
         )
     elif ext in (".ogg", ".opus"):
         return await client.send_voice(chat_id, path, duration=duration, **kw)
@@ -207,6 +242,8 @@ async def upload_media(
     progress=None,
     progress_args=(),
     force_document: bool = False,
+    performer: str = "",
+    title: str = "",
 ):
     """
     Upload a local file to Telegram via the user's own bot and return the
@@ -226,6 +263,8 @@ async def upload_media(
                 client, chat_id, path, ext, kw,
                 thumb, file_name, duration, width, height,
                 force_document=force_document,
+                performer=performer,
+                title=title,
             )
         except Exception as e:
             last_exc = e

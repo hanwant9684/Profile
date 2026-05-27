@@ -18,7 +18,21 @@ from bot.config import (
     SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota
-from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info
+from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info, get_audio_tags
+
+
+MAX_FILE_SIZE = 2_000_000_000  # 2 GB — bot upload hard limit
+
+
+def _get_msg_file_size(m) -> int:
+    for attr in ("video", "document", "audio", "voice", "video_note", "animation", "sticker"):
+        obj = getattr(m, attr, None)
+        if obj and getattr(obj, "file_size", None):
+            return obj.file_size
+    photo = getattr(m, "photo", None)
+    if photo and getattr(photo, "file_size", None):
+        return photo.file_size
+    return 0
 
 
 # --- User session cache ---
@@ -65,6 +79,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
         in_memory=True,
         sleep_threshold=30,
         no_updates=True,
+        workers=100,
     )
     await asyncio.wait_for(client.start(), timeout=30)
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -530,6 +545,38 @@ async def download_handler(
         else:
             messages = [msg]
 
+        # Album quota check — free users must have enough quota for every file in the group
+        if not skip_quota and user.get("role", "free") == "free" and len(messages) > 1:
+            from bot.database import DAILY_LIMIT, MONTHLY_LIMIT
+            from datetime import datetime as _dt
+            _today = _dt.now().date()
+            _month_first = _today.replace(day=1)
+            _dl_today = user.get("downloads_today", 0)
+            _last_date = user.get("last_download_date")
+            if _last_date and _dt.fromisoformat(_last_date).date() != _today:
+                _dl_today = 0
+            _dl_month = user.get("downloads_this_month", 0)
+            _last_month = user.get("last_download_month")
+            if _last_month and _dt.fromisoformat(_last_month).date() != _month_first:
+                _dl_month = 0
+            _needed = len(messages)
+            if _dl_today + _needed > DAILY_LIMIT:
+                _left = max(0, DAILY_LIMIT - _dl_today)
+                await update_status(
+                    status,
+                    f"❌ This album has **{_needed} files** but you only have **{_left}** download(s) left today.\n\n"
+                    "👉 /upgrade to Premium for unlimited downloads."
+                )
+                return None
+            if _dl_month + _needed > MONTHLY_LIMIT:
+                _left = max(0, MONTHLY_LIMIT - _dl_month)
+                await update_status(
+                    status,
+                    f"❌ This album has **{_needed} files** but you only have **{_left}** download(s) left this month.\n\n"
+                    "👉 /upgrade to Premium for unlimited downloads."
+                )
+                return None
+
         # --- Public content: server-side copy via main bot to user's DM ---
         if not is_private:
             media_group_id = getattr(msg, "media_group_id", None)
@@ -614,7 +661,149 @@ async def download_handler(
             return msg
 
         # --- Private/restricted media: download then upload to user's bot DM ---
+
+        # Pre-download file size check — reject before wasting bandwidth
         for m in messages:
+            sz = _get_msg_file_size(m)
+            if sz and sz > MAX_FILE_SIZE:
+                readable = f"{sz / 1_000_000_000:.1f} GB"
+                await update_status(status, f"❌ File too large ({readable}). Maximum supported size is 2 GB.")
+                return None
+
+        is_premium = user.get("role") in ("premium", "admin", "owner")
+        user_bot = await get_user_bot(user_id)
+
+        if user_bot is None and is_premium:
+            await update_status(
+                status,
+                "❌ **Upload bot not set up.**\n\n"
+                "Premium users need to register their own upload bot.\n"
+                "Use `/setbot <token>` to set one up.\n\n"
+                "1. Open @BotFather → `/newbot`\n"
+                "2. Copy the token\n"
+                "3. Send `/setbot token` here\n"
+                "4. Press **Start** on your bot",
+            )
+            return None
+
+        upload_client = user_bot if user_bot is not None else client
+
+        if len(messages) > 1:
+            # --- Album path: parallel download + send_media_group ---
+            await update_status(status, f"📥 Downloading album ({len(messages)} files)...")
+
+            download_tasks = [
+                download_media(user_client, m, progress=None, progress_args=())
+                for m in messages
+            ]
+            results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+            paths = []
+            valid_pairs = []
+            for m, result in zip(messages, results):
+                if isinstance(result, Exception) or not result:
+                    logging.warning(f"Album item failed to download: {result}")
+                    continue
+                paths.append(result)
+                valid_pairs.append((m, result))
+
+            if not valid_pairs:
+                await update_status(status, "❌ All files in the album failed to download.")
+                return None
+
+            try:
+                from pyrogram.types import (
+                    InputMediaPhoto, InputMediaVideo,
+                    InputMediaDocument, InputMediaAudio,
+                )
+
+                media_list = []
+                for m, path in valid_pairs:
+                    cap = truncate_caption(m.caption or "")
+                    ext = os.path.splitext(path)[1].lower()
+                    if ext in (".jpg", ".jpeg", ".png", ".webp"):
+                        media_list.append(InputMediaPhoto(path, caption=cap))
+                    elif ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
+                        dur = getattr(getattr(m, "video", None), "duration", 0) or 0
+                        w   = getattr(getattr(m, "video", None), "width",    0) or 0
+                        h   = getattr(getattr(m, "video", None), "height",   0) or 0
+                        if not dur or not w or not h:
+                            mi_dur, mi_w, mi_h = await get_media_info(path)
+                            dur = dur or mi_dur
+                            w   = w   or mi_w
+                            h   = h   or mi_h
+                        media_list.append(InputMediaVideo(
+                            path, caption=cap,
+                            duration=dur, width=w, height=h,
+                            supports_streaming=True,
+                        ))
+                    elif ext in (".mp3", ".m4a", ".flac"):
+                        dur       = getattr(getattr(m, "audio", None), "duration",  0)  or 0
+                        performer = getattr(getattr(m, "audio", None), "performer", "") or ""
+                        atitle    = getattr(getattr(m, "audio", None), "title",     "") or ""
+                        if not performer or not atitle:
+                            p2, t2    = await get_audio_tags(path)
+                            performer = performer or p2
+                            atitle    = atitle    or t2
+                        media_list.append(InputMediaAudio(
+                            path, caption=cap,
+                            duration=dur,
+                            performer=performer or None,
+                            title=atitle or None,
+                        ))
+                    else:
+                        fn = getattr(getattr(m, "document", None), "file_name", None)
+                        media_list.append(InputMediaDocument(path, caption=cap, file_name=fn))
+
+                await update_status(status, f"📤 Uploading album ({len(media_list)} files)...")
+                try:
+                    await upload_client.send_media_group(user_id, media_list)
+                except Exception as grp_exc:
+                    logging.warning(f"send_media_group failed ({grp_exc}), falling back to individual uploads")
+                    for m, path in valid_pairs:
+                        cap = truncate_caption(m.caption or "")
+                        dur = w = h = 0
+                        fn = performer = atitle = ""
+                        if getattr(m, "video", None):
+                            dur = m.video.duration or 0
+                            w   = m.video.width    or 0
+                            h   = m.video.height   or 0
+                            fn  = m.video.file_name or ""
+                            if not dur or not w or not h:
+                                mi_dur, mi_w, mi_h = await get_media_info(path)
+                                dur = dur or mi_dur
+                                w   = w   or mi_w
+                                h   = h   or mi_h
+                        elif getattr(m, "audio", None):
+                            dur       = m.audio.duration  or 0
+                            fn        = m.audio.file_name or ""
+                            performer = m.audio.performer or ""
+                            atitle    = m.audio.title     or ""
+                            if not performer or not atitle:
+                                p2, t2    = await get_audio_tags(path)
+                                performer = performer or p2
+                                atitle    = atitle    or t2
+                        elif getattr(m, "document", None):
+                            fn = m.document.file_name or ""
+                        await upload_media(
+                            upload_client,
+                            chat_id=user_id, path=path, caption=cap,
+                            file_name=fn, duration=dur, width=w, height=h,
+                            performer=performer, title=atitle,
+                            force_document=(m.media == enums.MessageMediaType.DOCUMENT),
+                        )
+            finally:
+                for path in paths:
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
+
+        else:
+            # --- Single file: download then upload ---
+            m = messages[0]
+
             if user_id in cancel_flags:
                 cancel_flags.discard(user_id)
                 await update_status(status, "🛑 Cancelled.")
@@ -632,39 +821,22 @@ async def download_handler(
                     timeout=1800,
                 )
                 if not path:
-                    continue
+                    return None
 
                 if user_id in cancel_flags:
                     cancel_flags.discard(user_id)
                     await update_status(status, "🛑 Cancelled.")
                     return None
 
-                is_premium = user.get("role") in ("premium", "admin", "owner")
-                user_bot = await get_user_bot(user_id)
-
-                if user_bot is None and is_premium:
-                    await update_status(
-                        status,
-                        "❌ **Upload bot not set up.**\n\n"
-                        "Premium users need to register their own upload bot.\n"
-                        "Use `/setbot <token>` to set one up.\n\n"
-                        "1. Open @BotFather → `/newbot`\n"
-                        "2. Copy the token\n"
-                        "3. Send `/setbot token` here\n"
-                        "4. Press **Start** on your bot",
-                    )
-                    return None
-
-                upload_client = user_bot if user_bot is not None else client
-
-                caption = truncate_caption(m.caption or "")
-                duration = width = height = 0
+                caption   = truncate_caption(m.caption or "")
+                duration  = width = height = 0
                 file_name = None
+                performer = title = ""
 
                 if m.video:
-                    duration = m.video.duration or 0
-                    width = m.video.width or 0
-                    height = m.video.height or 0
+                    duration  = m.video.duration or 0
+                    width     = m.video.width    or 0
+                    height    = m.video.height   or 0
                     file_name = m.video.file_name
                     if m.video.thumbs:
                         try:
@@ -674,21 +846,28 @@ async def download_handler(
                     if not duration or not width or not height:
                         mi_dur, mi_w, mi_h = await get_media_info(path)
                         duration = duration or mi_dur
-                        width = width or mi_w
-                        height = height or mi_h
+                        width    = width    or mi_w
+                        height   = height   or mi_h
                 elif getattr(m, "document", None):
                     file_name = m.document.file_name
                 elif getattr(m, "audio", None):
-                    duration = m.audio.duration or 0
+                    duration  = m.audio.duration  or 0
                     file_name = m.audio.file_name
+                    performer = m.audio.performer or ""
+                    title     = m.audio.title     or ""
                     if not duration:
                         mi_dur, _, _ = await get_media_info(path)
                         duration = duration or mi_dur
+                    if not performer or not title:
+                        p2, t2    = await get_audio_tags(path)
+                        performer = performer or p2
+                        title     = title     or t2
 
                 upload_kwargs = dict(
                     chat_id=user_id, path=path,
                     caption=caption, thumb=thumb, file_name=file_name,
                     duration=duration, width=width, height=height,
+                    performer=performer, title=title,
                     progress=progress_bar, progress_args=(status, "📤 Uploading"),
                     force_document=(m.media == enums.MessageMediaType.DOCUMENT),
                 )
@@ -731,7 +910,7 @@ async def download_handler(
                     os.remove(path)
 
         if not skip_quota and user.get("role", "free") == "free":
-            await increment_quota(user_id)
+            await increment_quota(user_id, count=len(messages))
 
         if not status_msg_override:
             try:

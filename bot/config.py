@@ -75,4 +75,5 @@ app = Client(
     in_memory=True,
     sleep_threshold=30,
     skip_updates=True,
+    workers=100,
 )
