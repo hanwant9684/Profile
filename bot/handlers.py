@@ -677,10 +677,10 @@ async def download_handler(
                 status,
                 "❌ **Upload bot not set up.**\n\n"
                 "Premium users need to register their own upload bot.\n"
-                "Use `/setbot <token>` to set one up.\n\n"
+                "Use `/setbot` to set one up.\n\n"
                 "1. Open @BotFather → `/newbot`\n"
                 "2. Copy the token\n"
-                "3. Send `/setbot token` here\n"
+                "3. Run `/setbot` and send the token when prompted\n"
                 "4. Press **Start** on your bot",
             )
             return None
@@ -961,9 +961,9 @@ async def help_command(client, message):
             "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
             "🔒 **Private / restricted links** — requires two steps:\n"
             "`/login` — connect your Telegram account\n"
-            "`/setbot token` — register your upload bot\n\n"
+            "`/setbot` — register your upload bot\n\n"
             "🤖 **Bot commands**\n"
-            "`/setbot token` — set or replace your upload bot\n"
+            "`/setbot` — set or replace your upload bot\n"
             "`/rembot` — remove your upload bot\n\n"
             "📦 **Batch**\n"
             "`/batch start_link end_link` — download a range\n"
