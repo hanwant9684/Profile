@@ -324,7 +324,7 @@ async def login_start(client, message):
     & ~filters.command([
         "start", "login", "logout", "cancel", "cancelbatch", "cancel_login",
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
-        "settings", "set_force_sub",
+        "settings", "set_force_sub", "userinfo",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
         "setbot", "rembot",
     ])

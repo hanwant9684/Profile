@@ -99,6 +99,50 @@ async def unban(client, message):
     except Exception:
         await message.reply("Usage: `/unban <user_id>`")
 
+@app.on_message(filters.command("userinfo") & filters.private)
+async def userinfo(client, message):
+    user = await get_user(message.from_user.id)
+    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
+        return
+    try:
+        target_id = message.text.split()[1]
+    except IndexError:
+        await message.reply("Usage: `/userinfo <user_id>`")
+        return
+    target = await get_user(target_id)
+    if not target:
+        await message.reply(f"❌ No user found with ID `{target_id}`.")
+        return
+
+    username    = f"@{target['username']}" if target.get("username") else "—"
+    role        = (target.get("role") or "free").upper()
+    banned      = "🚫 Yes" if target.get("is_banned") else "✅ No"
+    session     = "✅ Connected" if target.get("phone_session_string") else "❌ Not set"
+    bot         = "✅ Set" if target.get("bot_token") else "❌ Not set"
+    expiry      = target.get("premium_expiry_date") or "—"
+    dl_today    = target.get("downloads_today", 0)
+    dl_month    = target.get("downloads_this_month", 0)
+    last_dl     = target.get("last_download_date") or "—"
+    joined      = target.get("created_at") or "—"
+
+    text = (
+        f"👤 **User Info**\n\n"
+        f"**ID:** `{target['telegram_id']}`\n"
+        f"**Name:** {target.get('full_name') or '—'}\n"
+        f"**Username:** {username}\n\n"
+        f"**Role:** `{role}`\n"
+        f"**Banned:** {banned}\n"
+        f"**Premium expires:** `{expiry}`\n\n"
+        f"**Session:** {session}\n"
+        f"**Upload bot:** {bot}\n\n"
+        f"**Downloads today:** `{dl_today}`\n"
+        f"**Downloads this month:** `{dl_month}`\n"
+        f"**Last download:** `{last_dl}`\n"
+        f"**Joined:** `{joined}`"
+    )
+    logger.info(f"Admin action: userinfo target={target_id} by={message.from_user.id}")
+    await message.reply(text)
+
 @app.on_message(filters.command("set_force_sub") & filters.private)
 async def set_force_sub(client, message):
     user = await get_user(message.from_user.id)

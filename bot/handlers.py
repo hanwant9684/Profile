@@ -677,10 +677,10 @@ async def download_handler(
                 status,
                 "❌ **Upload bot not set up.**\n\n"
                 "Premium users need to register their own upload bot.\n"
-                "Use /setbot to set one up.\n\n"
+                "Use `/setbot` to set one up.\n\n"
                 "1. Open @BotFather → `/newbot`\n"
                 "2. Copy the token\n"
-                "3. Run /setbot and send the token when prompted\n"
+                "3. Run `/setbot` and send the token when prompted\n"
                 "4. Press **Start** on your bot",
             )
             return None
@@ -960,26 +960,26 @@ async def help_command(client, message):
             "📖 **Help**\n\n"
             "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
             "🔒 **Private / restricted links** — requires two steps:\n"
-            " /login — connect your Telegram account\n"
-            " /setbot — register your upload bot\n\n"
+            "`/login` — connect your Telegram account\n"
+            "`/setbot` — register your upload bot\n\n"
             "🤖 **Bot commands**\n"
-            " /setbot — set or replace your upload bot\n"
-            " /rembot — remove your upload bot\n\n"
+            "`/setbot` — set or replace your upload bot\n"
+            "`/rembot` — remove your upload bot\n\n"
             "📦 **Batch**\n"
             "`/batch start_link end_link` — download a range\n"
             "`/batch start_link 50` — download next 50\n\n"
             "🔗 **Multi-link**\n"
-            " /mlinks — paste up to 50 links at once\n\n"
-            " /cancel — stop an active download"
+            "`/mlinks` — paste up to 50 links at once\n\n"
+            "`/cancel` — stop an active download"
         )
     else:
         text = (
             "📖 **Help**\n\n"
             "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
-            "🔒 **Private / restricted links** — use /login to connect your Telegram account.\n\n"
+            "🔒 **Private / restricted links** — use `/login` to connect your Telegram account.\n\n"
             "💰 **Quota** — 2 files/day · 5 files/month\n\n"
-            " /cancel — stop an active download\n\n"
-            "💎 **Want unlimited downloads?** → /upgrade "
+            "`/cancel` — stop an active download\n\n"
+            "💎 **Want unlimited downloads?** → /upgrade"
         )
 
     await message.reply(
