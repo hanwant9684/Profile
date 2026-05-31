@@ -46,7 +46,9 @@ async def main():
     print("Starting cleanup tasks...")
 
     from bot.cloud_backup import periodic_cloud_backup
+    from bot.database import periodic_premium_sweep
     asyncio.create_task(periodic_cloud_backup())
+    asyncio.create_task(periodic_premium_sweep())
 
     print("Starting bot...")
 
