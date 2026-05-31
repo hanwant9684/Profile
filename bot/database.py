@@ -153,6 +153,7 @@ async def create_user(user_id, username=None, full_name=None) -> Optional[Dict]:
                     updated_at = EXCLUDED.updated_at
             ''', int(user_id), username, full_name, today, now, now)
 
+        logger.info(f"User created/updated: id={user_id} username={username}")
         return await get_user(user_id)
     except Exception as e:
         logger.error(f"Error creating user {user_id}: {e}")
@@ -229,6 +230,7 @@ async def set_user_role(user_id, role, duration_days=None):
                 'UPDATE users SET role = $1, premium_expiry_date = $2, updated_at = $3 WHERE telegram_id = $4',
                 role, expiry_date, datetime.now(), int(user_id)
             )
+        logger.info(f"Role changed: user={user_id} → {role}" + (f" ({duration_days}d)" if duration_days else ""))
     except Exception as e:
         logger.error(f"Error setting role for {user_id}: {e}")
 
@@ -265,6 +267,7 @@ async def ban_user(user_id, is_banned=True):
                 'UPDATE users SET is_banned = $1, updated_at = $2 WHERE telegram_id = $3',
                 is_banned, datetime.now(), int(user_id)
             )
+        logger.info(f"User {user_id} {'banned' if is_banned else 'unbanned'}")
     except Exception as e:
         logger.error(f"Error banning user {user_id}: {e}")
 
@@ -303,6 +306,7 @@ async def check_and_update_quota(user_id):
                             now, int(user_id)
                         )
                     user["role"] = "free"
+                    logger.warning(f"Premium expired for user {user_id} — auto-downgraded to free")
             except Exception as e:
                 logger.error(f"Error checking premium expiry for {user_id}: {e}")
 
@@ -342,6 +346,7 @@ async def check_and_update_quota(user_id):
         downloads_this_month = user.get("downloads_this_month", 0)
 
         if downloads_this_month >= MONTHLY_LIMIT:
+            logger.info(f"Monthly quota exceeded: user={user_id} ({downloads_this_month}/{MONTHLY_LIMIT})")
             return False, (
                 f"📵 Monthly limit reached ({downloads_this_month}/{MONTHLY_LIMIT} files used this month).\n\n"
                 f"💎 Upgrade to **Premium** for unlimited downloads with no daily or monthly limits.\n"
@@ -349,6 +354,7 @@ async def check_and_update_quota(user_id):
             )
 
         if downloads_today >= DAILY_LIMIT:
+            logger.info(f"Daily quota exceeded: user={user_id} ({downloads_today}/{DAILY_LIMIT})")
             remaining_month = max(0, MONTHLY_LIMIT - downloads_this_month)
             return False, (
                 f"⏰ Daily limit reached ({DAILY_LIMIT}/{DAILY_LIMIT} files today). "

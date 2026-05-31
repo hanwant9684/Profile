@@ -20,18 +20,6 @@ async def start(client, message):
     full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
 
     from bot.handlers import verify_force_sub
-    from bot.database import get_setting
-
-    user_pre = await get_user(user_id)
-    role_pre = (user_pre.get("role") if user_pre else None) or "free"
-    if role_pre not in ("admin", "owner"):
-        mm = await get_setting("maintenance_mode")
-        if mm and mm.get("value") == "on":
-            await message.reply(
-                "🔧 **Bot is under maintenance.**\n\n"
-                "We'll be back shortly. Please try again later."
-            )
-            return
 
     is_subbed, channel = await verify_force_sub(client, user_id)
     if not is_subbed:
@@ -178,6 +166,7 @@ async def onboard_login(client, callback_query):
         return
 
     if len(login_states) >= 10:
+        logger.warning(f"Login slot limit reached ({len(login_states)}/10) — rejecting user {user_id} via callback")
         await callback_query.answer("Too many active logins. Try in a minute.", show_alert=True)
         return
 
@@ -207,6 +196,14 @@ async def onboard_setbot(client, callback_query):
     user = await get_user(user_id)
     if not user or user.get("role") not in ("premium", "admin", "owner"):
         await callback_query.answer("❌ /setbot is a Premium feature.", show_alert=True)
+        return
+
+    existing = login_states.get(user_id)
+    if existing and existing.get("step") == "AWAITING_SETBOT_TOKEN":
+        await callback_query.answer(
+            "You already have a /setbot session waiting for your token. Send it now or use /cancel_login to cancel.",
+            show_alert=True
+        )
         return
 
     login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
@@ -290,8 +287,25 @@ async def login_start(client, message):
         return
 
     if len(login_states) >= 10:
+        logger.warning(f"Login slot limit reached ({len(login_states)}/10) — rejecting user {user_id}")
         await message.reply("⚠️ Too many active login attempts. Please try again in a few minutes.")
         return
+
+    if user_id in login_states:
+        existing_step = login_states[user_id].get("step", "")
+        if existing_step == "AWAITING_SETBOT_TOKEN":
+            await message.reply(
+                "⚠️ You have a /setbot session waiting for your bot token.\n"
+                "Use /cancel_login to cancel it first, then run /login."
+            )
+            return
+        # Already mid-login — disconnect the old client cleanly before restarting
+        old_state = login_states.pop(user_id, {})
+        if "client" in old_state:
+            try:
+                await old_state["client"].disconnect()
+            except Exception:
+                pass
 
     login_states[user_id] = {"step": "PHONE", "timestamp": time.time()}
     await message.reply(
@@ -310,7 +324,7 @@ async def login_start(client, message):
     & ~filters.command([
         "start", "login", "logout", "cancel", "cancelbatch", "cancel_login",
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
-        "settings", "set_force_sub", "set_maintenance",
+        "settings", "set_force_sub",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
         "setbot", "rembot",
     ])
@@ -323,6 +337,55 @@ async def handle_login_steps(client, message: Message):
 
     state = login_states[user_id]
     step = state["step"]
+
+    if step == "AWAITING_SETBOT_TOKEN":
+        state["timestamp"] = time.time()
+        token = message.text.strip()
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        # Re-verify premium — role may have changed between /setbot and token submission
+        _u = await get_user(user_id)
+        if not _u or _u.get("role") not in ("premium", "admin", "owner"):
+            login_states.pop(user_id, None)
+            await message.reply("❌ /setbot is only available to Premium users.")
+            return
+
+        if ":" not in token:
+            await message.reply(
+                "❌ That doesn't look like a bot token.\n"
+                "A valid token looks like: `123456789:AABbCc...`\n\n"
+                "Try again or send /cancel_login to cancel."
+            )
+            return
+
+        status = await message.reply("🔍 Validating token...")
+        try:
+            me = await validate_bot_token(token)
+        except Exception as e:
+            await status.edit_text(
+                f"❌ **Invalid token.** Telegram rejected it:\n`{e}`\n\n"
+                "Copy the full token from @BotFather and try again, or send /cancel_login to cancel."
+            )
+            return
+
+        await stop_user_bot(user_id)
+        await set_bot_token(user_id, token)
+        login_states.pop(user_id, None)
+
+        bot_username = f"@{me.username}" if me.username else str(me.id)
+        logger.info(f"Bot registered via /setbot: user={user_id} bot={bot_username}")
+        await status.edit_text(
+            f"✅ **Bot registered:** {bot_username}\n\n"
+            f"Open {bot_username} and press **Start** so it can DM you.\n"
+            "Then send any Telegram link to start downloading.\n\n"
+            "To change your bot: run /setbot again · To remove: /rembot ",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        return
 
     if step == "AWAITING_BOT_TOKEN":
         state["timestamp"] = time.time()
@@ -351,6 +414,7 @@ async def handle_login_steps(client, message: Message):
         login_states.pop(user_id, None)
 
         bot_username = f"@{me.username}" if me.username else str(me.id)
+        logger.info(f"Bot registered via onboarding: user={user_id} bot={bot_username}")
 
         user = await get_user(user_id)
         if user and user.get("phone_session_string"):
@@ -432,6 +496,7 @@ async def handle_login_steps(client, message: Message):
                 )
                 return
             except PhoneCodeInvalid:
+                logger.warning(f"Login failed: invalid OTP code for user {user_id}")
                 await message.reply("❌ Invalid code. Please check and try again.")
                 return
             except Exception as e:
@@ -457,6 +522,7 @@ async def handle_login_steps(client, message: Message):
             try:
                 await temp_client.check_password(password)
             except PasswordHashInvalid:
+                logger.warning(f"Login failed: wrong 2FA password for user {user_id}")
                 await message.reply("❌ Wrong password. Please try /login again.")
                 try:
                     await temp_client.disconnect()
@@ -498,6 +564,7 @@ async def _finish_login(user_id: int, temp_client, message: Message):
     except Exception:
         pass
     login_states.pop(user_id, None)
+    logger.info(f"Login successful: user={user_id}")
 
     user = await get_user(user_id)
     is_premium = user and user.get("role") in ("premium", "admin", "owner")
@@ -536,9 +603,13 @@ async def cancel_login(client, message):
                 await state["client"].disconnect()
             except Exception:
                 pass
-        await message.reply("✅ Login process cancelled.")
+        logger.info(f"Login cancelled by user {user_id}")
+        if state.get("step") == "AWAITING_SETBOT_TOKEN":
+            await message.reply("✅ /setbot cancelled.")
+        else:
+            await message.reply("✅ Login process cancelled.")
     else:
-        await message.reply("No active login process to cancel.")
+        await message.reply("No active session to cancel.")
 
 
 # ─── /setbot command ─────────────────────────────────────────────────────────
@@ -560,43 +631,31 @@ async def setbot_command(client, message: Message):
         )
         return
 
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2 or ":" not in parts[1]:
-        await message.reply(
-            "❌ **Usage:** `/setbot <bot_token>`\n\n"
-            "1. Open @BotFather → `/newbot`\n"
-            "2. copy the bot_token (e.g. `123456789:AABbCc...`)\n"
-            "3. Send `/setbot bot_token` here\n"
-            "4. Press **Start** on your bot\n\n"
-            "Your bot delivers all files directly to your DM."
-        )
+    existing = login_states.get(user_id)
+    if existing and existing.get("step") != "AWAITING_SETBOT_TOKEN":
+        if existing.get("step") == "AWAITING_BOT_TOKEN":
+            await message.reply(
+                "⚠️ You're already being asked for your bot token as part of setup.\n"
+                "Just send the token directly here."
+            )
+        else:
+            await message.reply(
+                "⚠️ You have an active login session in progress.\n"
+                "Use /cancel_login to cancel it first, then run /setbot again."
+            )
         return
 
-    token = parts[1].strip()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    status = await message.reply("🔍 Validating token...")
-    try:
-        me = await validate_bot_token(token)
-    except Exception as e:
-        await status.edit_text(
-            f"❌ **Invalid bot token.** Telegram rejected it:\n`{e}`\n\n"
-            "Make sure you copied the full token from @BotFather."
-        )
-        return
-
-    await stop_user_bot(user_id)
-    await set_bot_token(user_id, token)
-
-    bot_username = f"@{me.username}" if me.username else str(me.id)
-    await status.edit_text(
-        f"✅ **Bot registered:** {bot_username}\n\n"
-        f"Open {bot_username} and press **Start** so it can DM you.\n"
-        "Then send any link to download.\n\n"
-        "To swap bots: `/setbot <new_token>` · To remove: `/rembot`",
+    login_states[user_id] = {"step": "AWAITING_SETBOT_TOKEN", "timestamp": time.time()}
+    await message.reply(
+        "🤖 **Register Your Upload Bot**\n\n"
+        "Send your bot token now.\n"
+        "It looks like: `123456789:AABbCcDdEeFfGg...`\n\n"
+        "Don't have one?\n"
+        "1. Open @BotFather → /newbot\n"
+        "2. Follow the steps and copy the token\n"
+        "3. Paste it here\n\n"
+        "⏱ This prompt expires in 5 minutes.\n"
+        "Send /cancel_login to cancel.",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
@@ -618,6 +677,7 @@ async def rembot_command(client, message: Message):
 
     await stop_user_bot(user_id)
     await remove_bot_token(user_id)
+    logger.info(f"Bot removed via /rembot: user={user_id}")
     await message.reply(
         "✅ Upload bot removed.\n\n"
         "You won't be able to download anything until you run /setbot again."
@@ -643,6 +703,7 @@ async def logout_command(client, message: Message):
             pass
 
     await logout_user(user_id)
+    logger.info(f"User logged out: user={user_id}")
     await message.reply(
         "✅ **Logged out.**\n\n"
         "Private/restricted links will no longer work.\n"

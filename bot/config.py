@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 import httpx
 from bot.logger import setup_logger
 from pyrogram import Client
@@ -39,7 +40,7 @@ if not BOT_TOKEN:
 
 if missing_vars:
     import sys
-    print(f"CRITICAL ERROR: Missing environment variables: {', '.join(missing_vars)}")
+    logging.critical(f"Missing required environment variables: {', '.join(missing_vars)} — bot cannot start")
     sys.exit(1)
 
 MAX_CONCURRENT_DOWNLOADS = 10

@@ -7,7 +7,7 @@ def setup_logger():
     log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     log_file = "bot_logs.txt"
 
-    file_handler = RotatingFileHandler(log_file, maxBytes=1*1024*1024, backupCount=1)
+    file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
     file_handler.setFormatter(log_formatter)
     file_handler.setLevel(logging.INFO)
 

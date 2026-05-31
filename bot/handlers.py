@@ -30,8 +30,8 @@ def _get_msg_file_size(m) -> int:
         if obj and getattr(obj, "file_size", None):
             return obj.file_size
     photo = getattr(m, "photo", None)
-    if photo and getattr(photo, "file_size", None):
-        return photo.file_size
+    if photo and photo.sizes:
+        return photo.sizes[-1].file_size
     return 0
 
 
@@ -122,7 +122,10 @@ async def _cleanup_loop():
                 except Exception:
                     pass
             try:
-                await app.send_message(uid, "⚠️ Login session expired due to inactivity.")
+                if state and state.get("step") == "AWAITING_SETBOT_TOKEN":
+                    await app.send_message(uid, "⚠️ /setbot session expired. Run /setbot again when ready.")
+                else:
+                    await app.send_message(uid, "⚠️ Login session expired due to inactivity. Run /login again.")
             except Exception:
                 pass
 
@@ -371,6 +374,10 @@ async def download_handler(
             return None
         chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
 
+    if not link_override:
+        _ltype = "story" if is_story else ("private" if is_private else "public")
+        logging.info(f"Download requested: user={user_id} type={_ltype} link={link[:80]}")
+
     if user_override is not None:
         user = user_override
     else:
@@ -387,16 +394,6 @@ async def download_handler(
         if not link_override:
             await message.reply("❌ You are banned from using this bot.")
         return None
-
-    if user.get("role") not in ("admin", "owner"):
-        mm = await get_setting("maintenance_mode")
-        if mm and mm.get("value") == "on":
-            if not link_override:
-                await message.reply(
-                    "🔧 **Bot is under maintenance.**\n\n"
-                    "We'll be back shortly. Please try again later."
-                )
-            return None
 
     if is_topic and not is_private and user.get("phone_session_string"):
         is_private = True
@@ -437,8 +434,9 @@ async def download_handler(
         if is_story:
             try:
                 story_obj = await user_client.get_stories(chat_id, msg_id)
-            except (AuthKeyUnregistered, SessionRevoked):
+            except (AuthKeyUnregistered, SessionRevoked) as e:
                 from bot.database import logout_user
+                logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
                 return None
@@ -454,13 +452,14 @@ async def download_handler(
             try:
                 msg = await user_client.get_messages(chat_id, msg_id, replies=0)
                 # Bots can't read public groups — retry with user session if message is empty
-                if not getattr(msg, "media", None) and not getattr(msg, "text", None) and user.get("phone_session_string"):
+                if not is_private and not getattr(msg, "media", None) and not getattr(msg, "text", None) and user.get("phone_session_string"):
                     user_client = await get_user_client(user_id, user["phone_session_string"])
                     active_sessions.add(user_id)
                     msg = await user_client.get_messages(chat_id, msg_id, replies=0)
                     is_private = True
-            except (AuthKeyUnregistered, SessionRevoked):
+            except (AuthKeyUnregistered, SessionRevoked) as e:
                 from bot.database import logout_user
+                logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
                 return None

@@ -2,6 +2,8 @@ import asyncio
 import logging
 from pyrogram import filters
 from bot.config import app, OWNER_ID, active_downloads, MAX_CONCURRENT_DOWNLOADS
+
+logger = logging.getLogger(__name__)
 from bot.handlers import update_status
 from bot.database import set_user_role, ban_user, update_setting, get_setting, get_user_count, get_user, iter_user_ids
 
@@ -31,6 +33,7 @@ async def kill_all_processes(client, message):
     for uid in list(active_downloads):
         cancel_flags.add(uid)
     active_downloads.clear()
+    logger.warning(f"Admin action: killall — {count} active downloads killed by user {message.from_user.id}")
     await message.reply(f"✅ Killed all `{count}` active processes and sent cancellation signals.")
 
 @app.on_message(filters.command("setrole") & filters.private)
@@ -50,6 +53,7 @@ async def setrole(client, message):
             await message.reply("Invalid role. Use: free, premium, admin, owner")
             return
         await set_user_role(target_id, new_role, duration)
+        logger.info(f"Admin action: setrole user={target_id} → {new_role}" + (f" ({duration}d)" if duration else "") + f" by={message.from_user.id}")
         resp = f"✅ User `{target_id}` role updated to **{new_role}**."
         if duration and new_role == 'premium':
             resp += f" (Expires in {duration} days)"
@@ -77,6 +81,7 @@ async def ban(client, message):
     try:
         target_id = message.text.split()[1]
         await ban_user(target_id, True)
+        logger.info(f"Admin action: ban user={target_id} by={message.from_user.id}")
         await message.reply(f"🚫 User `{target_id}` has been **BANNED**.")
     except Exception:
         await message.reply("Usage: `/ban <user_id>`")
@@ -89,6 +94,7 @@ async def unban(client, message):
     try:
         target_id = message.text.split()[1]
         await ban_user(target_id, False)
+        logger.info(f"Admin action: unban user={target_id} by={message.from_user.id}")
         await message.reply(f"✅ User `{target_id}` has been **UNBANNED**.")
     except Exception:
         await message.reply("Usage: `/unban <user_id>`")
@@ -101,6 +107,7 @@ async def set_force_sub(client, message):
     try:
         channel = message.text.split()[1]
         await update_setting("force_sub_channel", channel)
+        logger.info(f"Admin action: set_force_sub={channel} by={message.from_user.id}")
         await message.reply(f"✅ Force Sub channel set to: {channel}")
     except Exception:
         await message.reply("Usage: `/set_force_sub @channel`")
@@ -115,16 +122,12 @@ async def view_settings(client, message):
     from bot.handlers import user_clients
 
     fs = await get_setting("force_sub_channel")
-    mm = await get_setting("maintenance_mode")
 
     fs_val = (fs.get("value") if fs else None) or "Not Set"
-    mm_on = (mm.get("value") if mm else None) == "on"
+    fs_display = f"`{fs_val}`" if fs_val != "Not Set" else "Not Set"
 
     active_dl = len(active_downloads)
     active_sess = len(user_clients)
-
-    mm_display = "🔴 ON  — bot paused for users" if mm_on else "🟢 OFF — bot running normally"
-    fs_display = f"`{fs_val}`" if fs_val != "Not Set" else "Not Set"
 
     text = (
         "╔══════════════════════════╗\n"
@@ -132,8 +135,7 @@ async def view_settings(client, message):
         "╚══════════════════════════╝\n\n"
 
         "━━━  Access Control  ━━━\n"
-        f"📢 Force Sub:     {fs_display}\n"
-        f"🔧 Maintenance:  {mm_display}\n\n"
+        f"📢 Force Sub:  {fs_display}\n\n"
 
         "━━━  Quotas (free users)  ━━━\n"
         f"📅 Daily limit:    `{DAILY_LIMIT}` downloads / day\n"
@@ -144,31 +146,11 @@ async def view_settings(client, message):
         f"👤 Open sessions:     `{active_sess}`\n\n"
 
         "━━━  Commands  ━━━\n"
-        "`/set_force_sub @channel` — set force sub\n"
-        "`/set_maintenance on|off` — toggle maintenance"
+        "`/set_force_sub @channel` — set force sub"
     )
     await message.reply(text)
 
 
-@app.on_message(filters.command("set_maintenance") & filters.private)
-async def set_maintenance(client, message):
-    user = await get_user(message.from_user.id)
-    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
-        return
-    parts = message.text.split()
-    if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
-        await message.reply("Usage: `/set_maintenance on` or `/set_maintenance off`")
-        return
-    state = parts[1].lower()
-    await update_setting("maintenance_mode", state)
-    if state == "on":
-        await message.reply(
-            "🔴 **Maintenance mode ON.**\n\n"
-            "All regular users are now blocked with a maintenance notice.\n"
-            "Admins and the owner can still use the bot normally."
-        )
-    else:
-        await message.reply("🟢 **Maintenance mode OFF.** Bot is open to all users again.")
 
 @app.on_message(filters.command("broadcast") & filters.private)
 async def broadcast(client, message):
@@ -213,7 +195,7 @@ async def broadcast(client, message):
                 count += 1
             except Exception as e:
                 blocked += 1
-                logging.debug(f"Broadcast failed for {tid}: {e}")
+                logging.warning(f"Broadcast failed for {tid}: {e}")
             index += 1
             if index % 20 == 0:
                 await update_status(msg, f"🚀 Broadcasting...\nProgress: {index}/{total}\nSent: {count}\nFailed: {blocked}")

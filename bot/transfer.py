@@ -47,6 +47,7 @@ async def validate_bot_token(bot_token: str):
     try:
         await asyncio.wait_for(probe.start(), timeout=20)
         me = await asyncio.wait_for(probe.get_me(), timeout=10)
+        logging.info(f"Bot token validated: @{me.username if me.username else me.id}")
         return me
     finally:
         try:
@@ -98,6 +99,7 @@ async def stop_user_bot(user_id: int):
     """Stop & evict the cached bot client. Call from /rembot."""
     client = user_bots.pop(user_id, None)
     if client is not None:
+        logging.info(f"Stopping user bot for user {user_id}")
         try:
             await client.stop()
         except Exception:
