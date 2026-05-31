@@ -1,4 +1,5 @@
 import os
+import asyncio
 import asyncpg
 import logging
 import json
@@ -110,6 +111,21 @@ async def get_user(user_id) -> Optional[Dict]:
             if OWNER_ID and int(user_id) == int(OWNER_ID) and user.get("role") != "owner":
                 await set_user_role(user_id, "owner")
                 user["role"] = "owner"
+
+            if user.get("role") == "premium" and user.get("premium_expiry_date"):
+                from datetime import timezone
+                expiry = user["premium_expiry_date"]
+                now_utc = datetime.now(timezone.utc)
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if expiry < now_utc:
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE users SET role = 'free', updated_at = $1 WHERE telegram_id = $2",
+                            now_utc, int(user_id)
+                        )
+                    user["role"] = "free"
+                    logger.warning(f"Premium expired for user {user_id} — auto-downgraded to free")
 
             if user.get('premium_expiry_date'):
                 user['premium_expiry_date'] = user['premium_expiry_date'].isoformat()
@@ -285,31 +301,6 @@ async def check_and_update_quota(user_id):
         today = now.date()
         this_month_first = today.replace(day=1)
 
-        if user.get("role") == 'premium' and user.get("premium_expiry_date"):
-            try:
-                expiry_val = user["premium_expiry_date"]
-                if isinstance(expiry_val, str):
-                    expiry = datetime.fromisoformat(expiry_val)
-                else:
-                    expiry = expiry_val
-
-                if expiry.tzinfo is not None and now.tzinfo is None:
-                    from datetime import timezone
-                    now = datetime.now(timezone.utc)
-                elif expiry.tzinfo is None and now.tzinfo is not None:
-                    expiry = expiry.replace(tzinfo=None)
-
-                if expiry < now:
-                    async with pool.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE users SET role = 'free', updated_at = $1 WHERE telegram_id = $2",
-                            now, int(user_id)
-                        )
-                    user["role"] = "free"
-                    logger.warning(f"Premium expired for user {user_id} — auto-downgraded to free")
-            except Exception as e:
-                logger.error(f"Error checking premium expiry for {user_id}: {e}")
-
         if user.get("role") in ['premium', 'admin', 'owner']:
             return True, "Unlimited"
 
@@ -456,6 +447,32 @@ async def iter_user_ids(batch_size: int = 500):
             offset += batch_size
     except Exception as e:
         logger.error(f"Error iterating user IDs: {e}")
+
+
+async def sweep_expired_premium():
+    """Bulk-downgrade all users whose premium_expiry_date has passed."""
+    try:
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE users SET role = 'free', updated_at = $1 "
+                "WHERE role = 'premium' AND premium_expiry_date IS NOT NULL AND premium_expiry_date < $2",
+                now, now
+            )
+        count = int(result.split()[-1]) if result else 0
+        if count:
+            logger.warning(f"Premium sweep: auto-downgraded {count} expired user(s) to free")
+    except Exception as e:
+        logger.error(f"Error during premium expiry sweep: {e}")
+
+
+async def periodic_premium_sweep(interval_hours=24):
+    """Run sweep_expired_premium on startup and then every interval_hours."""
+    await asyncio.sleep(5)
+    while True:
+        await sweep_expired_premium()
+        await asyncio.sleep(interval_hours * 3600)
 
 
 async def get_user_count():
