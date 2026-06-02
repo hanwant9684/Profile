@@ -9,6 +9,11 @@ from pyrogram.errors.exceptions.bad_request_400 import (
     FileReferenceExpired,
     FileReferenceInvalid,
 )
+from pyrogram.errors import (
+    AuthKeyUnregistered, SessionRevoked, SessionExpired,
+    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated,
+    AccessTokenExpired, AccessTokenInvalid,
+)
 
 import time
 from bot.config import API_ID, API_HASH, user_bots, user_bots_last_used
@@ -86,8 +91,13 @@ async def get_user_bot(user_id: int):
         )
         try:
             await asyncio.wait_for(client.start(), timeout=30)
+        except (AccessTokenExpired, AccessTokenInvalid) as e:
+            logging.error(f"Bot token invalid for user {user_id}: {type(e).__name__} — clearing stored token")
+            from bot.database import remove_bot_token
+            await remove_bot_token(user_id)
+            raise
         except Exception as e:
-            logging.error(f"Failed to start user bot for {user_id}: {e}")
+            logging.error(f"Failed to start user bot for {user_id}: {e!r}")
             return None
         user_bots[user_id] = client
         user_bots_last_used[user_id] = time.time()
@@ -187,10 +197,13 @@ async def download_media(client, message, progress=None, progress_args=()):
             )
         except (FileReferenceExpired, FileReferenceInvalid):
             raise
+        except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
+            raise
         except Exception as e:
             if attempt == 2:
                 raise
-            logging.warning(f"Download attempt {attempt + 1} failed: {e}, retrying")
+            logging.warning(f"Download attempt {attempt + 1} failed: {e!r}, retrying")
             await asyncio.sleep(2 ** attempt)
     return None
 
@@ -272,7 +285,7 @@ async def upload_media(
             last_exc = e
             if attempt == 2 or any(code in str(e) for code in _NO_RETRY_CODES):
                 break
-            logging.warning(f"Upload attempt {attempt + 1} failed: {e}, retrying")
+            logging.warning(f"Upload attempt {attempt + 1} failed: {e!r}, retrying")
             await asyncio.sleep(2 ** attempt)
 
     if last_exc is not None:

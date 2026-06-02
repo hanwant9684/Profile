@@ -374,10 +374,10 @@ async def increment_quota(user_id, count=1):
                 '''UPDATE users SET
                     downloads_today = downloads_today + $1,
                     last_download_date = $2,
-                    downloads_this_month = downloads_this_month + $1,
+                    downloads_this_month = LEAST(downloads_this_month + $1, $5),
                     last_download_month = $3
                    WHERE telegram_id = $4''',
-                count, today, this_month_first, int(user_id)
+                count, today, this_month_first, int(user_id), MONTHLY_LIMIT
             )
     except Exception as e:
         logger.error(f"Error incrementing quota for {user_id}: {e}")

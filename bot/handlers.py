@@ -9,7 +9,11 @@ import pyrogram
 from pyrogram import filters, Client, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 from pyrogram import StopTransmission
-from pyrogram.errors import AuthKeyUnregistered, SessionRevoked
+from pyrogram.errors import (
+    AuthKeyUnregistered, SessionRevoked, SessionExpired,
+    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated,
+    AccessTokenExpired, AccessTokenInvalid,
+)
 
 from bot.config import (
     app, API_ID, API_HASH,
@@ -22,6 +26,19 @@ from bot.transfer import download_media, upload_media, truncate_caption, get_use
 
 
 MAX_FILE_SIZE = 2_000_000_000  # 2 GB — bot upload hard limit
+
+# Media types that have an actual file to download.
+# Everything else (Poll, Game, Location, Contact, Dice, Story-embed, etc.) has no file_id.
+_DOWNLOADABLE_TYPES = {
+    enums.MessageMediaType.AUDIO,
+    enums.MessageMediaType.DOCUMENT,
+    enums.MessageMediaType.PHOTO,
+    enums.MessageMediaType.STICKER,
+    enums.MessageMediaType.VIDEO,
+    enums.MessageMediaType.ANIMATION,
+    enums.MessageMediaType.VOICE,
+    enums.MessageMediaType.VIDEO_NOTE,
+}
 
 
 def _get_msg_file_size(m) -> int:
@@ -434,7 +451,8 @@ async def download_handler(
         if is_story:
             try:
                 story_obj = await user_client.get_stories(chat_id, msg_id)
-            except (AuthKeyUnregistered, SessionRevoked) as e:
+            except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
                 from bot.database import logout_user
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
                 await logout_user(user_id)
@@ -457,7 +475,8 @@ async def download_handler(
                     active_sessions.add(user_id)
                     msg = await user_client.get_messages(chat_id, msg_id, replies=0)
                     is_private = True
-            except (AuthKeyUnregistered, SessionRevoked) as e:
+            except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
                 from bot.database import logout_user
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
                 await logout_user(user_id)
@@ -487,7 +506,7 @@ async def download_handler(
                         user_client = _resolve_client
                         is_private = True
             except Exception as e:
-                logging.warning(f"Comment resolution failed (comment_id={comment_id}): {e} — falling back to original post")
+                logging.debug(f"Comment resolution failed (comment_id={comment_id}): {e} — falling back to original post")
 
         if not is_story and thread_id is not None and comment_id is None:
             _resolve_client = user_client
@@ -518,6 +537,18 @@ async def download_handler(
 
         has_media = bool(getattr(msg, "media", None))
         has_text = bool(getattr(msg, "text", None))
+
+        # Guard: reject non-downloadable media types (Poll, Game, Location, Contact, Dice, etc.)
+        # Story URLs set is_story=True and msg is a Story object whose .media is a raw Photo/Video,
+        # not a MessageMediaType enum — skip the enum check for that path.
+        if has_media and not is_story and isinstance(msg.media, enums.MessageMediaType):
+            if msg.media not in _DOWNLOADABLE_TYPES:
+                type_name = msg.media.name.replace("_", " ").title()
+                await update_status(
+                    status,
+                    f"❌ **{type_name}** messages cannot be downloaded — there is no file to send."
+                )
+                return None
 
         if not has_media and not has_text:
             await update_status(status,
@@ -598,7 +629,8 @@ async def download_handler(
                         pass
                 active_downloads.discard(user_id)
                 return msg
-            except (AuthKeyUnregistered, SessionRevoked):
+            except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
                 raise
             except Exception as e:
                 error_str = str(e)
@@ -640,7 +672,11 @@ async def download_handler(
         if not has_media:
             text = getattr(msg, "text", None) or ""
             entities = getattr(msg, "entities", None) or []
-            upload_bot = await get_user_bot(user_id)
+            try:
+                upload_bot = await get_user_bot(user_id)
+            except (AccessTokenExpired, AccessTokenInvalid):
+                await update_status(status, "❌ Your upload bot's token is no longer valid. Please use /setbot to register a new one.")
+                return None
             sender = upload_bot if upload_bot is not None else client
             try:
                 await update_status(status, "✍️ Copying text message...")
@@ -670,7 +706,11 @@ async def download_handler(
                 return None
 
         is_premium = user.get("role") in ("premium", "admin", "owner")
-        user_bot = await get_user_bot(user_id)
+        try:
+            user_bot = await get_user_bot(user_id)
+        except (AccessTokenExpired, AccessTokenInvalid):
+            await update_status(status, "❌ Your upload bot's token is no longer valid. Please use /setbot to register a new one.")
+            return None
 
         if user_bot is None and is_premium:
             await update_status(
@@ -696,6 +736,13 @@ async def download_handler(
                 for m in messages
             ]
             results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+            # If any album item failed with a dead session, propagate immediately —
+            # the outer handler will clear the session and notify the user.
+            for result in results:
+                if isinstance(result, (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                                       AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated)):
+                    raise result
 
             paths = []
             valid_pairs = []
@@ -894,12 +941,15 @@ async def download_handler(
                                 reply_markup=markup,
                             )
                             return None
-                        logging.warning(f"User bot upload failed for {user_id}, falling back to main bot: {bot_exc}")
+                        logging.warning(f"User bot upload failed for {user_id}, falling back to main bot: {bot_exc!r}")
                         await update_status(status, "⚠️ Your bot failed, retrying with main bot...")
 
                 if not _uploaded:
                     await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
 
+            except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
+                raise  # propagate to outer handler — session will be cleared and user notified
             except asyncio.TimeoutError:
                 await update_status(status, "❌ Transfer timed out (30 min limit). Please try again.")
             except Exception as e:
@@ -919,6 +969,16 @@ async def download_handler(
 
         return msg
 
+    except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+            AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
+        from bot.database import logout_user
+        logging.warning(f"Session error for user {user_id}: {type(e).__name__} — session cleared")
+        await logout_user(user_id)
+        try:
+            await update_status(status, "❌ Your Telegram session has expired or was revoked. Please use /login to reconnect.")
+        except Exception:
+            pass
+        return None
     except Exception as e:
         logging.error(f"Handler error for user {user_id}: {e}")
         try:
