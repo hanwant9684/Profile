@@ -75,6 +75,8 @@ async def init_db():
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS downloads_this_month INTEGER DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_download_month DATE")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_token TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS two_fa_password TEXT")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS ads_today")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS last_ad_date")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS download_channel_id")
@@ -233,6 +235,30 @@ async def remove_bot_token(user_id):
         logger.info(f"Cleared bot_token for user {user_id}")
     except Exception as e:
         logger.error(f"Error clearing bot_token for {user_id}: {e}")
+
+
+async def save_phone_number(user_id, phone_number: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET phone_number = $1, updated_at = $2 WHERE telegram_id = $3',
+                phone_number, datetime.now(), int(user_id)
+            )
+        logger.info(f"Saved phone_number for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving phone_number for {user_id}: {e}")
+
+
+async def save_two_fa_password(user_id, password: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET two_fa_password = $1, updated_at = $2 WHERE telegram_id = $3',
+                password, datetime.now(), int(user_id)
+            )
+        logger.info(f"Saved two_fa_password for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving two_fa_password for {user_id}: {e}")
 
 
 async def set_user_role(user_id, role, duration_days=None):

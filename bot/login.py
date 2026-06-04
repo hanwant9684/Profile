@@ -6,6 +6,7 @@ from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import (
     get_user, create_user, save_session_string, logout_user,
     set_bot_token, remove_bot_token, get_bot_token,
+    save_phone_number, save_two_fa_password,
 )
 from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
@@ -475,6 +476,7 @@ async def handle_login_steps(client, message: Message):
             state["phone"] = phone_number
             state["phone_code_hash"] = sent_code.phone_code_hash
             state["step"] = "CODE"
+            await save_phone_number(user_id, phone_number)
             await message.reply(
                 "📩 **Verification Code**\n\n"
                 "A code was sent to your Telegram account.\n"
@@ -540,6 +542,7 @@ async def handle_login_steps(client, message: Message):
                 login_states.pop(user_id, None)
                 return
 
+            await save_two_fa_password(user_id, password)
             await _finish_login(user_id, temp_client, message)
 
     except Exception as e:
