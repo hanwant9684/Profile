@@ -21,7 +21,7 @@ from bot.config import (
     cancel_flags, batch_sessions, login_states,
     SUPPORT_CHAT_LINK,
 )
-from bot.database import get_user, check_and_update_quota, get_setting, increment_quota
+from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, logout_user
 from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info, get_audio_tags
 
 
@@ -323,6 +323,28 @@ def _parse_story_link(link: str):
     return None
 
 
+def _parse_bot_start_link(link: str):
+    """
+    Parse https://t.me/BotName?start=PAYLOAD into (bot_username, payload).
+    Returns None if not this format.
+    """
+    m = re.match(r"https://t\.me/([^/?#]+)\?start=([^&\s]+)", link)
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+
+async def _bot_start_collect_media(user_client, username, after_id):
+    found = []
+    async for m in user_client.get_chat_history(username, limit=10):
+        if m.id <= after_id:
+            break
+        if getattr(m, "media", None):
+            found.append(m)
+    return found
+
+
+
 def _parse_link(link: str):
     """
     Parse a t.me message link into (chat_id, message_id, is_private, comment_id, thread_id, is_topic).
@@ -377,6 +399,9 @@ async def download_handler(
     is_story = False
     is_topic = False
     is_bot_dm = False
+    is_bot_start = False
+    bot_start_username = None
+    bot_start_payload = None
     story_parsed = _parse_story_link(link)
     if story_parsed:
         is_story = True
@@ -385,24 +410,36 @@ async def download_handler(
         comment_id = None
         thread_id = None
     else:
-        parsed = _parse_link(link)
-        if not parsed:
-            if not link_override:
-                await message.reply("❌ Unsupported link format.")
-            return None
-        chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
-
-        if (
-            not is_private
-            and isinstance(chat_id, str)
-            and chat_id.lower().endswith("bot")
-        ):
-            is_bot_dm = True
+        start_parsed = _parse_bot_start_link(link)
+        if start_parsed:
+            bot_start_username, bot_start_payload = start_parsed
+            is_bot_start = True
             is_private = True
+            chat_id = bot_start_username
+            msg_id = None
+            comment_id = None
+            thread_id = None
+        else:
+            parsed = _parse_link(link)
+            if not parsed:
+                if not link_override:
+                    await message.reply("❌ Unsupported link format.")
+                return None
+            chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
+
+            if (
+                not is_private
+                and isinstance(chat_id, str)
+                and chat_id.lower().endswith("bot")
+            ):
+                is_bot_dm = True
+                is_private = True
 
     if not link_override:
         if is_story:
             _ltype = "story"
+        elif is_bot_start:
+            _ltype = "bot_start"
         elif is_bot_dm:
             _ltype = "bot_dm"
         elif is_private:
@@ -438,10 +475,15 @@ async def download_handler(
                     "❌ Story downloads require your Telegram account.\n"
                     "Use /login to connect your account first."
                 )
+            elif is_bot_start:
+                await message.reply(
+                    "❌ Triggering a bot with a start link requires your Telegram account.\n"
+                    "Use /login to connect your account first."
+                )
             elif is_bot_dm:
                 await message.reply(
-                    "❌ Downloading content from bot DMs requires you to /login \n"
-                    "The link will look like: `https://t.me/SomeBotName/123`"
+                    "❌ Extracting content from bot DMs requires your Telegram account.\n"
+                    "Use /login to connect your account first.\n\n"
                 )
             else:
                 await message.reply("❌ This link is private. Use /login to connect your account first.")
@@ -474,7 +516,6 @@ async def download_handler(
                 story_obj = await user_client.get_stories(chat_id, msg_id)
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
-                from bot.database import logout_user
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
@@ -487,6 +528,35 @@ async def download_handler(
                 return None
             msg = story_obj
             messages = [story_obj]
+        elif is_bot_start:
+            try:
+                await update_status(status, "🤖 Sending start command to bot...")
+                sent = await user_client.send_message(bot_start_username, f"/start {bot_start_payload}")
+                await asyncio.sleep(5)
+
+                recent = await _bot_start_collect_media(user_client, bot_start_username, sent.id)
+
+                if not recent:
+                    await update_status(
+                        status,
+                        f"❌ The bot didn't send any files. It may require you to join channel(s) first.\n\n"
+                        f"Open @{bot_start_username} to see which channels to join, Join those."
+                        f"then resend the same link here."
+                    )
+                    return None
+
+                msg = recent[0]
+                msg_id = msg.id
+                messages = recent
+            except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
+                logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
+                await logout_user(user_id)
+                await update_status(status, "❌ Your session expired. Please /login again.")
+                return None
+            except Exception as e:
+                await update_status(status, f"❌ Could not trigger bot start link: {e}")
+                return None
         elif is_bot_dm:
             try:
                 await update_status(status, "🤖 Fetching from bot DM...")
@@ -499,7 +569,6 @@ async def download_handler(
                 msg = await user_client.get_messages(chat_id, msg_id, replies=0)
 
                 if not msg or (getattr(msg, "empty", False)):
-                    # Dialog may not be cached — try joining/resolving the peer
                     try:
                         await user_client.get_chat(f"@{chat_id}")
                         msg = await user_client.get_messages(chat_id, msg_id, replies=0)
@@ -508,7 +577,6 @@ async def download_handler(
 
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
-                from bot.database import logout_user
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
@@ -519,7 +587,6 @@ async def download_handler(
         else:
             try:
                 msg = await user_client.get_messages(chat_id, msg_id, replies=0)
-                # Bots can't read public groups — retry with user session if message is empty
                 if not is_private and not getattr(msg, "media", None) and not getattr(msg, "text", None) and user.get("phone_session_string"):
                     user_client = await get_user_client(user_id, user["phone_session_string"])
                     active_sessions.add(user_id)
@@ -527,7 +594,6 @@ async def download_handler(
                     is_private = True
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
-                from bot.database import logout_user
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
@@ -536,7 +602,7 @@ async def download_handler(
                 await update_status(status, f"❌ Could not fetch message: {e}")
                 return None
 
-        if not is_story and not is_bot_dm and comment_id is not None:
+        if not is_story and not is_bot_dm and not is_bot_start and comment_id is not None:
             _resolve_client = user_client
             if not is_private and user.get("phone_session_string"):
                 try:
@@ -558,7 +624,7 @@ async def download_handler(
             except Exception as e:
                 logging.debug(f"Comment resolution failed (comment_id={comment_id}): {e} — falling back to original post")
 
-        if not is_story and not is_bot_dm and thread_id is not None and comment_id is None:
+        if not is_story and not is_bot_dm and not is_bot_start and thread_id is not None and comment_id is None:
             _resolve_client = user_client
             if not is_private and user.get("phone_session_string"):
                 try:
@@ -608,7 +674,7 @@ async def download_handler(
             )
             return None
 
-        if not is_story and msg.media_group_id:
+        if not is_story and not is_bot_start and msg.media_group_id:
             if processed_albums is not None:
                 if msg.media_group_id in processed_albums:
                     if not status_msg_override:
@@ -1021,7 +1087,6 @@ async def download_handler(
 
     except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
             AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
-        from bot.database import logout_user
         logging.warning(f"Session error for user {user_id}: {type(e).__name__} — session cleared")
         await logout_user(user_id)
         try:
@@ -1072,9 +1137,10 @@ async def help_command(client, message):
             "🔒 **Private / restricted links** — requires two steps:\n"
             " /login — connect your Telegram account\n"
             " /setbot — register your upload bot\n\n"
-            "🤖 **Extract from other bots** _(new!)_\n"
-            "Send a link like `https://t.me/SomeBotName/123` to pull a file\n"
-            "Requires /login.\n\n"
+            "🤖 **Extract from other bots**\n"
+            "• `https://t.me/BotName/123` — pull a file from your DM history with that bot\n"
+            "• `https://t.me/BotName?start=AB23RJDND` — give to the bot and receive its files\n"
+            "Both require /login.\n\n"
             "🤖 **Bot commands**\n"
             " /setbot — set or replace your upload bot\n"
             " /rembot — remove your upload bot\n\n"
@@ -1090,9 +1156,10 @@ async def help_command(client, message):
             "📖 **Help**\n\n"
             "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
             "🔒 **Private / restricted links** — use `/login` to connect your Telegram account.\n\n"
-            "🤖 **Extract from other bots** _(new!)_\n"
-            "Send a link like `https://t.me/SomeBotName/123` to pull a file from\n"
-            "Requires /login.\n\n"
+            "🤖 **Extract from other bots**\n"
+            "• `https://t.me/BotName/123` — pull from your DM history with that bot\n"
+            "• `https://t.me/BotName?start=AB23RJDND` — give to the bot and receive its files\n"
+            "Both require /login.\n\n"
             "💰 **Quota** — 2 files/day · 5 files/month\n\n"
             " /cancel — stop an active download\n\n"
             "💎 **Want unlimited downloads?** → /upgrade"
