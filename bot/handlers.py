@@ -376,6 +376,7 @@ async def download_handler(
 
     is_story = False
     is_topic = False
+    is_bot_dm = False
     story_parsed = _parse_story_link(link)
     if story_parsed:
         is_story = True
@@ -391,8 +392,23 @@ async def download_handler(
             return None
         chat_id, msg_id, is_private, comment_id, thread_id, is_topic = parsed
 
+        if (
+            not is_private
+            and isinstance(chat_id, str)
+            and chat_id.lower().endswith("bot")
+        ):
+            is_bot_dm = True
+            is_private = True
+
     if not link_override:
-        _ltype = "story" if is_story else ("private" if is_private else "public")
+        if is_story:
+            _ltype = "story"
+        elif is_bot_dm:
+            _ltype = "bot_dm"
+        elif is_private:
+            _ltype = "private"
+        else:
+            _ltype = "public"
         logging.info(f"Download requested: user={user_id} type={_ltype} link={link[:80]}")
 
     if user_override is not None:
@@ -421,6 +437,11 @@ async def download_handler(
                 await message.reply(
                     "❌ Story downloads require your Telegram account.\n"
                     "Use /login to connect your account first."
+                )
+            elif is_bot_dm:
+                await message.reply(
+                    "❌ Downloading content from bot DMs requires you to /login \n"
+                    "The link will look like: `https://t.me/SomeBotName/123`"
                 )
             else:
                 await message.reply("❌ This link is private. Use /login to connect your account first.")
@@ -466,6 +487,35 @@ async def download_handler(
                 return None
             msg = story_obj
             messages = [story_obj]
+        elif is_bot_dm:
+            try:
+                await update_status(status, "🤖 Fetching from bot DM...")
+                try:
+                    async for _ in user_client.get_dialogs(limit=50):
+                        pass
+                except Exception:
+                    pass
+
+                msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+
+                if not msg or (getattr(msg, "empty", False)):
+                    # Dialog may not be cached — try joining/resolving the peer
+                    try:
+                        await user_client.get_chat(f"@{chat_id}")
+                        msg = await user_client.get_messages(chat_id, msg_id, replies=0)
+                    except Exception:
+                        pass
+
+            except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
+                    AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
+                from bot.database import logout_user
+                logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
+                await logout_user(user_id)
+                await update_status(status, "❌ Your session expired. Please /login again.")
+                return None
+            except Exception as e:
+                await update_status(status, f"❌ Could not fetch message from bot DM: {e}")
+                return None
         else:
             try:
                 msg = await user_client.get_messages(chat_id, msg_id, replies=0)
@@ -486,7 +536,7 @@ async def download_handler(
                 await update_status(status, f"❌ Could not fetch message: {e}")
                 return None
 
-        if not is_story and comment_id is not None:
+        if not is_story and not is_bot_dm and comment_id is not None:
             _resolve_client = user_client
             if not is_private and user.get("phone_session_string"):
                 try:
@@ -508,7 +558,7 @@ async def download_handler(
             except Exception as e:
                 logging.debug(f"Comment resolution failed (comment_id={comment_id}): {e} — falling back to original post")
 
-        if not is_story and thread_id is not None and comment_id is None:
+        if not is_story and not is_bot_dm and thread_id is not None and comment_id is None:
             _resolve_client = user_client
             if not is_private and user.get("phone_session_string"):
                 try:
@@ -1022,6 +1072,9 @@ async def help_command(client, message):
             "🔒 **Private / restricted links** — requires two steps:\n"
             " /login — connect your Telegram account\n"
             " /setbot — register your upload bot\n\n"
+            "🤖 **Extract from other bots** _(new!)_\n"
+            "Send a link like `https://t.me/SomeBotName/123` to pull a file\n"
+            "Requires /login.\n\n"
             "🤖 **Bot commands**\n"
             " /setbot — set or replace your upload bot\n"
             " /rembot — remove your upload bot\n\n"
@@ -1037,6 +1090,9 @@ async def help_command(client, message):
             "📖 **Help**\n\n"
             "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
             "🔒 **Private / restricted links** — use `/login` to connect your Telegram account.\n\n"
+            "🤖 **Extract from other bots** _(new!)_\n"
+            "Send a link like `https://t.me/SomeBotName/123` to pull a file from\n"
+            "Requires /login.\n\n"
             "💰 **Quota** — 2 files/day · 5 files/month\n\n"
             " /cancel — stop an active download\n\n"
             "💎 **Want unlimited downloads?** → /upgrade"
