@@ -1196,7 +1196,7 @@ async def upgrade_command(client, message):
         f"🇮🇳 [UPI]({UPI_ID})\n"
         f"💲 [PayPal]({PAYPAL_LINK})\n"
         f"🍎 [Apple Pay]({APPLE_PAY_ID})\n"
-        f"💳 [Card]({CARD_PAYMENT_LINK})\n\n"
+        f"💳 [Credit/Debit Card]({CARD_PAYMENT_LINK})\n\n"
         "After payment send screenshot to **@Owner_Wolfy**.",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
         reply_markup=InlineKeyboardMarkup([
