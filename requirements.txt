@@ -1,7 +1,14 @@
+aiofiles
+aiohttp
 asyncpg
+certifi
+flask
 httpx
-pyrotgfork
+psutil
 pymediainfo
+pyrotgfork
 python-dotenv
+pyyaml
+redis
 tgcrypto
 uvloop
