@@ -465,7 +465,7 @@ async def download_handler(
                 f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip(),
             )
 
-    if user.get("role") == "banned":
+    if user.get("is_banned") or user.get("role") == "banned":
         if not link_override:
             await message.reply("❌ You are banned from using this bot.")
         return None
@@ -503,11 +503,22 @@ async def download_handler(
 
     status = status_msg_override or _LazyStatus(message)
 
-    async with global_download_semaphore:
+    # Semaphore held for the entire transfer — limits real concurrency to MAX_CONCURRENT_DOWNLOADS.
+    # The per-user active_downloads check inside prevents the same user queueing themselves twice.
+    acquired = False
+    try:
+        await global_download_semaphore.acquire()
+        acquired = True
         if user_id in active_downloads:
+            global_download_semaphore.release()
+            acquired = False
             await update_status(status, "⚠️ You already have an active download. Please wait.")
             return None
         active_downloads.add(user_id)
+    except Exception:
+        if acquired:
+            global_download_semaphore.release()
+        raise
 
     try:
         if is_private or is_story:
@@ -1176,8 +1187,10 @@ async def download_handler(
                 raise  # propagate to outer handler — session will be cleared and user notified
             except asyncio.TimeoutError:
                 await update_status(status, "❌ Transfer timed out. The file may be too large or the connection too slow. Please try again.")
+                return None  # do not count as success or increment quota
             except Exception as e:
                 logging.error(f"Download/upload error for user {user_id}: {e}")
+                return None  # do not count as success or increment quota
             finally:
                 if path and os.path.exists(path):
                     os.remove(path)
@@ -1213,6 +1226,8 @@ async def download_handler(
         active_downloads.discard(user_id)
         active_sessions.discard(user_id)
         cancel_flags.discard(user_id)
+        if acquired:
+            global_download_semaphore.release()
         if hasattr(progress_bar, "_data") and status:
             progress_bar._data.pop(status.id, None)
 

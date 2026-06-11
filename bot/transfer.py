@@ -68,11 +68,24 @@ async def validate_bot_token(bot_token: str):
 async def get_user_bot(user_id: int):
     """Return the user's started bot Client, or None if they haven't run /setbot.
     Lazily instantiates and starts on first call; cached afterwards.
+    Re-raises AccessTokenExpired/Invalid so callers can show a user-facing message.
     """
     cached = user_bots.get(user_id)
     if cached is not None:
-        user_bots_last_used[user_id] = time.time()
-        return cached
+        # Fix 5: verify the cached client is still connected; evict and re-instantiate if not.
+        try:
+            if not cached.is_connected:
+                logging.warning(f"Cached user bot for {user_id} is disconnected — evicting and reconnecting")
+                user_bots.pop(user_id, None)
+                user_bots_last_used.pop(user_id, None)
+                cached = None
+            else:
+                user_bots_last_used[user_id] = time.time()
+                return cached
+        except Exception:
+            user_bots.pop(user_id, None)
+            user_bots_last_used.pop(user_id, None)
+            cached = None
 
     from bot.database import get_bot_token  # lazy to avoid circular import
     bot_token = await get_bot_token(user_id)
@@ -96,6 +109,7 @@ async def get_user_bot(user_id: int):
         try:
             await asyncio.wait_for(client.start(), timeout=30)
         except (AccessTokenExpired, AccessTokenInvalid) as e:
+            # Fix 4: re-raise so batch/mlinks callers can show a clear user-facing message.
             logging.error(f"Bot token invalid for user {user_id}: {type(e).__name__} — clearing stored token")
             from bot.database import remove_bot_token
             await remove_bot_token(user_id)

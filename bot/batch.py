@@ -66,7 +66,14 @@ async def batch_handler(client, message):
         return
 
     # Upfront setbot check — fail fast before iterating any items
-    user_bot = await get_user_bot(user_id)
+    try:
+        user_bot = await get_user_bot(user_id)
+    except Exception:
+        await message.reply(
+            "❌ **Your upload bot token is invalid or expired.**\n\n"
+            "Use /rembot to clear it, then /setbot to register a new one."
+        )
+        return
     if user_bot is None:
         await message.reply(
             "❌ **Upload bot not set up.**\n\n"
@@ -214,7 +221,14 @@ async def mlinks_handler(client, message):
         return
 
     # Upfront setbot check — fail fast before iterating any links
-    user_bot = await get_user_bot(user_id)
+    try:
+        user_bot = await get_user_bot(user_id)
+    except Exception:
+        await message.reply(
+            "❌ **Your upload bot token is invalid or expired.**\n\n"
+            "Use /rembot to clear it, then /setbot to register a new one."
+        )
+        return
     if user_bot is None:
         await message.reply(
             "❌ **Upload bot not set up.**\n\n"

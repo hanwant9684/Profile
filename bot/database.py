@@ -37,9 +37,6 @@ async def init_db():
             logger.error("DATABASE_URL is not set")
             return
 
-        from bot.cloud_backup import restore_from_github_async
-        await restore_from_github_async()
-
         pool = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=3,
