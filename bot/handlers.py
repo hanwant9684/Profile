@@ -22,10 +22,15 @@ from bot.config import (
     SUPPORT_CHAT_LINK,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, logout_user
-from bot.transfer import download_media, upload_media, truncate_caption, get_user_bot, get_media_info, get_audio_tags
+from bot.transfer import (
+    download_media, upload_media, truncate_caption, get_user_bot,
+    get_media_info, get_audio_tags,
+    check_user_premium, split_file,
+    BOT_MAX_FILE_SIZE, PART_SAFE_SIZE,
+)
 
 
-MAX_FILE_SIZE = 2_000_000_000  # 2 GB — bot upload hard limit
+PREMIUM_MAX_FILE_SIZE = 4_000_000_000  # 4 GB — Telegram Premium user limit
 
 # Media types that have an actual file to download.
 # Everything else (Poll, Game, Location, Contact, Dice, Story-embed, etc.) has no file_id.
@@ -682,7 +687,9 @@ async def download_handler(
                             await status.delete()
                         except Exception:
                             pass
-                    return msg.id
+                    # Sentinel: album already transferred by an earlier message in this batch.
+                    # Callers (batch/mlinks) should silently skip this — neither done nor skipped.
+                    return "ALBUM_DEDUP"
                 processed_albums.add(msg.media_group_id)
             try:
                 messages = await user_client.get_media_group(chat_id, msg_id)
@@ -816,9 +823,13 @@ async def download_handler(
         # Pre-download file size check — reject before wasting bandwidth
         for m in messages:
             sz = _get_msg_file_size(m)
-            if sz and sz > MAX_FILE_SIZE:
+            if sz and sz > PREMIUM_MAX_FILE_SIZE:
                 readable = f"{sz / 1_000_000_000:.1f} GB"
-                await update_status(status, f"❌ File too large ({readable}). Maximum supported size is 2 GB.")
+                await update_status(status, f"❌ File too large ({readable}). Maximum supported size is 4 GB.")
+                return None
+            if sz and sz > BOT_MAX_FILE_SIZE and len(messages) > 1:
+                readable = f"{sz / 1_000_000_000:.2f} GB"
+                await update_status(status, f"❌ Album contains a file that is {readable}. Files over 2 GB cannot be part of an album download.")
                 return None
 
         is_premium = user.get("role") in ("premium", "admin", "owner")
@@ -1034,40 +1045,137 @@ async def download_handler(
                     force_document=(m.media == enums.MessageMediaType.DOCUMENT),
                 )
 
-                _uploaded = False
-                if upload_client is not client:
-                    try:
-                        await asyncio.wait_for(upload_media(upload_client, **upload_kwargs), timeout=1800)
-                        _uploaded = True
-                    except Exception as bot_exc:
-                        error_str = str(bot_exc)
-                        if any(c in error_str for c in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
-                            bot_url = None
-                            try:
-                                me = await upload_client.get_me()
-                                bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
-                            except Exception:
-                                pass
-                            markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]]) if bot_url else None
-                            await update_status(
-                                status,
-                                "❌ **Your bot couldn't send the file.**\n\n"
-                                "You haven't started your bot yet. "
-                                "Tap the button below, press **Start**, then resend the link.",
-                                reply_markup=markup,
-                            )
-                            return None
-                        logging.warning(f"User bot upload failed for {user_id}, falling back to main bot: {bot_exc!r}")
-                        await update_status(status, "⚠️ Your bot failed, retrying with main bot...")
+                # --- Large-file routing (> 2 GB) ---
+                actual_size = os.path.getsize(path)
+                _large_file_handled = False
 
-                if not _uploaded:
-                    await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
+                if actual_size > BOT_MAX_FILE_SIZE:
+                    has_tg_premium = await check_user_premium(user_client)
+
+                    if has_tg_premium:
+                        # Case 1: Telegram Premium → upload full file via user's account (up to 4 GB)
+                        readable = f"{actual_size / 1_000_000_000:.2f} GB"
+                        await update_status(
+                            status,
+                            f"📤 Uploading {readable} file via your Telegram account (Premium)...",
+                        )
+                        await asyncio.wait_for(
+                            upload_media(user_client, **upload_kwargs),
+                            timeout=3600,
+                        )
+                        _large_file_handled = True
+
+                    else:
+                        # Case 2: No Premium → split into parts ≤ 1.99 GB and upload each via user_bot
+                        readable = f"{actual_size / 1_000_000_000:.2f} GB"
+                        await update_status(
+                            status,
+                            f"⚠️ File is {readable}. Your Telegram account doesn't have Premium.\n"
+                            f"📂 Splitting into parts and uploading...",
+                        )
+                        part_paths = []
+                        try:
+                            part_paths = await split_file(path, PART_SAFE_SIZE)
+                            total_parts = len(part_paths)
+                            orig_name = file_name or os.path.basename(path)
+                            base_name, ext_name = os.path.splitext(orig_name)
+
+                            for i, part_path in enumerate(part_paths, 1):
+                                if user_id in cancel_flags:
+                                    cancel_flags.discard(user_id)
+                                    await update_status(status, "🛑 Cancelled.")
+                                    return None
+
+                                part_fn  = f"{base_name}.part{i}of{total_parts}{ext_name}"
+                                part_cap = truncate_caption(
+                                    f"{caption}\n📦 Part {i}/{total_parts}" if caption
+                                    else f"📦 Part {i}/{total_parts}"
+                                )
+                                part_kw = {
+                                    **upload_kwargs,
+                                    "path":         part_path,
+                                    "caption":      part_cap,
+                                    "file_name":    part_fn,
+                                    "progress_args": (status, f"📤 Uploading part {i}/{total_parts}"),
+                                }
+                                await update_status(status, f"📤 Uploading part {i}/{total_parts}...")
+
+                                _part_up = False
+                                if upload_client is not client:
+                                    try:
+                                        await asyncio.wait_for(
+                                            upload_media(upload_client, **part_kw), timeout=1800
+                                        )
+                                        _part_up = True
+                                    except Exception as part_exc:
+                                        error_str = str(part_exc)
+                                        if any(c in error_str for c in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
+                                            bot_url = None
+                                            try:
+                                                me = await upload_client.get_me()
+                                                bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
+                                            except Exception:
+                                                pass
+                                            markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]]) if bot_url else None
+                                            await update_status(
+                                                status,
+                                                "❌ **Your bot couldn't send the file part.**\n\n"
+                                                "You haven't started your bot yet. "
+                                                "Tap the button below, press **Start**, then resend the link.",
+                                                reply_markup=markup,
+                                            )
+                                            return None
+                                        logging.warning(f"User bot part {i} upload failed for {user_id}, falling back: {part_exc!r}")
+
+                                if not _part_up:
+                                    await asyncio.wait_for(
+                                        upload_media(client, **part_kw), timeout=1800
+                                    )
+
+                        finally:
+                            for pp in part_paths:
+                                try:
+                                    if os.path.exists(pp):
+                                        os.remove(pp)
+                                except Exception:
+                                    pass
+                        _large_file_handled = True
+
+                if not _large_file_handled:
+                    _uploaded = False
+                    if upload_client is not client:
+                        try:
+                            await asyncio.wait_for(upload_media(upload_client, **upload_kwargs), timeout=1800)
+                            _uploaded = True
+                        except Exception as bot_exc:
+                            error_str = str(bot_exc)
+                            if any(c in error_str for c in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
+                                bot_url = None
+                                try:
+                                    me = await upload_client.get_me()
+                                    bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
+                                except Exception:
+                                    pass
+                                markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]]) if bot_url else None
+                                await update_status(
+                                    status,
+                                    "❌ **Your bot couldn't send the file.**\n\n"
+                                    "You haven't started your bot yet. "
+                                    "Tap the button below, press **Start**, then resend the link.",
+                                    reply_markup=markup,
+                                )
+                                return None
+                            logging.warning(f"User bot upload failed for {user_id}, falling back to main bot: {bot_exc!r}")
+                            await update_status(status, "⚠️ Your bot failed, retrying with main bot...")
+
+                    if not _uploaded:
+                        await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
 
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
                 raise  # propagate to outer handler — session will be cleared and user notified
             except asyncio.TimeoutError:
-                await update_status(status, "❌ Transfer timed out (30 min limit). Please try again.")
+                await update_status(status, "❌ Transfer timed out. The file may be too large or the connection too slow. Please try again.")
             except Exception as e:
                 logging.error(f"Download/upload error for user {user_id}: {e}")
             finally:

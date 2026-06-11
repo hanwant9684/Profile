@@ -5,6 +5,7 @@ import logging
 from pyrogram import filters
 from bot.config import app, batch_cancel_flags, batch_sessions
 from bot.database import get_user
+from bot.transfer import get_user_bot
 
 
 # --- Link parsing helpers (batch-specific) ---
@@ -64,6 +65,20 @@ async def batch_handler(client, message):
         )
         return
 
+    # Upfront setbot check — fail fast before iterating any items
+    user_bot = await get_user_bot(user_id)
+    if user_bot is None:
+        await message.reply(
+            "❌ **Upload bot not set up.**\n\n"
+            "Batch download requires your own upload bot.\n"
+            "Use /setbot to register one before running /batch.\n\n"
+            "1. Open @BotFather → `/newbot`\n"
+            "2. Copy the token\n"
+            "3. Run /setbot and send the token when prompted\n"
+            "4. Press **Start** on your bot"
+        )
+        return
+
     if user_id in batch_sessions:
         await message.reply("⚠️ You already have an active batch. Use /cancelbatch to stop it.")
         return
@@ -98,6 +113,12 @@ async def batch_handler(client, message):
         if not end_info:
             await message.reply("❌ Invalid end link.")
             return
+        # Both links must point to the same channel/topic
+        if (end_info["channel_part"] != info["channel_part"] or
+                end_info["topic_part"] != info["topic_part"] or
+                end_info["is_private"] != info["is_private"]):
+            await message.reply("❌ Start and end links must be from the same channel and topic.")
+            return
         end_id = end_info["msg_id"]
         if start_id > end_id:
             start_id, end_id = end_id, start_id
@@ -105,8 +126,6 @@ async def batch_handler(client, message):
         if count > 50:
             await message.reply("⚠️ Maximum 50 files per batch.")
             return
-
-    preview_links = [_build_batch_link(info, mid) for mid in range(start_id, min(start_id + 3, end_id + 1))]
 
     status = await message.reply(
         f"🚀 **Batch started** — {count} item(s)\n\n"
@@ -118,8 +137,9 @@ async def batch_handler(client, message):
     done = skipped = 0
     batch_sessions.add(user_id)
 
+    ids = list(range(start_id, end_id + 1))
     try:
-        for idx, mid in enumerate(range(start_id, end_id + 1), 1):
+        for idx, mid in enumerate(ids, 1):
             if user_id in batch_cancel_flags:
                 batch_cancel_flags.discard(user_id)
                 await status.edit_text(
@@ -138,9 +158,6 @@ async def batch_handler(client, message):
             except Exception:
                 pass
 
-            if idx > 1:
-                await asyncio.sleep(10)
-
             try:
                 from bot.handlers import download_handler
                 result = await download_handler(
@@ -151,13 +168,23 @@ async def batch_handler(client, message):
                     skip_quota=True,
                     user_override=user,
                 )
-                if result is not None:
+                if result == "ALBUM_DEDUP":
+                    # Already transferred as part of an earlier album — skip immediately,
+                    # no sleep needed since no API work was done.
+                    pass
+                elif result is not None:
                     done += 1
+                    if mid != ids[-1]:
+                        await asyncio.sleep(10)
                 else:
                     skipped += 1
+                    if mid != ids[-1]:
+                        await asyncio.sleep(10)
             except Exception as e:
                 logging.error(f"Batch item error (link={link}): {e}")
                 skipped += 1
+                if mid != ids[-1]:
+                    await asyncio.sleep(10)
 
         try:
             await status.edit_text(
@@ -183,6 +210,20 @@ async def mlinks_handler(client, message):
         await message.reply(
             "❌ **Multi-link download is for Premium users only.**\n\n"
             "👉 Use /upgrade to see plans."
+        )
+        return
+
+    # Upfront setbot check — fail fast before iterating any links
+    user_bot = await get_user_bot(user_id)
+    if user_bot is None:
+        await message.reply(
+            "❌ **Upload bot not set up.**\n\n"
+            "Multi-link download requires your own upload bot.\n"
+            "Use /setbot to register one before running /mlinks.\n\n"
+            "1. Open @BotFather → `/newbot`\n"
+            "2. Copy the token\n"
+            "3. Run /setbot and send the token when prompted\n"
+            "4. Press **Start** on your bot"
         )
         return
 
@@ -238,9 +279,6 @@ async def mlinks_handler(client, message):
             except Exception:
                 pass
 
-            if idx > 1:
-                await asyncio.sleep(10)
-
             try:
                 from bot.handlers import download_handler
                 result = await download_handler(
@@ -251,13 +289,23 @@ async def mlinks_handler(client, message):
                     skip_quota=True,
                     user_override=user,
                 )
-                if result is not None:
+                if result == "ALBUM_DEDUP":
+                    # Already transferred as part of an earlier album — skip immediately,
+                    # no sleep needed since no API work was done.
+                    pass
+                elif result is not None:
                     done += 1
+                    if idx < count:
+                        await asyncio.sleep(10)
                 else:
                     skipped += 1
+                    if idx < count:
+                        await asyncio.sleep(10)
             except Exception as e:
                 logging.error(f"mlinks item error (link={link}): {e}")
                 skipped += 1
+                if idx < count:
+                    await asyncio.sleep(10)
 
         try:
             await status.edit_text(

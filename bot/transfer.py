@@ -18,6 +18,10 @@ from pyrogram.errors import (
 import time
 from bot.config import API_ID, API_HASH, user_bots, user_bots_last_used
 
+# Upload size limits
+BOT_MAX_FILE_SIZE  = 2_000_000_000   # 2 GB  — hard cap for bot accounts
+PART_SAFE_SIZE     = 1_990_000_000   # ~1.99 GB — safe split boundary (free account)
+
 
 # --- Per-user bot management ---
 # Each user registers their own @BotFather bot via /setbot. We instantiate
@@ -180,6 +184,65 @@ def truncate_caption(caption, max_length=1024):
         return ""
     s = str(caption)
     return s if len(s) <= max_length else s[:max_length - 3] + "..."
+
+
+async def check_user_premium(user_client) -> bool:
+    """Return True if the user's Telegram account has an active Premium subscription."""
+    try:
+        me = await user_client.get_me()
+        return bool(getattr(me, "is_premium", False))
+    except Exception as e:
+        logging.warning(f"check_user_premium failed: {e!r} — treating as non-premium")
+        return False
+
+
+_SPLIT_BUFFER = 16 * 1024 * 1024  # 16 MB read buffer — avoids loading GB into RAM
+
+
+def _split_file_sync(path: str, part_size: int) -> list:
+    """
+    Split *path* into sequential binary chunks of at most *part_size* bytes.
+    Uses a small read buffer so memory usage stays flat regardless of file size.
+    Parts are named: <base>.part1of<n><ext>, <base>.part2of<n><ext>, ...
+    Cleans up any already-created parts and re-raises on mid-split failure.
+    """
+    total = os.path.getsize(path)
+    n_parts = (total + part_size - 1) // part_size
+    base, ext = os.path.splitext(path)
+    parts = []
+    try:
+        with open(path, "rb") as src:
+            for i in range(1, n_parts + 1):
+                part_path = f"{base}.part{i}of{n_parts}{ext}"
+                remaining = part_size
+                with open(part_path, "wb") as dst:
+                    while remaining > 0:
+                        buf = src.read(min(_SPLIT_BUFFER, remaining))
+                        if not buf:
+                            break
+                        dst.write(buf)
+                        remaining -= len(buf)
+                parts.append(part_path)
+    except Exception:
+        # Roll back any parts already written before the error
+        for pp in parts:
+            try:
+                if os.path.exists(pp):
+                    os.remove(pp)
+            except Exception:
+                pass
+        raise
+    return parts
+
+
+async def split_file(path: str, part_size: int = PART_SAFE_SIZE) -> list:
+    """
+    Async wrapper around _split_file_sync.
+    Runs in a thread-pool executor so the event loop is not blocked.
+    Returns the list of part paths.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _split_file_sync, path, part_size)
 
 
 async def download_media(client, message, progress=None, progress_args=()):
