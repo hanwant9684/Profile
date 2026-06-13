@@ -12,8 +12,7 @@ from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
 
 
-# ─── /start ──────────────────────────────────────────────────────────────────
-
+# /start
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     user_id = message.from_user.id
@@ -114,8 +113,7 @@ async def start(client, message):
         pass
 
 
-# ─── Onboarding: skip bot setup ──────────────────────────────────────────────
-
+# Onboarding callbacks
 @app.on_callback_query(filters.regex("onboard_skip_bot"))
 async def onboard_skip_bot(client, callback_query):
     user_id = callback_query.from_user.id
@@ -135,8 +133,6 @@ async def onboard_skip_bot(client, callback_query):
         pass
 
 
-# ─── Onboarding: skip login (after bot is set up) ────────────────────────────
-
 @app.on_callback_query(filters.regex("onboard_skip_login"))
 async def onboard_skip_login(client, callback_query):
     login_states.pop(callback_query.from_user.id, None)
@@ -154,8 +150,6 @@ async def onboard_skip_login(client, callback_query):
     except Exception:
         pass
 
-
-# ─── Onboarding: start login ──────────────────────────────────────────────────
 
 @app.on_callback_query(filters.regex("onboard_login"))
 async def onboard_login(client, callback_query):
@@ -188,8 +182,6 @@ async def onboard_login(client, callback_query):
     except Exception:
         pass
 
-
-# ─── Onboarding: set up bot from welcome-back button ─────────────────────────
 
 @app.on_callback_query(filters.regex("onboard_setbot"))
 async def onboard_setbot(client, callback_query):
@@ -230,8 +222,6 @@ async def onboard_setbot(client, callback_query):
         pass
 
 
-# ─── Show myinfo from welcome-back button ────────────────────────────────────
-
 @app.on_callback_query(filters.regex("show_myinfo"))
 async def show_myinfo_callback(client, callback_query):
     from bot.database import DAILY_LIMIT, MONTHLY_LIMIT
@@ -269,8 +259,7 @@ async def show_myinfo_callback(client, callback_query):
         pass
 
 
-# ─── /login command ───────────────────────────────────────────────────────────
-
+# /login
 @app.on_message(filters.command("login") & filters.private)
 async def login_start(client, message):
     user_id = message.from_user.id
@@ -300,7 +289,6 @@ async def login_start(client, message):
                 "Use /cancel_login to cancel it first, then run /login."
             )
             return
-        # Already mid-login — disconnect the old client cleanly before restarting
         old_state = login_states.pop(user_id, {})
         if "client" in old_state:
             try:
@@ -318,8 +306,7 @@ async def login_start(client, message):
     )
 
 
-# ─── Login step handler ───────────────────────────────────────────────────────
-
+# Login step handler — processes PHONE / CODE / PASSWORD / bot token states
 @app.on_message(
     filters.private & filters.text
     & ~filters.command([
@@ -348,7 +335,6 @@ async def handle_login_steps(client, message: Message):
         except Exception:
             pass
 
-        # Re-verify premium — role may have changed between /setbot and token submission
         _u = await get_user(user_id)
         if not _u or _u.get("role") not in ("premium", "admin", "owner"):
             login_states.pop(user_id, None)
@@ -594,8 +580,7 @@ async def _finish_login(user_id: int, temp_client, message: Message):
     )
 
 
-# ─── /cancel_login ────────────────────────────────────────────────────────────
-
+# /cancel_login
 @app.on_message(filters.command("cancel_login") & filters.private)
 async def cancel_login(client, message):
     user_id = message.from_user.id
@@ -615,8 +600,7 @@ async def cancel_login(client, message):
         await message.reply("No active session to cancel.")
 
 
-# ─── /setbot command ─────────────────────────────────────────────────────────
-
+# /setbot — register user's upload bot token
 @app.on_message(filters.command("setbot") & filters.private)
 async def setbot_command(client, message: Message):
     user_id = message.from_user.id
@@ -663,8 +647,7 @@ async def setbot_command(client, message: Message):
     )
 
 
-# ─── /rembot command ─────────────────────────────────────────────────────────
-
+# /rembot — remove user's upload bot token
 @app.on_message(filters.command("rembot") & filters.private)
 async def rembot_command(client, message: Message):
     user_id = message.from_user.id
@@ -687,8 +670,7 @@ async def rembot_command(client, message: Message):
     )
 
 
-# ─── /logout command ─────────────────────────────────────────────────────────
-
+# /logout
 @app.on_message(filters.command("logout") & filters.private)
 async def logout_command(client, message: Message):
     user_id = message.from_user.id

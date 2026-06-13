@@ -11,19 +11,16 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def _read_and_encode(path: str) -> str:
-    """Read a file and base64-encode it. Runs in a thread pool executor."""
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
 
 def _write_file(path: str, content: bytes) -> None:
-    """Write bytes to a file. Runs in a thread pool executor."""
     with open(path, "wb") as f:
         f.write(content)
 
 
 async def backup_to_github_async():
-    """Backup PostgreSQL database to GitHub"""
     try:
         token = os.getenv("GITHUB_TOKEN")
         repo = os.getenv("GITHUB_BACKUP_REPO")
@@ -90,7 +87,6 @@ async def backup_to_github_async():
 
 
 async def restore_from_github_async():
-    """Restore PostgreSQL database from latest GitHub backup"""
     try:
         token = os.getenv("GITHUB_TOKEN")
         repo = os.getenv("GITHUB_BACKUP_REPO")

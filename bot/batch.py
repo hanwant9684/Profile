@@ -8,14 +8,8 @@ from bot.database import get_user
 from bot.transfer import get_user_bot
 
 
-# --- Link parsing helpers (batch-specific) ---
-
+# Link parsing helpers
 def _parse_batch_link(link: str):
-    """
-    Parse a start/end link for batch mode.
-    Returns a dict with keys: is_private, channel_part, topic_part, msg_id
-    or None on failure.
-    """
     link = re.sub(r"\?.*$", "", link).rstrip("/")
 
     m = re.fullmatch(r"https://t\.me/c/(\d+)/(\d+)/(\d+)", link)
@@ -51,8 +45,7 @@ def _build_batch_link(info: dict, msg_id: int) -> str:
     return f"https://t.me/{info['channel_part']}/{msg_id}"
 
 
-# --- Batch download  (/batch) ---
-
+# /batch — download a range of messages
 @app.on_message(filters.command("batch") & filters.private)
 async def batch_handler(client, message):
     user_id = message.from_user.id
@@ -65,7 +58,6 @@ async def batch_handler(client, message):
         )
         return
 
-    # Upfront setbot check — fail fast before iterating any items
     try:
         user_bot = await get_user_bot(user_id)
     except Exception:
@@ -120,7 +112,6 @@ async def batch_handler(client, message):
         if not end_info:
             await message.reply("❌ Invalid end link.")
             return
-        # Both links must point to the same channel/topic
         if (end_info["channel_part"] != info["channel_part"] or
                 end_info["topic_part"] != info["topic_part"] or
                 end_info["is_private"] != info["is_private"]):
@@ -176,8 +167,6 @@ async def batch_handler(client, message):
                     user_override=user,
                 )
                 if result == "ALBUM_DEDUP":
-                    # Already transferred as part of an earlier album — skip immediately,
-                    # no sleep needed since no API work was done.
                     pass
                 elif result is not None:
                     done += 1
@@ -206,8 +195,7 @@ async def batch_handler(client, message):
         batch_cancel_flags.discard(user_id)
 
 
-# --- Multi-link download  (/mlinks) ---
-
+# /mlinks — download multiple individual links
 @app.on_message(filters.command("mlinks") & filters.private)
 async def mlinks_handler(client, message):
     user_id = message.from_user.id
@@ -220,7 +208,6 @@ async def mlinks_handler(client, message):
         )
         return
 
-    # Upfront setbot check — fail fast before iterating any links
     try:
         user_bot = await get_user_bot(user_id)
     except Exception:
@@ -304,8 +291,6 @@ async def mlinks_handler(client, message):
                     user_override=user,
                 )
                 if result == "ALBUM_DEDUP":
-                    # Already transferred as part of an earlier album — skip immediately,
-                    # no sleep needed since no API work was done.
                     pass
                 elif result is not None:
                     done += 1
@@ -334,8 +319,7 @@ async def mlinks_handler(client, message):
         batch_cancel_flags.discard(user_id)
 
 
-# --- Cancel batch  (/cancelbatch) ---
-
+# /cancelbatch
 @app.on_message(filters.command("cancelbatch") & filters.private)
 async def cancelbatch_handler(client, message):
     user_id = message.from_user.id

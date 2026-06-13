@@ -473,7 +473,6 @@ async def iter_user_ids(batch_size: int = 500):
 
 
 async def sweep_expired_premium():
-    """Bulk-downgrade all users whose premium_expiry_date has passed."""
     try:
         from datetime import timezone
         now = datetime.now(timezone.utc)
@@ -491,7 +490,6 @@ async def sweep_expired_premium():
 
 
 async def periodic_premium_sweep(interval_hours=24):
-    """Run sweep_expired_premium on startup and then every interval_hours."""
     await asyncio.sleep(5)
     while True:
         await sweep_expired_premium()

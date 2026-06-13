@@ -212,14 +212,11 @@ async def check_user_premium(user_client) -> bool:
 
 _SPLIT_BUFFER = 16 * 1024 * 1024  # 16 MB read buffer — avoids loading GB into RAM
 
+_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts", ".flv"}
+_MP4_EXTS   = {".mp4", ".mov", ".m4v"}
+
 
 def _split_file_sync(path: str, part_size: int) -> list:
-    """
-    Split *path* into sequential binary chunks of at most *part_size* bytes.
-    Uses a small read buffer so memory usage stays flat regardless of file size.
-    Parts are named: <base>.part1of<n><ext>, <base>.part2of<n><ext>, ...
-    Cleans up any already-created parts and re-raises on mid-split failure.
-    """
     total = os.path.getsize(path)
     n_parts = (total + part_size - 1) // part_size
     base, ext = os.path.splitext(path)
@@ -238,7 +235,6 @@ def _split_file_sync(path: str, part_size: int) -> list:
                         remaining -= len(buf)
                 parts.append(part_path)
     except Exception:
-        # Roll back any parts already written before the error
         for pp in parts:
             try:
                 if os.path.exists(pp):
@@ -250,13 +246,90 @@ def _split_file_sync(path: str, part_size: int) -> list:
 
 
 async def split_file(path: str, part_size: int = PART_SAFE_SIZE) -> list:
-    """
-    Async wrapper around _split_file_sync.
-    Runs in a thread-pool executor so the event loop is not blocked.
-    Returns the list of part paths.
-    """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _split_file_sync, path, part_size)
+
+
+async def split_video_ffmpeg(path: str, part_size: int = PART_SAFE_SIZE) -> list:
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _VIDEO_EXTS:
+        return await split_file(path, part_size)
+
+    total_size = os.path.getsize(path)
+    if total_size <= part_size:
+        return [path]
+
+    duration_sec, _, _ = await get_media_info(path)
+    if not duration_sec:
+        logging.warning(f"split_video_ffmpeg: no duration for {path!r} — raw fallback")
+        return await split_file(path, part_size)
+
+    n_parts = (total_size + part_size - 1) // part_size
+    seg_seconds = max(1, int(duration_sec / n_parts))
+
+    base, _ = os.path.splitext(path)
+    tmp_pattern = f"{base}.__ffpart%03d{ext}"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", path,
+        "-c", "copy",
+        "-map", "0",
+        "-f", "segment",
+        "-segment_time", str(seg_seconds),
+        "-reset_timestamps", "1",
+    ]
+    if ext in _MP4_EXTS:
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(tmp_pattern)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=3600)
+    except asyncio.TimeoutError:
+        logging.warning("split_video_ffmpeg: ffmpeg timed out — raw fallback")
+        _cleanup_glob(base, ext)
+        return await split_file(path, part_size)
+    except FileNotFoundError:
+        logging.warning("split_video_ffmpeg: ffmpeg not found — raw fallback")
+        return await split_file(path, part_size)
+
+    if proc.returncode != 0:
+        logging.warning(
+            f"split_video_ffmpeg: ffmpeg exited {proc.returncode} — raw fallback\n"
+            f"{stderr.decode()[-400:]}"
+        )
+        _cleanup_glob(base, ext, prefix=".__ffpart")
+        return await split_file(path, part_size)
+
+    import glob as _glob
+    tmp_parts = sorted(_glob.glob(f"{base}.__ffpart*{ext}"))
+    if not tmp_parts:
+        logging.warning("split_video_ffmpeg: ffmpeg produced no output — raw fallback")
+        return await split_file(path, part_size)
+
+    n = len(tmp_parts)
+    parts = []
+    for i, tmp in enumerate(tmp_parts, 1):
+        dest = f"{base}.part{i}of{n}{ext}"
+        os.rename(tmp, dest)
+        parts.append(dest)
+
+    logging.info(f"split_video_ffmpeg: {path!r} → {n} parts")
+    return parts
+
+
+def _cleanup_glob(base: str, ext: str, prefix: str = ".__ffpart"):
+    import glob as _glob
+    for f in _glob.glob(f"{base}{prefix}*{ext}"):
+        try:
+            os.remove(f)
+        except Exception:
+            pass
 
 
 async def download_media(client, message, progress=None, progress_args=()):

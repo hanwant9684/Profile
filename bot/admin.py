@@ -30,9 +30,6 @@ async def kill_all_processes(client, message):
         await message.reply("⚠️ No active downloads to kill.")
         return
     count = len(active_downloads)
-    # Only set cancel flags — let each handler's finally block clear active_downloads
-    # and release the semaphore cleanly. Clearing active_downloads here would allow
-    # new downloads to start while old tasks are still running.
     for uid in list(active_downloads):
         cancel_flags.add(uid)
     logger.warning(f"Admin action: killall — cancel flags set for {count} active downloads by user {message.from_user.id}")

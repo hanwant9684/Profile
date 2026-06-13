@@ -25,15 +25,14 @@ from bot.database import get_user, check_and_update_quota, get_setting, incremen
 from bot.transfer import (
     download_media, upload_media, truncate_caption, get_user_bot,
     get_media_info, get_audio_tags,
-    check_user_premium, split_file,
+    check_user_premium, split_file, split_video_ffmpeg,
     BOT_MAX_FILE_SIZE, PART_SAFE_SIZE,
 )
+from bot.log_channel import log_download
 
 
-PREMIUM_MAX_FILE_SIZE = 4_000_000_000  # 4 GB — Telegram Premium user limit
+PREMIUM_MAX_FILE_SIZE = 4_000_000_000
 
-# Media types that have an actual file to download.
-# Everything else (Poll, Game, Location, Contact, Dice, Story-embed, etc.) has no file_id.
 _DOWNLOADABLE_TYPES = {
     enums.MessageMediaType.AUDIO,
     enums.MessageMediaType.DOCUMENT,
@@ -57,8 +56,7 @@ def _get_msg_file_size(m) -> int:
     return 0
 
 
-# --- User session cache ---
-
+# User session cache (userbot clients, keyed by user_id)
 user_clients: dict = {}
 active_sessions: set = set()
 _cleanup_started = False
@@ -165,28 +163,18 @@ async def _cleanup_loop():
             logging.info(f"Evicted idle user bot for user {uid}")
 
 
-# --- Utilities ---
-
+# Utilities
 class _LazyStatus:
-    """
-    For single downloads (no status_msg_override): sends no message at all on
-    fast/happy paths. The first call to edit_text() fires a reply; subsequent
-    calls edit that message. delete() is a no-op if nothing was ever sent.
-    """
     def __init__(self, message):
         self._message = message
         self._sent = None
 
     @property
     def chat(self):
-        # Delegate to the original triggering message so progress_bar's
-        # cancel-flag check (msg.chat.id in cancel_flags) works correctly.
         return self._message.chat
 
     @property
     def id(self):
-        # Use the sent message id once available; fall back to the triggering
-        # message id so progress_bar can use it as a stable dedup key.
         return self._sent.id if self._sent else self._message.id
 
     async def edit_text(self, text, reply_markup=None):
@@ -285,8 +273,7 @@ async def progress_bar(current: int, total: int, msg, label: str):
     await update_status(msg, text)
 
 
-# --- Force subscribe ---
-
+# Force subscribe check
 async def verify_force_sub(client: Client, user_id: int):
     setting = await get_setting("force_sub_channel")
     if not setting or not setting.get("value"):
@@ -308,13 +295,8 @@ async def verify_force_sub(client: Client, user_id: int):
         return True, None
 
 
-# --- Link parsing ---
-
+# Link parsing
 def _parse_story_link(link: str):
-    """
-    Parse a t.me story link.
-    Returns (chat_id, story_id, is_private) or None.
-    """
     link_clean = re.sub(r"\?.*$", "", link).rstrip("/")
 
     m = re.fullmatch(r"https://t\.me/c/(\d+)/s/(\d+)", link_clean)
@@ -329,10 +311,6 @@ def _parse_story_link(link: str):
 
 
 def _parse_bot_start_link(link: str):
-    """
-    Parse https://t.me/BotName?start=PAYLOAD into (bot_username, payload).
-    Returns None if not this format.
-    """
     m = re.match(r"https://t\.me/([^/?#]+)\?start=([^&\s]+)", link)
     if m:
         return m.group(1), m.group(2)
@@ -351,10 +329,6 @@ async def _bot_start_collect_media(user_client, username, after_id):
 
 
 def _parse_link(link: str):
-    """
-    Parse a t.me message link into (chat_id, message_id, is_private, comment_id, thread_id, is_topic).
-    Returns None if the link format is not recognised.
-    """
     comment_id = None
     comment_match = re.search(r"[?&]comment=(\d+)", link)
     if comment_match:
@@ -386,8 +360,7 @@ def _parse_link(link: str):
     return None
 
 
-# --- Core download handler ---
-
+# Download handler — entry point for all t.me links
 @app.on_message(filters.regex(r"https?://t\.me/") & filters.private & ~filters.regex(r"^/"))
 async def download_handler(
     client,
@@ -400,6 +373,8 @@ async def download_handler(
 ):
     user_id = message.from_user.id
     link = link_override or message.text.strip()
+    _username = getattr(message.from_user, "username", None)
+    _ltype = "private"
 
     is_story = False
     is_topic = False
@@ -440,17 +415,18 @@ async def download_handler(
                 is_bot_dm = True
                 is_private = True
 
+    if is_story:
+        _ltype = "story"
+    elif is_bot_start:
+        _ltype = "bot_start"
+    elif is_bot_dm:
+        _ltype = "bot_dm"
+    elif is_private:
+        _ltype = "private"
+    else:
+        _ltype = "public"
+
     if not link_override:
-        if is_story:
-            _ltype = "story"
-        elif is_bot_start:
-            _ltype = "bot_start"
-        elif is_bot_dm:
-            _ltype = "bot_dm"
-        elif is_private:
-            _ltype = "private"
-        else:
-            _ltype = "public"
         logging.info(f"Download requested: user={user_id} type={_ltype} link={link[:80]}")
 
     if user_override is not None:
@@ -503,8 +479,6 @@ async def download_handler(
 
     status = status_msg_override or _LazyStatus(message)
 
-    # Semaphore held for the entire transfer — limits real concurrency to MAX_CONCURRENT_DOWNLOADS.
-    # The per-user active_downloads check inside prevents the same user queueing themselves twice.
     acquired = False
     try:
         await global_download_semaphore.acquire()
@@ -670,9 +644,6 @@ async def download_handler(
         has_media = bool(getattr(msg, "media", None))
         has_text = bool(getattr(msg, "text", None))
 
-        # Guard: reject non-downloadable media types (Poll, Game, Location, Contact, Dice, etc.)
-        # Story URLs set is_story=True and msg is a Story object whose .media is a raw Photo/Video,
-        # not a MessageMediaType enum — skip the enum check for that path.
         if has_media and not is_story and isinstance(msg.media, enums.MessageMediaType):
             if msg.media not in _DOWNLOADABLE_TYPES:
                 type_name = msg.media.name.replace("_", " ").title()
@@ -698,8 +669,6 @@ async def download_handler(
                             await status.delete()
                         except Exception:
                             pass
-                    # Sentinel: album already transferred by an earlier message in this batch.
-                    # Callers (batch/mlinks) should silently skip this — neither done nor skipped.
                     return "ALBUM_DEDUP"
                 processed_albums.add(msg.media_group_id)
             try:
@@ -709,7 +678,6 @@ async def download_handler(
         else:
             messages = [msg]
 
-        # Album quota check — free users must have enough quota for every file in the group
         if not skip_quota and user.get("role", "free") == "free" and len(messages) > 1:
             from bot.database import DAILY_LIMIT, MONTHLY_LIMIT
             from datetime import datetime as _dt
@@ -741,7 +709,6 @@ async def download_handler(
                 )
                 return None
 
-        # --- Public content: server-side copy via main bot to user's DM ---
         if not is_private:
             media_group_id = getattr(msg, "media_group_id", None)
             try:
@@ -762,6 +729,7 @@ async def download_handler(
                     except Exception:
                         pass
                 active_downloads.discard(user_id)
+                log_download(user_id, _username, link, "public", True)
                 return msg
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
@@ -788,6 +756,7 @@ async def download_handler(
                             except Exception:
                                 pass
                         active_downloads.discard(user_id)
+                        log_download(user_id, _username, link, "public", True)
                         return msg
                     except Exception as retry_e:
                         logging.error(f"Direct extraction (no caption) failed: {retry_e}")
@@ -795,14 +764,11 @@ async def download_handler(
                     await update_status(status, "❌ This media type is not supported for direct extraction.")
                     return None
                 elif "topics" in error_str and "__init__" in error_str:
-                    # pyrotgfork version mismatch — Telegram added 'topics' field, older lib can't parse it
-                    # falls through silently to download/upload path
                     logging.debug(f"Direct extraction skipped (pyrotgfork version mismatch): {e}")
                 else:
                     logging.error(f"Direct extraction failed: {e}")
                 await update_status(status, "⚠️ Direct extraction failed, trying download/upload...")
 
-        # --- Text-only private message: send via user's own bot DM ---
         if not has_media:
             text = getattr(msg, "text", None) or ""
             entities = getattr(msg, "entities", None) or []
@@ -827,11 +793,9 @@ async def download_handler(
             except Exception as e:
                 await update_status(status, f"❌ Failed to copy text message: {e}")
             active_downloads.discard(user_id)
+            log_download(user_id, _username, link, _ltype, True)
             return msg
 
-        # --- Private/restricted media: download then upload to user's bot DM ---
-
-        # Pre-download file size check — reject before wasting bandwidth
         for m in messages:
             sz = _get_msg_file_size(m)
             if sz and sz > PREMIUM_MAX_FILE_SIZE:
@@ -866,7 +830,6 @@ async def download_handler(
         upload_client = user_bot if user_bot is not None else client
 
         if len(messages) > 1:
-            # --- Album path: parallel download + send_media_group ---
             await update_status(status, f"📥 Downloading album ({len(messages)} files)...")
 
             download_tasks = [
@@ -875,8 +838,6 @@ async def download_handler(
             ]
             results = await asyncio.gather(*download_tasks, return_exceptions=True)
 
-            # If any album item failed with a dead session, propagate immediately —
-            # the outer handler will clear the session and notify the user.
             for result in results:
                 if isinstance(result, (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                                        AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated)):
@@ -985,7 +946,6 @@ async def download_handler(
                         pass
 
         else:
-            # --- Single file: download then upload ---
             m = messages[0]
 
             if user_id in cancel_flags:
@@ -1056,7 +1016,6 @@ async def download_handler(
                     force_document=(m.media == enums.MessageMediaType.DOCUMENT),
                 )
 
-                # --- Large-file routing (> 2 GB) ---
                 actual_size = os.path.getsize(path)
                 _large_file_handled = False
 
@@ -1064,7 +1023,6 @@ async def download_handler(
                     has_tg_premium = await check_user_premium(user_client)
 
                     if has_tg_premium:
-                        # Case 1: Telegram Premium → upload full file via user's account (up to 4 GB)
                         readable = f"{actual_size / 1_000_000_000:.2f} GB"
                         await update_status(
                             status,
@@ -1077,7 +1035,6 @@ async def download_handler(
                         _large_file_handled = True
 
                     else:
-                        # Case 2: No Premium → split into parts ≤ 1.99 GB and upload each via user_bot
                         readable = f"{actual_size / 1_000_000_000:.2f} GB"
                         await update_status(
                             status,
@@ -1086,7 +1043,7 @@ async def download_handler(
                         )
                         part_paths = []
                         try:
-                            part_paths = await split_file(path, PART_SAFE_SIZE)
+                            part_paths = await split_video_ffmpeg(path, PART_SAFE_SIZE)
                             total_parts = len(part_paths)
                             orig_name = file_name or os.path.basename(path)
                             base_name, ext_name = os.path.splitext(orig_name)
@@ -1102,12 +1059,20 @@ async def download_handler(
                                     f"{caption}\n📦 Part {i}/{total_parts}" if caption
                                     else f"📦 Part {i}/{total_parts}"
                                 )
+
+                                p_dur, p_w, p_h = await get_media_info(part_path)
+                                part_thumb = thumb if i == 1 else None
+
                                 part_kw = {
                                     **upload_kwargs,
-                                    "path":         part_path,
-                                    "caption":      part_cap,
-                                    "file_name":    part_fn,
+                                    "path":          part_path,
+                                    "caption":       part_cap,
+                                    "file_name":     part_fn,
                                     "progress_args": (status, f"📤 Uploading part {i}/{total_parts}"),
+                                    "duration":      p_dur,
+                                    "width":         p_w,
+                                    "height":        p_h,
+                                    "thumb":         part_thumb,
                                 }
                                 await update_status(status, f"📤 Uploading part {i}/{total_parts}...")
 
@@ -1184,13 +1149,15 @@ async def download_handler(
 
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
-                raise  # propagate to outer handler — session will be cleared and user notified
+                raise
             except asyncio.TimeoutError:
                 await update_status(status, "❌ Transfer timed out. The file may be too large or the connection too slow. Please try again.")
-                return None  # do not count as success or increment quota
+                log_download(user_id, _username, link, _ltype, False)
+                return None
             except Exception as e:
                 logging.error(f"Download/upload error for user {user_id}: {e}")
-                return None  # do not count as success or increment quota
+                log_download(user_id, _username, link, _ltype, False)
+                return None
             finally:
                 if path and os.path.exists(path):
                     os.remove(path)
@@ -1204,6 +1171,7 @@ async def download_handler(
             except Exception:
                 pass
 
+        log_download(user_id, _username, link, _ltype, True)
         return msg
 
     except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
@@ -1214,6 +1182,7 @@ async def download_handler(
             await update_status(status, "❌ Your Telegram session has expired or was revoked. Please use /login to reconnect.")
         except Exception:
             pass
+        log_download(user_id, _username, link, _ltype, False)
         return None
     except Exception as e:
         logging.error(f"Handler error for user {user_id}: {e}")
@@ -1221,6 +1190,7 @@ async def download_handler(
             await update_status(status, f"❌ Error: {e}")
         except Exception:
             pass
+        log_download(user_id, _username, link, _ltype, False)
         return None
     finally:
         active_downloads.discard(user_id)
@@ -1232,8 +1202,7 @@ async def download_handler(
             progress_bar._data.pop(status.id, None)
 
 
-# --- Cancel ---
-
+# /cancel
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client, message):
     user_id = message.from_user.id
@@ -1244,8 +1213,7 @@ async def cancel_handler(client, message):
         await message.reply("ℹ️ No active download to cancel.")
 
 
-# --- Commands ---
-
+# /help and /upgrade
 @app.on_message(filters.command("help") & filters.private)
 async def help_command(client, message):
     user_id = message.from_user.id

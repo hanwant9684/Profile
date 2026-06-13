@@ -52,10 +52,7 @@ batch_sessions: set = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states: dict = {}
 
-# Per-user bot Client cache: { user_id: pyrogram.Client }
-# Each user registers their own bot via /setbot; we instantiate and reuse it.
 user_bots: dict = {}
-# Last-used timestamps for user_bots: { user_id: float (epoch) }
 user_bots_last_used: dict = {}
 
 _shared_client: httpx.AsyncClient | None = None
