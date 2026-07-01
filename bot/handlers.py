@@ -726,13 +726,13 @@ async def download_handler(
                 await update_status(status, "🚀 Extracting directly...")
                 if media_group_id:
                     if _cap_filters or _cap_append:
-                        # None = keep original; only modify messages that have a caption
-                        _captions = [
-                            apply_caption_filter(m.caption, _cap_filters, _cap_append) if m.caption else (
-                                _cap_append if _cap_append else None
-                            )
-                            for m in messages
-                        ]
+                        # Only the first item carries the caption — that's how Telegram albums work.
+                        # Subsequent items get an empty string so no hidden per-file captions appear.
+                        first_msg = messages[0] if messages else msg
+                        first_cap = apply_caption_filter(first_msg.caption, _cap_filters, _cap_append) if first_msg.caption else (
+                            _cap_append if _cap_append else None
+                        )
+                        _captions = [first_cap] + [""] * (len(messages) - 1)
                         await client.copy_media_group(
                             chat_id=user_id, from_chat_id=chat_id, message_id=msg_id,
                             captions=_captions,
@@ -893,8 +893,10 @@ async def download_handler(
                 )
 
                 media_list = []
-                for m, path in valid_pairs:
-                    cap = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append))
+                for idx, (m, path) in enumerate(valid_pairs):
+                    # Only the first file in an album gets the caption — matching Telegram's
+                    # manual-send behaviour. Subsequent files get "" so no hidden captions appear.
+                    cap = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append)) if idx == 0 else ""
                     ext = os.path.splitext(path)[1].lower()
                     if ext in (".jpg", ".jpeg", ".png", ".webp"):
                         media_list.append(InputMediaPhoto(path, caption=cap))
@@ -935,8 +937,9 @@ async def download_handler(
                     await upload_client.send_media_group(user_id, media_list)
                 except Exception as grp_exc:
                     logging.warning(f"send_media_group failed ({grp_exc}), falling back to individual uploads")
-                    for m, path in valid_pairs:
-                        cap = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append))
+                    for idx, (m, path) in enumerate(valid_pairs):
+                        # Caption only on the first file — same as manual Telegram album behaviour.
+                        cap = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append)) if idx == 0 else ""
                         dur = w = h = 0
                         fn = performer = atitle = ""
                         if getattr(m, "video", None):
