@@ -33,6 +33,7 @@ async def main():
     import bot.batch
     import bot.admin
     import bot.info
+    import bot.caption_filter
 
     print("Initializing database...")
     await init_db()
