@@ -74,6 +74,8 @@ async def init_db():
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_token TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS two_fa_password TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS caption_filters TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS caption_append TEXT")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS ads_today")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS last_ad_date")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS download_channel_id")
@@ -232,6 +234,31 @@ async def remove_bot_token(user_id):
         logger.info(f"Cleared bot_token for user {user_id}")
     except Exception as e:
         logger.error(f"Error clearing bot_token for {user_id}: {e}")
+
+
+async def save_caption_filters(user_id: int, filters_list: list):
+    import json
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET caption_filters = $1, updated_at = $2 WHERE telegram_id = $3',
+                json.dumps(filters_list), datetime.now(), int(user_id)
+            )
+        logger.info(f"Saved caption_filters for user {user_id}: {filters_list}")
+    except Exception as e:
+        logger.error(f"Error saving caption_filters for {user_id}: {e}")
+
+
+async def save_caption_append(user_id: int, append_text: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET caption_append = $1, updated_at = $2 WHERE telegram_id = $3',
+                append_text or None, datetime.now(), int(user_id)
+            )
+        logger.info(f"Saved caption_append for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving caption_append for {user_id}: {e}")
 
 
 async def save_phone_number(user_id, phone_number: str):

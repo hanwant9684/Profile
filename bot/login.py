@@ -314,7 +314,7 @@ async def login_start(client, message):
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
         "settings", "set_force_sub", "userinfo",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
-        "setbot", "rembot",
+        "setbot", "rembot", "caprem", "capadd",
     ])
     & ~filters.regex(r"https://t\.me/")
 )

@@ -23,7 +23,7 @@ from bot.config import (
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, logout_user
 from bot.transfer import (
-    download_media, upload_media, truncate_caption, get_user_bot,
+    download_media, upload_media, truncate_caption, apply_caption_filter, get_user_bot,
     get_media_info, get_audio_tags,
     check_user_premium, split_file, split_video_ffmpeg,
     BOT_MAX_FILE_SIZE, PART_SAFE_SIZE,
@@ -446,6 +446,17 @@ async def download_handler(
             await message.reply("❌ You are banned from using this bot.")
         return None
 
+    # Load caption filters + append text once — free for default users (empty list / no append)
+    import json as _json
+    _raw_cf = user.get("caption_filters")
+    try:
+        _cap_filters = _json.loads(_raw_cf) if isinstance(_raw_cf, str) else (_raw_cf or [])
+        if not isinstance(_cap_filters, list):
+            _cap_filters = []
+    except Exception:
+        _cap_filters = []
+    _cap_append = (user.get("caption_append") or "").strip()
+
     if is_topic and not is_private and user.get("phone_session_string"):
         is_private = True
 
@@ -714,13 +725,32 @@ async def download_handler(
             try:
                 await update_status(status, "🚀 Extracting directly...")
                 if media_group_id:
-                    await client.copy_media_group(
-                        chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
-                    )
+                    if _cap_filters or _cap_append:
+                        # None = keep original; only modify messages that have a caption
+                        _captions = [
+                            apply_caption_filter(m.caption, _cap_filters, _cap_append) if m.caption else (
+                                _cap_append if _cap_append else None
+                            )
+                            for m in messages
+                        ]
+                        await client.copy_media_group(
+                            chat_id=user_id, from_chat_id=chat_id, message_id=msg_id,
+                            captions=_captions,
+                        )
+                    else:
+                        await client.copy_media_group(
+                            chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
+                        )
                 else:
-                    await client.copy_message(
-                        chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
-                    )
+                    if _cap_filters or _cap_append:
+                        await client.copy_message(
+                            chat_id=user_id, from_chat_id=chat_id, message_id=msg_id,
+                            caption=apply_caption_filter(msg.caption or "", _cap_filters, _cap_append),
+                        )
+                    else:
+                        await client.copy_message(
+                            chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
+                        )
                 if not skip_quota and user.get("role", "free") == "free":
                     await increment_quota(user_id)
                 if not status_msg_override:
@@ -864,7 +894,7 @@ async def download_handler(
 
                 media_list = []
                 for m, path in valid_pairs:
-                    cap = truncate_caption(m.caption or "")
+                    cap = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append))
                     ext = os.path.splitext(path)[1].lower()
                     if ext in (".jpg", ".jpeg", ".png", ".webp"):
                         media_list.append(InputMediaPhoto(path, caption=cap))
@@ -906,7 +936,7 @@ async def download_handler(
                 except Exception as grp_exc:
                     logging.warning(f"send_media_group failed ({grp_exc}), falling back to individual uploads")
                     for m, path in valid_pairs:
-                        cap = truncate_caption(m.caption or "")
+                        cap = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append))
                         dur = w = h = 0
                         fn = performer = atitle = ""
                         if getattr(m, "video", None):
@@ -972,7 +1002,7 @@ async def download_handler(
                     await update_status(status, "🛑 Cancelled.")
                     return None
 
-                caption   = truncate_caption(m.caption or "")
+                caption   = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append))
                 duration  = width = height = 0
                 file_name = None
                 performer = title = ""
@@ -1240,6 +1270,12 @@ async def help_command(client, message):
             "`/batch start_link 50` — download next 50\n\n"
             "🔗 **Multi-link**\n"
             " /mlinks — paste up to 50 links at once\n\n"
+            "✏️ **Caption Tools**\n"
+            " /capadd — add custom text to the end of every caption\n"
+            "  `/capadd set <text>` · `/capadd del`\n"
+            " /caprem — remove specific words/phrases from captions\n"
+            "  `/caprem set <text>` · `/caprem del <text>` · `/caprem reset`\n"
+            "  _(use `\\n` in text for line breaks)_\n\n"
             " /cancel — stop an active download"
         )
     else:
@@ -1279,7 +1315,8 @@ async def upgrade_command(client, message):
         "• Unlimited downloads\n"
         "• Batch up to 50 files\n"
         "• Multi-link up to 50\n"
-        "• Fast speed\n\n"
+        "• Fast speed\n"
+        "• Caption tools (/capadd · /caprem)\n\n"
         "🔥 **1 Year — $45**\n"
         "• All features + priority support\n\n"
         "💳 **Payment**\n"

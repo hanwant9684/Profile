@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import logging
 from pyrogram import Client
@@ -191,6 +192,39 @@ async def get_audio_tags(path: str) -> tuple[str, str]:
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _parse_audio_tags_sync, path)
+
+
+_TG_CAPTION_LIMIT = 1024
+
+
+def apply_caption_filter(caption: str, caption_filters: list, append_text: str = "") -> str:
+    """Strip words/phrases from caption per user's filter list, then append custom text.
+    When appending would exceed Telegram's caption limit, the original caption is trimmed
+    to make room so the custom append text is always kept in full."""
+    text = caption or ""
+    if caption_filters:
+        lines = text.split('\n')
+        result = []
+        for line in lines:
+            filtered = line
+            for entry in caption_filters:
+                filtered = re.sub(re.escape(entry), '', filtered, flags=re.IGNORECASE)
+            if filtered.strip():
+                result.append(filtered.rstrip())
+        text = '\n'.join(result)
+    if append_text:
+        separator = "\n" if text else ""
+        combined = text + separator + append_text
+        if len(combined) > _TG_CAPTION_LIMIT:
+            # Trim the original caption to make room for the full append text
+            budget = _TG_CAPTION_LIMIT - len(append_text) - 1  # 1 for the newline
+            if budget > 3:
+                text = text[:budget - 1].rstrip() + "…"
+            else:
+                text = ""
+            separator = "\n" if text else ""
+        text = text + separator + append_text
+    return text
 
 
 def truncate_caption(caption, max_length=1024):
