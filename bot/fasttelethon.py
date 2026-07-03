@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Per-request size fed to iter_download's request_size param.
 # Telethon automatically clamps this to a valid multiple of 4096, so we
 # don't need to worry about alignment ourselves.
-REQUEST_SIZE = 512 * 1024   # 512 KB
+REQUEST_SIZE = 1 * 1024 * 1024   # 512 KB
 DEFAULT_WORKERS = 5
 
 
