@@ -55,6 +55,14 @@ login_states: dict = {}
 user_bots: dict = {}
 user_bots_last_used: dict = {}
 
+# Telethon per-user client cache (premium only, for Telethon engine)
+telethon_clients: dict = {}
+telethon_clients_last_used: dict = {}
+
+# Separate login-state dict for Telethon login flow so it never collides with
+# the Pyrogram login_states dict.
+telethon_login_states: dict = {}
+
 _shared_client: httpx.AsyncClient | None = None
 
 

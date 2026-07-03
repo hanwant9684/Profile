@@ -20,6 +20,7 @@ from bot.config import (
     active_downloads, global_download_semaphore,
     cancel_flags, batch_sessions, login_states,
     SUPPORT_CHAT_LINK,
+    telethon_clients, telethon_clients_last_used,
 )
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, logout_user
 from bot.transfer import (
@@ -161,6 +162,22 @@ async def _cleanup_loop():
             user_bots_last_used.pop(uid, None)
             await stop_user_bot(uid)
             logging.info(f"Evicted idle user bot for user {uid}")
+
+        stale_tl = [
+            uid for uid, last in list(telethon_clients_last_used.items())
+            if uid not in active_sessions
+            and uid not in batch_sessions
+            and now - last > 3600
+        ]
+        for uid in stale_tl:
+            telethon_clients_last_used.pop(uid, None)
+            entry = telethon_clients.pop(uid, None)
+            if entry:
+                try:
+                    await entry["client"].disconnect()
+                except Exception:
+                    pass
+            logging.info(f"Evicted idle Telethon client for user {uid}")
 
 
 # Utilities
@@ -360,6 +377,489 @@ def _parse_link(link: str):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Telethon engine helpers
+# ---------------------------------------------------------------------------
+
+async def get_telethon_client(user_id: int, session_str: str):
+    """Get or create a cached Telethon client for a user (premium only)."""
+    import time as _time
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    now = _time.time()
+
+    if user_id in telethon_clients:
+        entry = telethon_clients[user_id]
+        try:
+            if entry["client"].is_connected():
+                entry["last_used"] = now
+                telethon_clients_last_used[user_id] = now
+                return entry["client"]
+        except Exception:
+            pass
+        # Stale — evict
+        try:
+            await entry["client"].disconnect()
+        except Exception:
+            pass
+        telethon_clients.pop(user_id, None)
+        telethon_clients_last_used.pop(user_id, None)
+
+    tl_client = TelegramClient(
+        StringSession(session_str),
+        int(API_ID),
+        str(API_HASH),
+        connection_retries=3,
+    )
+    await tl_client.connect()
+    if not await tl_client.is_user_authorized():
+        await tl_client.disconnect()
+        raise RuntimeError("Telethon session is no longer authorized. Please /tlogin again.")
+
+    telethon_clients[user_id] = {"client": tl_client, "last_used": now}
+    telethon_clients_last_used[user_id] = now
+    logging.info(f"Started Telethon client for user {user_id}")
+    return tl_client
+
+
+async def _tl_entity(chat_id):
+    """Convert a Pyrogram-style chat_id to a Telethon-compatible peer."""
+    if isinstance(chat_id, int) and chat_id < 0:
+        chat_id_abs = abs(chat_id)
+        s = str(chat_id_abs)
+        if s.startswith("100") and len(s) > 3:
+            from telethon.tl.types import PeerChannel
+            return PeerChannel(int(s[3:]))
+        else:
+            from telethon.tl.types import PeerChat
+            return PeerChat(chat_id_abs)
+    return chat_id  # username string or positive int user ID
+
+
+async def _handle_telethon_download(
+    client, user_id, user, link, chat_id, msg_id,
+    is_private, is_bot_dm, is_bot_start,
+    comment_id, thread_id,
+    _ltype, _username, _cap_filters, _cap_append,
+    status, skip_quota,
+    status_msg_override=None,
+):
+    """Download via Telethon (faster parallel transfers), then upload via Pyrogram user_bot."""
+    import os as _os
+
+    if is_bot_start:
+        await update_status(
+            status,
+            "❌ Bot start links are not supported with the Telethon engine.\n"
+            "Switch to Pyrogram with `/setengine pyrogram` and try again."
+        )
+        return None
+
+    tl_session = user.get("telethon_session_string")
+    if not tl_session:
+        await update_status(status, "❌ No Telethon session found. Use /tlogin to connect first.")
+        return None
+
+    try:
+        tl_client = await get_telethon_client(user_id, tl_session)
+    except Exception as e:
+        logging.warning(f"Telethon client error for user {user_id}: {e}")
+        await update_status(status, f"❌ Could not start Telethon session: {e}\n\nUse /tlogin to reconnect.")
+        return None
+
+    entity = await _tl_entity(chat_id)
+
+    # Fetch the target message
+    try:
+        await update_status(status, "🔍 Fetching message (Telethon)...")
+        fetched = await tl_client.get_messages(entity, ids=[msg_id])
+        msg = fetched[0] if fetched else None
+        if not msg:
+            await update_status(status, "❌ Message not found via Telethon.")
+            return None
+    except Exception as e:
+        logging.error(f"Telethon get_messages error user={user_id}: {e}")
+        await update_status(status, f"❌ Could not fetch message via Telethon: {e}")
+        return None
+
+    # Resolve comment override
+    if comment_id is not None:
+        try:
+            disc = await tl_client.get_messages(entity, ids=[comment_id])
+            disc_msg = disc[0] if disc else None
+            if disc_msg and disc_msg.media:
+                msg = disc_msg
+                msg_id = msg.id
+        except Exception as e:
+            logging.debug(f"Telethon comment fetch failed (comment={comment_id}): {e}")
+
+    # Collect media group
+    grouped_id = getattr(msg, "grouped_id", None)
+    if grouped_id:
+        try:
+            id_range = list(range(max(1, msg_id - 9), msg_id + 10))
+            nearby = await tl_client.get_messages(entity, ids=id_range)
+            messages = sorted(
+                [m for m in nearby if m and getattr(m, "grouped_id", None) == grouped_id and m.media],
+                key=lambda m: m.id,
+            )
+            if not messages:
+                messages = [msg]
+        except Exception:
+            messages = [msg]
+    else:
+        messages = [msg]
+
+    if not msg.media and not getattr(msg, "message", None):
+        await update_status(status, "❌ No downloadable content found at this link.")
+        return None
+
+    # Get upload client (Pyrogram user_bot — same as Pyrogram path)
+    is_premium_user = user.get("role") in ("premium", "admin", "owner")
+    try:
+        user_bot = await get_user_bot(user_id)
+    except (AccessTokenExpired, AccessTokenInvalid):
+        await update_status(status, "❌ Your upload bot token is invalid. Use /setbot to register a new one.")
+        return None
+
+    if user_bot is None and is_premium_user:
+        await update_status(
+            status,
+            "❌ **Upload bot not configured.**\n\n"
+            "Telethon handles the *download* — your registered bot handles the *upload*.\n"
+            "Run /setbot first, then try again."
+        )
+        return None
+
+    upload_client = user_bot if user_bot is not None else client
+    active_sessions.add(user_id)
+
+    # --- Text-only ---
+    if not msg.media:
+        text_body = getattr(msg, "message", "") or ""
+        try:
+            await upload_client.send_message(user_id, text_body or "—")
+            if not skip_quota and user.get("role", "free") == "free":
+                await increment_quota(user_id)
+            if not status_msg_override:
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+        except Exception as e:
+            await update_status(status, f"❌ Failed to forward text: {e}")
+        log_download(user_id, _username, link, _ltype, True)
+        return msg
+
+    # --- Album ---
+    if len(messages) > 1:
+        await update_status(status, f"📥 Downloading album ({len(messages)} files)...")
+
+        async def _dl_one_tl(m):
+            try:
+                from bot.fasttelethon import download_file_fast
+                _ext = (getattr(m.file, "ext", "") or "") if m.file else ""
+                _out = f"downloads/{user_id}_{m.id}{_ext}"
+                return await download_file_fast(tl_client, m, _out)
+            except Exception as dl_e:
+                logging.warning(f"Telethon album item download failed: {dl_e}")
+                return None
+
+        results = await asyncio.gather(*[_dl_one_tl(m) for m in messages], return_exceptions=True)
+        paths = []
+        valid_pairs = []
+        for m, result in zip(messages, results):
+            if isinstance(result, Exception) or not result:
+                logging.warning(f"Telethon album item failed: {result}")
+                continue
+            paths.append(result)
+            valid_pairs.append((m, result))
+
+        if not valid_pairs:
+            await update_status(status, "❌ All files in the album failed to download.")
+            return None
+
+        try:
+            from pyrogram.types import (
+                InputMediaPhoto, InputMediaVideo,
+                InputMediaDocument, InputMediaAudio,
+            )
+
+            media_list = []
+            for idx, (m, path) in enumerate(valid_pairs):
+                raw_cap = getattr(m, "message", "") or ""
+                cap = truncate_caption(apply_caption_filter(raw_cap, _cap_filters, _cap_append)) if idx == 0 else ""
+                ext = _os.path.splitext(path)[1].lower()
+
+                if ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    media_list.append(InputMediaPhoto(path, caption=cap))
+                elif ext in (".mp4", ".mkv", ".mov", ".avi", ".webm"):
+                    dur = int(getattr(m.file, "duration", 0) or 0)
+                    w = int(getattr(m.file, "width", 0) or 0)
+                    h = int(getattr(m.file, "height", 0) or 0)
+                    if not dur or not w or not h:
+                        mi_dur, mi_w, mi_h = await get_media_info(path)
+                        dur = dur or mi_dur; w = w or mi_w; h = h or mi_h
+                    media_list.append(InputMediaVideo(
+                        path, caption=cap,
+                        duration=dur, width=w, height=h,
+                        supports_streaming=True,
+                    ))
+                elif ext in (".mp3", ".m4a", ".flac"):
+                    dur = int(getattr(m.file, "duration", 0) or 0)
+                    perf = getattr(m.file, "performer", "") or ""
+                    tit = getattr(m.file, "title", "") or ""
+                    if not perf or not tit:
+                        p2, t2 = await get_audio_tags(path)
+                        perf = perf or p2; tit = tit or t2
+                    media_list.append(InputMediaAudio(
+                        path, caption=cap,
+                        duration=dur,
+                        performer=perf or None,
+                        title=tit or None,
+                    ))
+                else:
+                    fn = getattr(m.file, "name", None) or _os.path.basename(path)
+                    media_list.append(InputMediaDocument(path, caption=cap, file_name=fn))
+
+            await update_status(status, f"📤 Uploading album ({len(media_list)} files)...")
+            try:
+                await upload_client.send_media_group(user_id, media_list)
+            except Exception as grp_exc:
+                logging.warning(f"Telethon album send_media_group failed ({grp_exc}), falling back to individual uploads")
+                for idx, (m, path) in enumerate(valid_pairs):
+                    raw_cap = getattr(m, "message", "") or ""
+                    cap = truncate_caption(apply_caption_filter(raw_cap, _cap_filters, _cap_append)) if idx == 0 else ""
+                    ext = _os.path.splitext(path)[1].lower()
+                    fn = getattr(m.file, "name", None) or _os.path.basename(path)
+                    dur = int(getattr(m.file, "duration", 0) or 0)
+                    w = int(getattr(m.file, "width", 0) or 0)
+                    h = int(getattr(m.file, "height", 0) or 0)
+                    if not dur or not w or not h:
+                        mi_dur, mi_w, mi_h = await get_media_info(path)
+                        dur = dur or mi_dur; w = w or mi_w; h = h or mi_h
+                    _force_doc = bool(
+                        m.document is not None and
+                        m.video is None and m.audio is None and
+                        m.voice is None and m.gif is None and m.sticker is None
+                    )
+                    await upload_media(
+                        upload_client, chat_id=user_id, path=path, caption=cap,
+                        file_name=fn, duration=dur, width=w, height=h,
+                        force_document=_force_doc,
+                    )
+        finally:
+            for path in paths:
+                try:
+                    if _os.path.exists(path):
+                        _os.remove(path)
+                except Exception:
+                    pass
+
+        if not skip_quota and user.get("role", "free") == "free":
+            await increment_quota(user_id, count=len(messages))
+        if not status_msg_override:
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        log_download(user_id, _username, link, _ltype, True)
+        return msg
+
+    # --- Single file ---
+    m = messages[0]
+    path = None
+    thumb_path = None
+    try:
+        file_size = getattr(m.file, "size", 0) or 0 if m.file else 0
+        if file_size and file_size > PREMIUM_MAX_FILE_SIZE:
+            readable = f"{file_size / 1_000_000_000:.1f} GB"
+            await update_status(status, f"❌ File too large ({readable}). Maximum supported size is 4 GB.")
+            return None
+
+        async def _tl_progress(current, total):
+            try:
+                await progress_bar(current, total, status, "📥 Downloading")
+            except Exception:
+                pass
+
+        from bot.fasttelethon import download_file_fast
+        _tl_ext = (getattr(m.file, "ext", "") or "") if m.file else ""
+        _tl_out = f"downloads/{user_id}_{m.id}{_tl_ext}"
+
+        await update_status(status, "📥 Downloading...")
+        try:
+            path = await download_file_fast(tl_client, m, _tl_out, _tl_progress)
+        except Exception as _fast_exc:
+            logging.warning(f"Fast download failed for user {user_id}: {_fast_exc!r}")
+            try:
+                if _os.path.exists(_tl_out):
+                    _os.remove(_tl_out)
+            except Exception:
+                pass
+            await update_status(status, "⚠️ Retrying with fallback method...")
+            await asyncio.sleep(1)
+            path = await tl_client.download_media(m, file="downloads/", progress_callback=_tl_progress)
+
+        if not path:
+            await update_status(status, "❌ Download returned no data. Please try again.")
+            return None
+
+        if user_id in cancel_flags:
+            cancel_flags.discard(user_id)
+            await update_status(status, "🛑 Cancelled.")
+            return None
+
+        # Metadata from Telethon message
+        raw_cap = getattr(m, "message", "") or ""
+        caption = truncate_caption(apply_caption_filter(raw_cap, _cap_filters, _cap_append))
+
+        duration = int(getattr(m.file, "duration", 0) or 0) if m.file else 0
+        width = int(getattr(m.file, "width", 0) or 0) if m.file else 0
+        height = int(getattr(m.file, "height", 0) or 0) if m.file else 0
+        file_name = (getattr(m.file, "name", None) if m.file else None)
+        performer = (getattr(m.file, "performer", "") or "") if m.file else ""
+        title_tag = (getattr(m.file, "title", "") or "") if m.file else ""
+
+        if not duration or not width or not height:
+            mi_dur, mi_w, mi_h = await get_media_info(path)
+            duration = duration or mi_dur
+            width = width or mi_w
+            height = height or mi_h
+
+        if not performer or not title_tag:
+            p2, t2 = await get_audio_tags(path)
+            performer = performer or p2
+            title_tag = title_tag or t2
+
+        _force_doc = bool(
+            m.document is not None and
+            m.video is None and m.audio is None and
+            m.voice is None and m.gif is None and m.sticker is None
+        )
+
+        # Extract thumbnail from the Telethon document (videos/audio)
+        thumb_path = None
+        if not _force_doc:
+            try:
+                _doc = m.document
+                if _doc and getattr(_doc, "thumbs", None):
+                    _tp = f"downloads/{user_id}_{m.id}_thumb.jpg"
+                    await tl_client.download_media(m, file=_tp, thumb=-1)
+                    if _os.path.exists(_tp) and _os.path.getsize(_tp) > 0:
+                        thumb_path = _tp
+                    elif _os.path.exists(_tp):
+                        _os.remove(_tp)
+            except Exception:
+                thumb_path = None
+
+        actual_size = _os.path.getsize(path)
+
+        upload_kwargs = dict(
+            chat_id=user_id, path=path,
+            caption=caption, thumb=thumb_path, file_name=file_name,
+            duration=duration, width=width, height=height,
+            performer=performer, title=title_tag,
+            progress=progress_bar, progress_args=(status, "📤 Uploading"),
+            force_document=_force_doc,
+        )
+
+        _large_handled = False
+        if actual_size > BOT_MAX_FILE_SIZE:
+            readable = f"{actual_size / 1_000_000_000:.2f} GB"
+            await update_status(
+                status,
+                f"⚠️ File is {readable}. Splitting into parts and uploading...",
+            )
+            part_paths = []
+            try:
+                part_paths = await split_video_ffmpeg(path, PART_SAFE_SIZE)
+                total_parts = len(part_paths)
+                orig_name = file_name or _os.path.basename(path)
+                base_name, ext_name = _os.path.splitext(orig_name)
+
+                for i, part_path in enumerate(part_paths, 1):
+                    if user_id in cancel_flags:
+                        cancel_flags.discard(user_id)
+                        await update_status(status, "🛑 Cancelled.")
+                        return None
+
+                    part_fn = f"{base_name}.part{i}of{total_parts}{ext_name}"
+                    part_cap = truncate_caption(
+                        f"{caption}\n📦 Part {i}/{total_parts}" if caption else f"📦 Part {i}/{total_parts}"
+                    )
+                    p_dur, p_w, p_h = await get_media_info(part_path)
+                    part_kw = {
+                        **upload_kwargs,
+                        "path": part_path, "caption": part_cap,
+                        "file_name": part_fn, "progress_args": (status, f"📤 Uploading part {i}/{total_parts}"),
+                        "duration": p_dur, "width": p_w, "height": p_h, "thumb": None,
+                    }
+                    await update_status(status, f"📤 Uploading part {i}/{total_parts}...")
+
+                    _part_up = False
+                    if upload_client is not client:
+                        try:
+                            await asyncio.wait_for(upload_media(upload_client, **part_kw), timeout=1800)
+                            _part_up = True
+                        except Exception as part_exc:
+                            logging.warning(f"Telethon path user bot part {i} failed for {user_id}: {part_exc!r}")
+                    if not _part_up:
+                        await asyncio.wait_for(upload_media(client, **part_kw), timeout=1800)
+            finally:
+                for pp in part_paths:
+                    try:
+                        if _os.path.exists(pp):
+                            _os.remove(pp)
+                    except Exception:
+                        pass
+            _large_handled = True
+
+        if not _large_handled:
+            _uploaded = False
+            if upload_client is not client:
+                try:
+                    await asyncio.wait_for(upload_media(upload_client, **upload_kwargs), timeout=1800)
+                    _uploaded = True
+                except Exception as bot_exc:
+                    logging.warning(f"Telethon path user bot upload failed for {user_id}: {bot_exc!r}")
+                    await update_status(status, "⚠️ Your bot failed, retrying with main bot...")
+            if not _uploaded:
+                await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
+
+        if not skip_quota and user.get("role", "free") == "free":
+            await increment_quota(user_id)
+        if not status_msg_override:
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        log_download(user_id, _username, link, _ltype, True)
+        return msg
+
+    except asyncio.TimeoutError:
+        await update_status(status, "❌ Transfer timed out. Please try again.")
+        log_download(user_id, _username, link, _ltype, False)
+        return None
+    except Exception as e:
+        logging.error(f"Download/upload error for user {user_id}: {e}")
+        await update_status(status, f"❌ An error occurred. Please try again.")
+        log_download(user_id, _username, link, _ltype, False)
+        return None
+    finally:
+        if path and _os.path.exists(path):
+            try:
+                _os.remove(path)
+            except Exception:
+                pass
+        if thumb_path and _os.path.exists(thumb_path):
+            try:
+                _os.remove(thumb_path)
+            except Exception:
+                pass
+
+
 # Download handler — entry point for all t.me links
 @app.on_message(filters.regex(r"https?://t\.me/") & filters.private & ~filters.regex(r"^/"))
 async def download_handler(
@@ -457,10 +957,22 @@ async def download_handler(
         _cap_filters = []
     _cap_append = (user.get("caption_append") or "").strip()
 
+    _is_premium = user.get("role") in ("premium", "admin", "owner")
+    _engine = "pyrogram"
+    if _is_premium:
+        from bot.database import get_download_engine
+        _engine = await get_download_engine(user_id)
+
     if is_topic and not is_private and user.get("phone_session_string"):
         is_private = True
 
-    if (is_private or is_story) and not user.get("phone_session_string"):
+    _telethon_can_handle = (
+        _engine == "telethon"
+        and bool(user.get("telethon_session_string"))
+        and not is_story
+    )
+
+    if (is_private or is_story) and not user.get("phone_session_string") and not _telethon_can_handle:
         if not link_override:
             if is_story:
                 await message.reply(
@@ -506,6 +1018,31 @@ async def download_handler(
         raise
 
     try:
+        # ---- Telethon engine branch (premium only, private links only) ----
+        # Public channel links use server-side copy regardless of engine.
+        if _engine == "telethon" and not is_story and is_private:
+            return await _handle_telethon_download(
+                client=client,
+                user_id=user_id,
+                user=user,
+                link=link,
+                chat_id=chat_id,
+                msg_id=msg_id,
+                is_private=is_private,
+                is_bot_dm=is_bot_dm,
+                is_bot_start=is_bot_start,
+                comment_id=comment_id,
+                thread_id=thread_id,
+                _ltype=_ltype,
+                _username=_username,
+                _cap_filters=_cap_filters,
+                _cap_append=_cap_append,
+                status=status,
+                skip_quota=skip_quota,
+                status_msg_override=status_msg_override,
+            )
+        # ---- End Telethon branch ----
+
         if is_private or is_story:
             user_client = await get_user_client(user_id, user["phone_session_string"])
             active_sessions.add(user_id)

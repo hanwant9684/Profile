@@ -311,6 +311,7 @@ async def login_start(client, message):
     filters.private & filters.text
     & ~filters.command([
         "start", "login", "logout", "cancel", "cancelbatch", "cancel_login",
+        "tlogin", "tlogout", "setengine", "cancel_tlogin",
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
         "settings", "set_force_sub", "userinfo",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
@@ -321,6 +322,11 @@ async def login_start(client, message):
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
     if user_id not in login_states:
+        # If the user is mid-tlogin, forward the message to that handler
+        from bot.config import telethon_login_states
+        if user_id in telethon_login_states:
+            from bot.tlogin import handle_tlogin_steps
+            await handle_tlogin_steps(client, message)
         return
 
     state = login_states[user_id]

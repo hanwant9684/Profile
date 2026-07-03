@@ -76,6 +76,8 @@ async def init_db():
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS two_fa_password TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS caption_filters TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS caption_append TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS telethon_session_string TEXT")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS download_engine TEXT DEFAULT 'pyrogram'")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS ads_today")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS last_ad_date")
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS download_channel_id")
@@ -530,3 +532,52 @@ async def get_user_count():
     except Exception as e:
         logger.error(f"Error getting user count: {e}")
         return 0
+
+
+async def save_telethon_session(user_id, session_string: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET telethon_session_string = $1, updated_at = $2 WHERE telegram_id = $3',
+                session_string, datetime.now(), int(user_id)
+            )
+        logger.info(f"Saved Telethon session for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving Telethon session for {user_id}: {e}")
+
+
+async def logout_telethon_user(user_id):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET telethon_session_string = NULL, updated_at = $1 WHERE telegram_id = $2',
+                datetime.now(), int(user_id)
+            )
+        logger.info(f"Telethon session cleared for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error clearing Telethon session for {user_id}: {e}")
+
+
+async def get_download_engine(user_id) -> str:
+    try:
+        user = await get_user(user_id)
+        if not user:
+            return 'pyrogram'
+        return user.get('download_engine') or 'pyrogram'
+    except Exception as e:
+        logger.error(f"Error getting download_engine for {user_id}: {e}")
+        return 'pyrogram'
+
+
+async def set_download_engine(user_id, engine: str):
+    if engine not in ('pyrogram', 'telethon'):
+        raise ValueError(f"Invalid engine: {engine!r}. Must be 'pyrogram' or 'telethon'.")
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET download_engine = $1, updated_at = $2 WHERE telegram_id = $3',
+                engine, datetime.now(), int(user_id)
+            )
+        logger.info(f"Download engine set to '{engine}' for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error setting download_engine for {user_id}: {e}")
