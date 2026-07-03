@@ -11,4 +11,5 @@ python-dotenv
 pyyaml
 redis
 tgcrypto
+telethon
 uvloop

@@ -30,6 +30,7 @@ async def main():
     import bot.transfer
     import bot.login
     import bot.handlers
+    import bot.tlogin
     import bot.batch
     import bot.admin
     import bot.info
