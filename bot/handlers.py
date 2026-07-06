@@ -63,6 +63,33 @@ active_sessions: set = set()
 _cleanup_started = False
 
 
+async def _evict_user_session(user_id: int) -> None:
+    """Disconnect and remove a stale phone session from all in-memory caches.
+
+    Clears the Pyrogram userbot client (user_clients) and the Telethon client
+    (telethon_clients) — both use the phone session string that just expired.
+    Does NOT touch user_bots: the upload bot uses a separate bot token and is
+    unaffected by phone-session expiry.
+
+    Called immediately before logout_user() so the next request gets a fresh
+    client rather than reusing the now-invalid cached one.
+    """
+    entry = user_clients.pop(user_id, None)
+    if entry:
+        try:
+            await asyncio.wait_for(entry["client"].stop(), timeout=5)
+        except Exception:
+            pass
+    # Also evict Telethon client — it uses the same phone session
+    tl_entry = telethon_clients.pop(user_id, None)
+    telethon_clients_last_used.pop(user_id, None)
+    if tl_entry:
+        try:
+            await tl_entry["client"].disconnect()
+        except Exception:
+            pass
+
+
 
 async def get_user_client(user_id: int, session_str: str) -> Client:
     global _cleanup_started
@@ -156,9 +183,12 @@ async def _cleanup_loop():
             uid for uid, last in list(user_bots_last_used.items())
             if uid not in active_sessions
             and uid not in batch_sessions
+            and uid not in active_downloads
             and now - last > 3600
         ]
         for uid in stale_bots:
+            if uid in active_downloads:  # re-check: may have entered since list was built
+                continue
             user_bots_last_used.pop(uid, None)
             await stop_user_bot(uid)
             logging.info(f"Evicted idle user bot for user {uid}")
@@ -167,9 +197,12 @@ async def _cleanup_loop():
             uid for uid, last in list(telethon_clients_last_used.items())
             if uid not in active_sessions
             and uid not in batch_sessions
+            and uid not in active_downloads
             and now - last > 3600
         ]
         for uid in stale_tl:
+            if uid in active_downloads:  # re-check: may have entered since list was built
+                continue
             telethon_clients_last_used.pop(uid, None)
             entry = telethon_clients.pop(uid, None)
             if entry:
@@ -556,17 +589,33 @@ async def _handle_telethon_download(
     if len(messages) > 1:
         await update_status(status, f"📥 Downloading album ({len(messages)} files)...")
 
+        async def _tl_album_progress(current, total):
+            try:
+                await progress_bar(current, total, status, "📥 Downloading album")
+            except StopTransmission:
+                raise
+            except Exception:
+                pass
+
         async def _dl_one_tl(m):
             try:
                 from bot.fasttelethon import download_file_fast
                 _ext = (getattr(m.file, "ext", "") or "") if m.file else ""
                 _out = f"downloads/{user_id}_{m.id}{_ext}"
-                return await download_file_fast(tl_client, m, _out)
+                return await download_file_fast(tl_client, m, _out, _tl_album_progress)
+            except StopTransmission:
+                raise
             except Exception as dl_e:
                 logging.warning(f"Telethon album item download failed: {dl_e}")
                 return None
 
         results = await asyncio.gather(*[_dl_one_tl(m) for m in messages], return_exceptions=True)
+        # Propagate cancellation — StopTransmission means /cancel was pressed mid-album
+        for result in results:
+            if isinstance(result, StopTransmission):
+                cancel_flags.discard(user_id)
+                await update_status(status, "🛑 Cancelled.")
+                return None
         paths = []
         valid_pairs = []
         for m, result in zip(messages, results):
@@ -681,6 +730,8 @@ async def _handle_telethon_download(
         async def _tl_progress(current, total):
             try:
                 await progress_bar(current, total, status, "📥 Downloading")
+            except StopTransmission:
+                raise
             except Exception:
                 pass
 
@@ -1055,9 +1106,10 @@ async def download_handler(
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
+                await _evict_user_session(user_id)
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
-                return None
+                return "SESSION_INVALID"
             except Exception as e:
                 await update_status(status, f"❌ Could not fetch story: {e}")
                 return None
@@ -1070,7 +1122,10 @@ async def download_handler(
             try:
                 await update_status(status, "🤖 Sending start command to bot...")
                 sent = await user_client.send_message(bot_start_username, f"/start {bot_start_payload}")
-                await asyncio.sleep(5)
+                for _ in range(5):
+                    if user_id in cancel_flags:
+                        break
+                    await asyncio.sleep(1)
 
                 recent = await _bot_start_collect_media(user_client, bot_start_username, sent.id)
 
@@ -1089,9 +1144,10 @@ async def download_handler(
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
+                await _evict_user_session(user_id)
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
-                return None
+                return "SESSION_INVALID"
             except Exception as e:
                 await update_status(status, f"❌ Could not trigger bot start link: {e}")
                 return None
@@ -1116,9 +1172,10 @@ async def download_handler(
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
+                await _evict_user_session(user_id)
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
-                return None
+                return "SESSION_INVALID"
             except Exception as e:
                 await update_status(status, f"❌ Could not fetch message from bot DM: {e}")
                 return None
@@ -1133,9 +1190,10 @@ async def download_handler(
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
                 logging.warning(f"Session expired for user {user_id}: {type(e).__name__} — session cleared")
+                await _evict_user_session(user_id)
                 await logout_user(user_id)
                 await update_status(status, "❌ Your session expired. Please /login again.")
-                return None
+                return "SESSION_INVALID"
             except Exception as e:
                 await update_status(status, f"❌ Could not fetch message: {e}")
                 return None
@@ -1399,13 +1457,20 @@ async def download_handler(
         if len(messages) > 1:
             await update_status(status, f"📥 Downloading album ({len(messages)} files)...")
 
+            async def _album_dl_progress(current, total):
+                await progress_bar(current, total, status, "📥 Downloading album")
+
             download_tasks = [
-                download_media(user_client, m, progress=None, progress_args=())
+                download_media(user_client, m, progress=_album_dl_progress, progress_args=())
                 for m in messages
             ]
             results = await asyncio.gather(*download_tasks, return_exceptions=True)
 
             for result in results:
+                if isinstance(result, StopTransmission):
+                    cancel_flags.discard(user_id)
+                    await update_status(status, "🛑 Cancelled.")
+                    return None
                 if isinstance(result, (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                                        AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated)):
                     raise result
@@ -1475,6 +1540,10 @@ async def download_handler(
                 except Exception as grp_exc:
                     logging.warning(f"send_media_group failed ({grp_exc}), falling back to individual uploads")
                     for idx, (m, path) in enumerate(valid_pairs):
+                        if user_id in cancel_flags:
+                            cancel_flags.discard(user_id)
+                            await update_status(status, "🛑 Cancelled.")
+                            return None
                         # Caption only on the first file — same as manual Telegram album behaviour.
                         cap = truncate_caption(apply_caption_filter(m.caption or "", _cap_filters, _cap_append)) if idx == 0 else ""
                         dur = w = h = 0
@@ -1747,13 +1816,14 @@ async def download_handler(
     except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
             AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated) as e:
         logging.warning(f"Session error for user {user_id}: {type(e).__name__} — session cleared")
+        await _evict_user_session(user_id)
         await logout_user(user_id)
         try:
             await update_status(status, "❌ Your Telegram session has expired or was revoked. Please use /login to reconnect.")
         except Exception:
             pass
         log_download(user_id, _username, link, _ltype, False)
-        return None
+        return "SESSION_INVALID"
     except Exception as e:
         logging.error(f"Handler error for user {user_id}: {e}")
         try:
@@ -1793,43 +1863,64 @@ async def help_command(client, message):
 
     if is_premium:
         text = (
-            "📖 **Help**\n\n"
-            "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
-            "🔒 **Private / restricted links** — requires two steps:\n"
-            " /login — connect your Telegram account\n"
-            " /setbot — register your upload bot\n\n"
-            "🤖 **Extract from other bots**\n"
-            "• `https://t.me/BotName/123` — pull a file from your DM history with that bot\n"
-            "• `https://t.me/BotName?start=AB23RJDND` — give to the bot and receive its files\n"
-            "Both require /login.\n\n"
-            "🤖 **Bot commands**\n"
-            " /setbot — set or replace your upload bot\n"
-            " /rembot — remove your upload bot\n\n"
+            "📖 **Help — Premium**\n\n"
+
+            "🔗 **Links**\n"
+            "• Public `t.me` links — send and receive instantly, no setup needed\n"
+            "• Private / restricted links — requires /login + /setbot\n"
+            "• Bot DM links — `t.me/BotName/123` or `t.me/BotName?start=XXX` (requires /login)\n\n"
+
+            "👤 **Account**\n"
+            "/login — connect your Telegram account (needed for private links)\n"
+            "/logout — disconnect your account\n\n"
+
+            "🤖 **Upload Bot**\n"
+            "/setbot `<token>` — register your own upload bot\n"
+            "/rembot — remove your upload bot\n\n"
+
+            "⚡ **Download Engine** _(Premium only)_\n"
+            "/tlogin — connect a Telethon session for faster private-link downloads\n"
+            "/tlogout — disconnect your Telethon session\n"
+            "/setengine `pyrogram` — switch to standard engine\n"
+            "/setengine `telethon` — switch to fast engine _(requires /tlogin + /setbot)_\n\n"
+
             "📦 **Batch**\n"
-            "`/batch start_link end_link` — download a range\n"
-            "`/batch start_link 50` — download next 50\n\n"
+            "/batch `start_link end_link` — download a range of messages\n"
+            "/batch `start_link 50` — download next 50 from a link\n"
+            "/cancelbatch — stop an active batch\n\n"
+
             "🔗 **Multi-link**\n"
-            " /mlinks — paste up to 50 links at once\n\n"
+            "/mlinks — paste up to 50 links at once\n\n"
+
             "✏️ **Caption Tools**\n"
-            " /capadd — add custom text to the end of every caption\n"
-            "  `/capadd set <text>` · `/capadd del`\n"
-            " /caprem — remove specific words/phrases from captions\n"
-            "  `/caprem set <text>` · `/caprem del <text>` · `/caprem reset`\n"
-            "  _(use `\\n` in text for line breaks)_\n\n"
-            " /cancel — stop an active download"
+            "/capadd `set <text>` — append text to every caption\n"
+            "/capadd `del` — remove appended text\n"
+            "/caprem `set <text>` — remove words/phrases from captions\n"
+            "/caprem `del <text>` — remove a specific filter\n"
+            "/caprem `reset` — clear all caption filters\n"
+            "_(use `\\n` in text for line breaks)_\n\n"
+
+            "/cancel — stop an active download"
         )
     else:
         text = (
             "📖 **Help**\n\n"
-            "🔗 **Public links** — send any public `t.me` link and it's delivered here instantly.\n\n"
-            "🔒 **Private / restricted links** — use `/login` to connect your Telegram account.\n\n"
-            "🤖 **Extract from other bots**\n"
-            "• `https://t.me/BotName/123` — pull from your DM history with that bot\n"
-            "• `https://t.me/BotName?start=AB23RJDND` — give to the bot and receive its files\n"
-            "Both require /login.\n\n"
-            "💰 **Quota** — 2 files/day · 5 files/month\n\n"
-            " /cancel — stop an active download\n\n"
-            "💎 **Want unlimited downloads?** → /upgrade"
+
+            "🔗 **Links**\n"
+            "• Public `t.me` links — send and receive instantly, no setup needed\n"
+            "• Private / restricted links — requires /login\n"
+            "• Bot DM links — `t.me/BotName/123` or `t.me/BotName?start=XXX` (requires /login)\n\n"
+
+            "👤 **Account**\n"
+            "/login — connect your Telegram account\n"
+            "/logout — disconnect your account\n\n"
+
+            "📊 **Quota**\n"
+            "Free plan: 2 files/day · 5 files/month\n\n"
+
+            "/cancel — stop an active download\n\n"
+
+            "💎 **Want unlimited downloads + batch + fast engine?** → /upgrade"
         )
 
     await message.reply(

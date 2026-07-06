@@ -3,7 +3,7 @@ import re
 import logging
 
 from pyrogram import filters
-from bot.config import app, batch_cancel_flags, batch_sessions
+from bot.config import app, batch_cancel_flags, batch_sessions, cancel_flags
 from bot.database import get_user
 from bot.transfer import get_user_bot
 
@@ -166,21 +166,41 @@ async def batch_handler(client, message):
                     skip_quota=True,
                     user_override=user,
                 )
-                if result == "ALBUM_DEDUP":
+                if result == "SESSION_INVALID":
+                    try:
+                        await status.edit_text(
+                            f"🛑 **Batch stopped — session expired**\n\n"
+                            f"✅ Done: {done} | ❌ Skipped: {skipped}\n\n"
+                            f"Your Telegram session expired or was revoked.\n"
+                            f"Please /login again, then restart the batch."
+                        )
+                    except Exception:
+                        pass
+                    return
+                elif result == "ALBUM_DEDUP":
                     pass
                 elif result is not None:
                     done += 1
                     if mid != ids[-1]:
-                        await asyncio.sleep(10)
+                        for _ in range(10):
+                            if user_id in batch_cancel_flags:
+                                break
+                            await asyncio.sleep(1)
                 else:
                     skipped += 1
                     if mid != ids[-1]:
-                        await asyncio.sleep(10)
+                        for _ in range(10):
+                            if user_id in batch_cancel_flags:
+                                break
+                            await asyncio.sleep(1)
             except Exception as e:
                 logging.error(f"Batch item error (link={link}): {e}")
                 skipped += 1
                 if mid != ids[-1]:
-                    await asyncio.sleep(10)
+                    for _ in range(10):
+                        if user_id in batch_cancel_flags:
+                            break
+                        await asyncio.sleep(1)
 
         try:
             await status.edit_text(
@@ -290,21 +310,41 @@ async def mlinks_handler(client, message):
                     skip_quota=True,
                     user_override=user,
                 )
-                if result == "ALBUM_DEDUP":
+                if result == "SESSION_INVALID":
+                    try:
+                        await status.edit_text(
+                            f"🛑 **Stopped — session expired**\n\n"
+                            f"✅ Done: {done} | ❌ Skipped: {skipped}\n\n"
+                            f"Your Telegram session expired or was revoked.\n"
+                            f"Please /login again, then restart."
+                        )
+                    except Exception:
+                        pass
+                    return
+                elif result == "ALBUM_DEDUP":
                     pass
                 elif result is not None:
                     done += 1
                     if idx < count:
-                        await asyncio.sleep(10)
+                        for _ in range(10):
+                            if user_id in batch_cancel_flags:
+                                break
+                            await asyncio.sleep(1)
                 else:
                     skipped += 1
                     if idx < count:
-                        await asyncio.sleep(10)
+                        for _ in range(10):
+                            if user_id in batch_cancel_flags:
+                                break
+                            await asyncio.sleep(1)
             except Exception as e:
                 logging.error(f"mlinks item error (link={link}): {e}")
                 skipped += 1
                 if idx < count:
-                    await asyncio.sleep(10)
+                    for _ in range(10):
+                        if user_id in batch_cancel_flags:
+                            break
+                        await asyncio.sleep(1)
 
         try:
             await status.edit_text(
@@ -325,6 +365,7 @@ async def cancelbatch_handler(client, message):
     user_id = message.from_user.id
     if user_id in batch_sessions:
         batch_cancel_flags.add(user_id)
-        await message.reply("🛑 Batch cancellation requested. Current item will finish first.")
+        cancel_flags.add(user_id)
+        await message.reply("🛑 Cancelling batch...")
     else:
         await message.reply("ℹ️ No active batch to cancel.")

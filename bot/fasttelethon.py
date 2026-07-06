@@ -16,13 +16,14 @@ import asyncio
 import logging
 import math
 import os
+from pyrogram import StopTransmission
 
 logger = logging.getLogger(__name__)
 
 # Per-request size fed to iter_download's request_size param.
 # Telethon automatically clamps this to a valid multiple of 4096, so we
 # don't need to worry about alignment ourselves.
-REQUEST_SIZE = 1 * 1024 * 1024   # 512 KB
+REQUEST_SIZE = 512 * 1024   # 512 KB
 DEFAULT_WORKERS = 5
 
 
@@ -83,6 +84,8 @@ async def _download_segment(
             if progress_callback and file_size:
                 try:
                     await progress_callback(downloaded_ref[0], file_size)
+                except StopTransmission:
+                    raise
                 except Exception:
                     pass
 
@@ -155,22 +158,29 @@ async def download_file_fast(
     part_paths = [f"{out_path}.seg{i}" for i in range(len(segments))]
     downloaded_ref = [0]   # shared byte counter across workers
 
+    tasks = [
+        asyncio.ensure_future(_download_segment(
+            client=client,
+            message=message,
+            start_offset=seg[0],
+            chunk_size=request_size,
+            n_chunks=seg[1],
+            out_path=part_paths[i],
+            file_size=file_size,
+            downloaded_ref=downloaded_ref,
+            progress_callback=progress_callback,
+        ))
+        for i, seg in enumerate(segments)
+    ]
     try:
-        # Run all segment workers in parallel
-        await asyncio.gather(*[
-            _download_segment(
-                client=client,
-                message=message,
-                start_offset=seg[0],
-                chunk_size=request_size,
-                n_chunks=seg[1],
-                out_path=part_paths[i],
-                file_size=file_size,
-                downloaded_ref=downloaded_ref,
-                progress_callback=progress_callback,
-            )
-            for i, seg in enumerate(segments)
-        ])
+        # Run all segment workers in parallel; cancel all if any one fails or is cancelled
+        try:
+            await asyncio.gather(*tasks)
+        except Exception:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         # Concatenate segment files in order into the final output
         with open(out_path, "wb") as out_fh:

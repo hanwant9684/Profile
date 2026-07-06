@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import logging
-from pyrogram import Client
+from pyrogram import Client, StopTransmission
 from pyrogram.errors.exceptions.bad_request_400 import (
     PhotoExtInvalid,
     PhotoInvalidDimensions,
@@ -384,6 +384,8 @@ async def download_media(client, message, progress=None, progress_args=()):
         except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                 AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
             raise
+        except StopTransmission:
+            raise
         except Exception as e:
             if attempt == 2:
                 raise
@@ -465,6 +467,8 @@ async def upload_media(
                 performer=performer,
                 title=title,
             )
+        except StopTransmission:
+            raise
         except Exception as e:
             last_exc = e
             if attempt == 2 or any(code in str(e) for code in _NO_RETRY_CODES):
