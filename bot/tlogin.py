@@ -13,6 +13,7 @@ from pyrogram import filters
 from pyrogram.types import Message, LinkPreviewOptions
 
 from bot.config import app, API_ID, API_HASH, telethon_login_states, telethon_clients, telethon_clients_last_used
+from bot.link_utils import TG_LINK_HOST_RE
 from bot.database import (
     get_user,
     save_telethon_session,
@@ -242,7 +243,7 @@ async def cancel_tlogin(client, message: Message):
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
         "setbot", "rembot", "caprem", "capadd",
     ])
-    & ~filters.regex(r"https://t\.me/")
+    & ~filters.regex(TG_LINK_HOST_RE)
 )
 async def handle_tlogin_steps(client, message: Message):
     user_id = message.from_user.id

@@ -15,6 +15,7 @@ from pyrogram.errors import (
     AccessTokenExpired, AccessTokenInvalid,
 )
 
+from bot.link_utils import TG_LINK_HOST_RE, normalize_telegram_link
 from bot.config import (
     app, API_ID, API_HASH,
     active_downloads, global_download_semaphore,
@@ -347,7 +348,7 @@ async def verify_force_sub(client: Client, user_id: int):
 
 # Link parsing
 def _parse_story_link(link: str):
-    link_clean = re.sub(r"\?.*$", "", link).rstrip("/")
+    link_clean = normalize_telegram_link(re.sub(r"\?.*$", "", link).rstrip("/"))
 
     m = re.fullmatch(r"https://t\.me/c/(\d+)/s/(\d+)", link_clean)
     if m:
@@ -361,6 +362,7 @@ def _parse_story_link(link: str):
 
 
 def _parse_bot_start_link(link: str):
+    link = normalize_telegram_link(link)
     m = re.match(r"https://t\.me/([^/?#]+)\?start=([^&\s]+)", link)
     if m:
         return m.group(1), m.group(2)
@@ -379,6 +381,7 @@ async def _bot_start_collect_media(user_client, username, after_id):
 
 
 def _parse_link(link: str):
+    link = normalize_telegram_link(link)
     comment_id = None
     comment_match = re.search(r"[?&]comment=(\d+)", link)
     if comment_match:
@@ -911,8 +914,8 @@ async def _handle_telethon_download(
                 pass
 
 
-# Download handler — entry point for all t.me / telegram.me links
-@app.on_message(filters.regex(r"https?://(t\.me|telegram\.me)/") & filters.private & ~filters.regex(r"^/"))
+# Download handler — entry point for all t.me / telegram.me / telegram.dog links
+@app.on_message(filters.regex(TG_LINK_HOST_RE) & filters.private & ~filters.regex(r"^/"))
 async def download_handler(
     client,
     message,
@@ -924,8 +927,6 @@ async def download_handler(
 ):
     user_id = message.from_user.id
     link = link_override or message.text.strip()
-    # Normalize telegram.me → t.me so all parsing logic is uniform
-    link = re.sub(r"https?://telegram\.me/", "https://t.me/", link)
     _username = getattr(message.from_user, "username", None)
     _ltype = "private"
 

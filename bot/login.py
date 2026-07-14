@@ -10,6 +10,7 @@ from bot.database import (
 )
 from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
+from bot.link_utils import TG_LINK_HOST_RE
 
 
 # /start
@@ -317,7 +318,7 @@ async def login_start(client, message):
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
         "setbot", "rembot", "caprem", "capadd",
     ])
-    & ~filters.regex(r"https://t\.me/")
+    & ~filters.regex(TG_LINK_HOST_RE)
 )
 async def handle_login_steps(client, message: Message):
     user_id = message.from_user.id
