@@ -911,8 +911,8 @@ async def _handle_telethon_download(
                 pass
 
 
-# Download handler — entry point for all t.me links
-@app.on_message(filters.regex(r"https?://t\.me/") & filters.private & ~filters.regex(r"^/"))
+# Download handler — entry point for all t.me / telegram.me links
+@app.on_message(filters.regex(r"https?://(t\.me|telegram\.me)/") & filters.private & ~filters.regex(r"^/"))
 async def download_handler(
     client,
     message,
@@ -924,6 +924,8 @@ async def download_handler(
 ):
     user_id = message.from_user.id
     link = link_override or message.text.strip()
+    # Normalize telegram.me → t.me so all parsing logic is uniform
+    link = re.sub(r"https?://telegram\.me/", "https://t.me/", link)
     _username = getattr(message.from_user, "username", None)
     _ltype = "private"
 

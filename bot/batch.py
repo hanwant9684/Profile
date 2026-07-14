@@ -10,6 +10,8 @@ from bot.transfer import get_user_bot
 
 # Link parsing helpers
 def _parse_batch_link(link: str):
+    # Normalize telegram.me → t.me so all patterns are uniform
+    link = re.sub(r"https?://telegram\.me/", "https://t.me/", link)
     link = re.sub(r"\?.*$", "", link).rstrip("/")
 
     m = re.fullmatch(r"https://t\.me/c/(\d+)/(\d+)/(\d+)", link)
@@ -252,8 +254,10 @@ async def mlinks_handler(client, message):
         await message.reply("⚠️ You already have an active batch running. Use /cancelbatch to stop it.")
         return
 
-    links = re.findall(r"https?://t\.me/\S+", message.text)
+    links = re.findall(r"https?://(?:t\.me|telegram\.me)/\S+", message.text)
     links = [l.rstrip(".,;)") for l in links]
+    # Normalize telegram.me → t.me
+    links = [re.sub(r"https?://telegram\.me/", "https://t.me/", l) for l in links]
     links = [l for l in links if l]
 
     if not links:
