@@ -16,13 +16,16 @@ from pyrogram.errors import (
 )
 
 from bot.link_utils import TG_LINK_HOST_RE, normalize_telegram_link
+import bot.config as _bot_config
 from bot.config import (
     app, API_ID, API_HASH,
     active_downloads, global_download_semaphore,
     cancel_flags, batch_sessions, login_states,
-    SUPPORT_CHAT_LINK,
     telethon_clients, telethon_clients_last_used,
 )
+
+def _support_link() -> str:
+    return _bot_config.SUPPORT_CHAT_LINK or f"https://t.me/{_bot_config.BOT_USERNAME}"
 from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, logout_user
 from bot.transfer import (
     download_media, upload_media, truncate_caption, apply_caption_filter, get_user_bot,
@@ -1929,40 +1932,11 @@ async def help_command(client, message):
     await message.reply(
         text,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
-            [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
+            [InlineKeyboardButton("👑 Owner", url="https://t.me/Owner_wolfy")],
+            [InlineKeyboardButton("💬 Support", url=_support_link())],
         ]),
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
-@app.on_message(filters.command("upgrade") & filters.private)
-async def upgrade_command(client, message):
-    from bot.config import UPI_ID, PAYPAL_LINK, APPLE_PAY_ID, CRYPTO_ADDRESS, CARD_PAYMENT_LINK
-    await message.reply(
-        "💎 **Premium Plans**\n\n"
-        "⚡ **Standard**\n"
-        "🔸 10 days — $3\n"
-        "🔸 30 days — $4\n"
-        "🔸 60 days — $8\n"
-        "🔸 90 days — $12\n\n"
-        "• Unlimited downloads\n"
-        "• Batch up to 50 files\n"
-        "• Multi-link up to 50\n"
-        "• Fast speed\n"
-        "• Caption tools (/capadd · /caprem)\n\n"
-        "🔥 **1 Year — $45**\n"
-        "• All features + priority support\n\n"
-        "💳 **Payment**\n"
-        f"🪙 [Crypto / Binance]({CRYPTO_ADDRESS})\n"
-        f"🇮🇳 [UPI]({UPI_ID})\n"
-        f"💲 [PayPal]({PAYPAL_LINK})\n"
-        f"🍎 [Apple Pay]({APPLE_PAY_ID})\n"
-        f"💳 [Credit/Debit Card]({CARD_PAYMENT_LINK})\n\n"
-        "After payment send screenshot to **@Owner_Wolfy**.",
-        link_preview_options=LinkPreviewOptions(is_disabled=True),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Owner", url="https://t.me/Owner_Wolfy")],
-            [InlineKeyboardButton("Support", url=SUPPORT_CHAT_LINK)],
-        ]),
-    )
+# /upgrade is handled in bot/payment_handlers.py (auto-payment system)

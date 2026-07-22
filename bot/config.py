@@ -23,12 +23,20 @@ OWNER_ID_RAW = os.environ.get("OWNER_ID")
 OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW and OWNER_ID_RAW.isdigit() else None
 SUPPORT_CHAT_LINK = os.environ.get("SUPPORT_CHAT_LINK", "https://t.me/Wolfy004chatbot")
 
+# ── Payment gateway keys ──────────────────────────────────────────────────────
+RAZORPAY_KEY_ID         = os.environ.get("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET     = os.environ.get("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+OXAPAY_MERCHANT_KEY     = os.environ.get("OXAPAY_MERCHANT_KEY", "")
+PAYPAL_CLIENT_ID        = os.environ.get("PAYPAL_CLIENT_ID", "")
+PAYPAL_CLIENT_SECRET    = os.environ.get("PAYPAL_CLIENT_SECRET", "")
+PAYPAL_WEBHOOK_ID       = os.environ.get("PAYPAL_WEBHOOK_ID", "")
 
-PAYPAL_LINK = os.environ.get("PAYPAL_LINK", "Contact Owner")
-UPI_ID = os.environ.get("UPI_ID", "Contact Owner")
-APPLE_PAY_ID = os.environ.get("APPLE_PAY_ID", "Contact Owner")
-CRYPTO_ADDRESS = os.environ.get("CRYPTO_ADDRESS", "Contact Owner")
-CARD_PAYMENT_LINK = os.environ.get("CARD_PAYMENT_LINK", "Contact Owner")
+# ── Webhook server ────────────────────────────────────────────────────────────
+WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "https://wolfy004bot.duckdns.org")
+WEBHOOK_PORT     = int(os.environ.get("WEBHOOK_PORT", "8080"))
+# Set at runtime by main.py after app.start() via app.get_me()
+BOT_USERNAME: str = os.environ.get("BOT_USERNAME", "")
 
 missing_vars = []
 if not API_ID:

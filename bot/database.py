@@ -98,6 +98,41 @@ async def init_db():
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_role_expiry ON users(role, premium_expiry_date)')
             await conn.execute('CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)')
 
+            # ── Payments table (auto-upgrade tracking) ────────────────────
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    id SERIAL PRIMARY KEY,
+                    order_id TEXT UNIQUE NOT NULL,
+                    telegram_id BIGINT NOT NULL,
+                    plan_days INTEGER NOT NULL,
+                    amount_usd NUMERIC(10,2),
+                    amount_inr NUMERIC(10,2),
+                    gateway TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    txn_id TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            await conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_payments_telegram_id ON payments(telegram_id)'
+            )
+            await conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)'
+            )
+
+            # ── Payment dedup table (persistent, survives restarts) ───────
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS payment_dedup (
+                    dedup_key TEXT PRIMARY KEY,
+                    processed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            # Prune entries older than 30 days to prevent unbounded growth
+            await conn.execute(
+                "DELETE FROM payment_dedup WHERE processed_at < NOW() - INTERVAL '30 days'"
+            )
+
         logger.info("PostgreSQL database initialized")
     except Exception as e:
         logger.error(f"PostgreSQL initialization error: {e}")
@@ -304,28 +339,43 @@ async def set_user_role(user_id, role, duration_days=None):
 
 
 async def extend_premium(user_id: int, days: int):
+    """
+    Atomically extend (or grant) premium for user_id by the given number of days.
+
+    Uses a single SQL statement so concurrent webhook calls stack correctly:
+    - If the user already has a future expiry, days are added on top of it.
+    - If expired (or no expiry), the clock starts from NOW().
+    No fetch-then-update race condition.
+    """
+    _require_pool()
     try:
-        from datetime import timezone
-        now = datetime.now(timezone.utc)
         async with pool.acquire() as conn:
-            current_expiry = await conn.fetchval(
-                'SELECT premium_expiry_date FROM users WHERE telegram_id = $1',
-                int(user_id)
-            )
-
-        if current_expiry and current_expiry > now:
-            new_expiry = current_expiry + timedelta(days=days)
-        else:
-            new_expiry = now + timedelta(days=days)
-
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET role = 'premium', premium_expiry_date = $1, updated_at = $2 WHERE telegram_id = $3",
-                new_expiry, datetime.now(), int(user_id)
+            new_expiry = await conn.fetchval(
+                """
+                INSERT INTO users (
+                    telegram_id, role, premium_expiry_date, updated_at,
+                    is_agreed_terms, downloads_today, last_download_date, created_at
+                )
+                VALUES (
+                    $1, 'premium',
+                    NOW() + ($2 || ' days')::INTERVAL,
+                    NOW(), TRUE, 0, CURRENT_DATE, NOW()
+                )
+                ON CONFLICT (telegram_id) DO UPDATE
+                SET
+                    role = 'premium',
+                    premium_expiry_date = (
+                        GREATEST(users.premium_expiry_date, NOW()) + ($2 || ' days')::INTERVAL
+                    ),
+                    updated_at = NOW()
+                RETURNING premium_expiry_date
+                """,
+                int(user_id), str(days),
             )
         logger.info(f"Extended premium for user {user_id} by {days} days → new expiry: {new_expiry}")
     except Exception as e:
         logger.error(f"extend_premium error for {user_id}: {e}")
+        raise
 
 
 async def ban_user(user_id, is_banned=True):
@@ -581,3 +631,27 @@ async def set_download_engine(user_id, engine: str):
         logger.info(f"Download engine set to '{engine}' for user {user_id}")
     except Exception as e:
         logger.error(f"Error setting download_engine for {user_id}: {e}")
+
+
+# ── Payment dedup ─────────────────────────────────────────────────────────────
+
+async def claim_payment_dedup(dedup_key: str) -> bool:
+    """
+    Atomically insert dedup_key into payment_dedup.
+    Returns True  → first time seen, caller should proceed with upgrade.
+    Returns False → already processed (duplicate webhook), caller should skip.
+    Falls back to True on DB error so a payment is never silently lost.
+    """
+    _require_pool()
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "INSERT INTO payment_dedup (dedup_key) VALUES ($1) "
+                "ON CONFLICT (dedup_key) DO NOTHING",
+                dedup_key,
+            )
+        # asyncpg returns "INSERT 0 1" on success, "INSERT 0 0" on conflict
+        return result == "INSERT 0 1"
+    except Exception as e:
+        logger.error(f"claim_payment_dedup error (key={dedup_key!r}): {e} — allowing upgrade")
+        return True  # fail-open: better to double-upgrade than to miss a payment
