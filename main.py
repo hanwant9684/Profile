@@ -35,6 +35,7 @@ async def main():
     import bot.admin
     import bot.info
     import bot.caption_filter
+    import bot.payment_handlers  # auto-payment inline-keyboard handlers
 
     print("Initializing database...")
     await init_db()
@@ -53,8 +54,26 @@ async def main():
     asyncio.create_task(periodic_premium_sweep())
 
     print("Starting bot...")
-
     await app.start()
+
+    # Auto-detect bot username so all t.me/ links are always correct
+    import bot.config as _cfg
+    try:
+        _me = await app.get_me()
+        if _me.username:
+            _cfg.BOT_USERNAME = _me.username
+            print(f"✅ Bot username detected: @{_me.username}")
+        # If SUPPORT_CHAT_LINK not set, default to the bot itself
+        if not _cfg.SUPPORT_CHAT_LINK:
+            _cfg.SUPPORT_CHAT_LINK = f"https://t.me/{_cfg.BOT_USERNAME}"
+    except Exception as _e:
+        print(f"⚠️ Could not detect bot username: {_e}")
+
+    # Start the webhook server on a background thread (needs the bot running first)
+    from bot.webhook_server import start_webhook_thread
+    wh_thread = start_webhook_thread(asyncio.get_event_loop(), app)
+    print(f"✅ Webhook server started (thread: {wh_thread.name})")
+
     from pyrogram.methods.utilities.idle import idle
     await idle()
     await app.stop()
