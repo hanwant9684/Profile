@@ -16,13 +16,12 @@ from pyrogram.types import (
 import bot.config as _bot_config
 from bot.config import (
     app,
-    RAZORPAY_KEY_ID,
-    RAZORPAY_KEY_SECRET,
+    ZAPUPI_MERCHANT_KEY,
     OXAPAY_MERCHANT_KEY,
     PAYPAL_CLIENT_ID,
     PAYPAL_CLIENT_SECRET,
 )
-from bot.payments import PLANS, create_razorpay_payment_link, create_oxapay_invoice, create_paypal_order
+from bot.payments import PLANS, create_zapupi_payment, create_oxapay_invoice, create_paypal_order
 from bot.database import get_user
 
 
@@ -36,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 def _gateway_ok(gw: str) -> bool:
     """Return True if the gateway has its API key(s) configured."""
-    if gw == "razorpay":
-        return bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+    if gw == "zapupi":
+        return bool(ZAPUPI_MERCHANT_KEY)
     if gw == "oxapay":
         return bool(OXAPAY_MERCHANT_KEY)
     if gw == "paypal":
@@ -60,11 +59,11 @@ def _method_keyboard(days: str) -> InlineKeyboardMarkup:
     p = PLANS[days]
     rows = []
 
-    # UPI / India — Razorpay (supports GPay, PhonePe, Paytm, BHIM, cards, net banking)
-    if _gateway_ok("razorpay"):
+    # UPI / India — ZapUPI (supports GPay, PhonePe, Paytm, BHIM, net banking)
+    if _gateway_ok("zapupi"):
         rows.append([InlineKeyboardButton(
-            f"🇮🇳 UPI / Cards (India) — ₹{p['inr']}",
-            callback_data=f"pay_razorpay_{days}"
+            f"🇮🇳 UPI / India — ₹{p['inr']}",
+            callback_data=f"pay_zapupi_{days}"
         )])
 
     # Crypto — Oxapay
@@ -155,7 +154,7 @@ async def on_plan_selected(client, cq: CallbackQuery):
         return
 
     p = PLANS[days]
-    any_configured = any(_gateway_ok(g) for g in ("razorpay", "oxapay", "paypal"))
+    any_configured = any(_gateway_ok(g) for g in ("zapupi", "oxapay", "paypal"))
     if not any_configured:
         await cq.answer(
             "No payment gateways are configured yet. Contact the owner.",
@@ -217,9 +216,9 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
     p = PLANS[days]
 
     try:
-        if gateway == "razorpay":
-            result = await create_razorpay_payment_link(user_id, days_int)
-            method_label = "🇮🇳 UPI / Cards — Razorpay"
+        if gateway == "zapupi":
+            result = await create_zapupi_payment(user_id, days_int)
+            method_label = "🇮🇳 UPI — ZapUPI"
             amount_str = f"₹{p['inr']}"
 
         elif gateway == "oxapay":
@@ -288,7 +287,7 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
     )
 
 
-@app.on_callback_query(filters.regex(r"^pay_(razorpay|oxapay|paypal|card|apple)_(\d+)$"))
+@app.on_callback_query(filters.regex(r"^pay_(zapupi|oxapay|paypal|card|apple)_(\d+)$"))
 async def on_pay_method(client, cq: CallbackQuery):
     gateway = cq.matches[0].group(1)
     days = cq.matches[0].group(2)

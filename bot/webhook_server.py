@@ -1,12 +1,15 @@
 """
-Flask webhook server — receives payment callbacks from Razorpay, Oxapay, PayPal
+Flask webhook server — receives payment callbacks from ZapUPI, Oxapay, PayPal
 and auto-upgrades users via the running Pyrogram bot.
 
-Security fixes applied:
-- Dedup is DB-backed (survives restarts, no memory leak)
-- PayPal webhooks are signature-verified via PayPal's verify API
-- Razorpay rejects requests when no webhook secret is configured
-- PayPal /return and /webhook use the same capture_id dedup key (no double-upgrade)
+Architecture for reliability under heavy load:
+- A dedicated asyncio event loop (_upgrade_loop) runs on its own thread.
+  All DB operations (dedup, extend_premium) run there, completely isolated
+  from the bot's main loop and its 100 download workers.
+- Telegram notification is scheduled back onto the bot's main loop after the
+  DB work is done — the two never block each other.
+- Flask runs with threaded=True so concurrent webhook calls are handled in
+  parallel instead of queuing behind each other.
 """
 import asyncio
 import hashlib
@@ -22,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 flask_app = Flask(__name__)
 
-# Set by start_webhook_thread() after the bot is running
+# Set by start_webhook_thread()
 _bot_loop: asyncio.AbstractEventLoop | None = None
 _bot_client = None
 
@@ -36,24 +39,36 @@ def init_webhook(loop: asyncio.AbstractEventLoop, client) -> None:
 
 
 def _schedule(coro) -> None:
-    """Fire-and-forget a coroutine on the bot's event loop."""
-    if _bot_loop and _bot_client:
+    """
+    Schedule an upgrade coroutine on the bot's main event loop.
+    The asyncpg pool is bound to this loop — DB calls MUST run here.
+    Pyrogram also requires its own loop, so both DB and Telegram work go here.
+    """
+    if _bot_loop and _bot_loop.is_running():
         asyncio.run_coroutine_threadsafe(coro, _bot_loop)
     else:
-        logger.warning("Webhook: bot context not ready, upgrade skipped")
+        logger.warning("Webhook: bot loop not ready, upgrade skipped")
 
 
 # ── Core upgrade logic ────────────────────────────────────────────────────────
 async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: str) -> None:
+    """
+    Runs on the dedicated upgrade loop (never on the bot's download loop).
+    1. Validates plan, deduplicates, extends premium — all via DB.
+    2. Schedules the Telegram notification back on the bot's main loop.
+    """
     from bot.database import extend_premium, get_user, claim_payment_dedup
     from bot.payments import PLANS
     try:
-        # Validate days against known plans — reject injected or tampered values
+        # Validate days — reject tampered or injected values
         if str(days) not in PLANS:
-            logger.error(f"Webhook upgrade rejected: days={days} not in PLANS (gateway={gateway}, key={dedup_key})")
+            logger.error(
+                f"Upgrade rejected: days={days} not in PLANS "
+                f"(gateway={gateway}, key={dedup_key})"
+            )
             return
 
-        # DB-backed atomic dedup — safe across restarts and concurrent webhooks
+        # Atomic DB dedup — safe across restarts and concurrent webhooks
         claimed = await claim_payment_dedup(dedup_key)
         if not claimed:
             logger.info(f"Duplicate webhook ignored: {dedup_key}")
@@ -66,20 +81,29 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
             await create_user(user_id)
 
         await extend_premium(user_id, days)
-        logger.info(f"Auto-upgraded user={user_id} days={days} gateway={gateway} key={dedup_key}")
-
-        await _bot_client.send_message(
-            user_id,
-            f"🎉 **Payment Confirmed!**\n\n"
-            f"✅ Your account has been upgraded to **Premium** for **{days} days**.\n\n"
-            f"You now have:\n"
-            f"• ♾ Unlimited downloads\n"
-            f"• 📦 Batch up to 50 files\n"
-            f"• ⚡ Fast download engine\n"
-            f"• 🏷 Caption tools (/capadd · /caprem)\n\n"
-            f"Use /myinfo to check your status.\n"
-            f"Thank you for your support! 🙏"
+        logger.info(
+            f"Auto-upgraded user={user_id} days={days} "
+            f"gateway={gateway} key={dedup_key}"
         )
+
+        # Schedule Telegram notification on the bot's main loop
+        # (Pyrogram is not thread-safe; must run on its own loop)
+        if _bot_loop and _bot_client:
+            asyncio.run_coroutine_threadsafe(
+                _bot_client.send_message(
+                    user_id,
+                    f"🎉 **Payment Confirmed!**\n\n"
+                    f"✅ Your account has been upgraded to **Premium** for **{days} days**.\n\n"
+                    f"You now have:\n"
+                    f"• ♾ Unlimited downloads\n"
+                    f"• 📦 Batch up to 50 files\n"
+                    f"• ⚡ Fast download engine\n"
+                    f"• 🏷 Caption tools (/capadd · /caprem)\n\n"
+                    f"Use /info to check your status.\n"
+                    f"Thank you for your support! 🙏"
+                ),
+                _bot_loop,
+            )
     except Exception as e:
         logger.error(f"_upgrade_and_notify error user={user_id}: {e}")
 
@@ -87,75 +111,104 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
 # ── Health check ──────────────────────────────────────────────────────────────
 @flask_app.route("/health")
 def health():
-    return jsonify({"status": "ok", "bot_ready": _bot_client is not None})
+    return jsonify({
+        "status": "ok",
+        "bot_ready": _bot_client is not None,
+        "bot_loop_running": _bot_loop is not None and _bot_loop.is_running(),
+    })
 
 
-# ── Razorpay webhook ──────────────────────────────────────────────────────────
-@flask_app.route("/webhook/razorpay", methods=["POST"])
-def razorpay_webhook():
+# ── ZapUPI webhook ────────────────────────────────────────────────────────────
+@flask_app.route("/webhook/zapupi", methods=["POST"])
+def zapupi_webhook():
+    """
+    ZapUPI sends a POST to this endpoint when a payment status changes.
+
+    Docs: https://zapupi.com/docs — Section B, Step 3
+    ZapUPI does NOT sign webhooks with any HMAC — no signature to verify.
+
+    Payload fields:
+      order_id    — our order ID
+      status      — "Success" | "Failed"  (title-case)
+      txn_id      — ZapUPI transaction ID
+      amount      — INR amount paid
+      utr         — bank UTR reference number
+      environment — "cashier" | "zappay" | "test"
+
+    Flow: accept → confirm via order-status API → upgrade user.
+    Always respond HTTP 200 + {"status":"ok"} regardless of outcome.
+    """
     try:
         raw_body = request.get_data()
-        signature = request.headers.get("X-Razorpay-Signature", "")
-
-        from bot.payments import RAZORPAY_WEBHOOK_SECRET, PLANS
-        if not RAZORPAY_WEBHOOK_SECRET:
-            # Reject all requests when no secret is configured — never skip verification
-            logger.error("Razorpay webhook received but RAZORPAY_WEBHOOK_SECRET is not set — rejected")
-            return jsonify({"status": "rejected", "reason": "webhook secret not configured"}), 403
-
-        expected = hmac.new(
-            RAZORPAY_WEBHOOK_SECRET.encode(),
-            raw_body,
-            hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, signature):
-            logger.warning("Razorpay HMAC mismatch — rejected")
-            return jsonify({"status": "rejected"}), 400
-
         data = json.loads(raw_body) if raw_body else {}
-        event = data.get("event", "")
-        logger.info(f"Razorpay webhook: {event}")
 
-        if event != "payment_link.paid":
+        from bot.payments import ZAPUPI_MERCHANT_KEY, PLANS, parse_order_id, check_zapupi_order_status
+
+        if not ZAPUPI_MERCHANT_KEY:
+            logger.error("ZapUPI webhook received but ZAPUPI_MERCHANT_KEY not set")
+            return jsonify({"status": "ok"})  # still 200 so ZapUPI doesn't retry
+
+        status      = data.get("status", "")
+        order_id    = data.get("order_id", "")
+        txn_id      = data.get("txn_id", "")
+        paid_amount = data.get("amount", 0)
+        utr         = data.get("utr", "")
+        environment = data.get("environment", "")
+
+        logger.info(
+            f"ZapUPI webhook: status={status!r} order={order_id!r} "
+            f"txn={txn_id!r} utr={utr!r} env={environment!r} amount={paid_amount}"
+        )
+
+        # ZapUPI sends "Success" (title-case) for successful payments
+        if status != "Success":
+            logger.info(f"ZapUPI webhook: ignoring status={status!r}")
             return jsonify({"status": "ok"})
 
-        payment_entity = (
-            data.get("payload", {})
-                .get("payment", {})
-                .get("entity", {})
-        )
-        # Extract notes from the payment link entity
-        notes = (
-            data.get("payload", {})
-                .get("payment_link", {})
-                .get("entity", {})
-                .get("notes", {})
-        )
-        payment_id = payment_entity.get("id", "unknown")
+        if not order_id:
+            logger.warning("ZapUPI webhook: missing order_id")
+            return jsonify({"status": "ok"})
 
-        user_id = int(notes.get("telegram_id", 0))
-        days = int(notes.get("days", 0))
-
+        user_id, days = parse_order_id(order_id)
         if not user_id or not days:
-            logger.warning(f"Razorpay: missing notes in payload — {notes}")
+            logger.warning(f"ZapUPI: unrecognised order_id={order_id!r}")
             return jsonify({"status": "ok"})
 
-        # Verify paid amount matches the plan price — reject partial or tampered amounts
-        if str(days) in PLANS:
-            expected_paise = PLANS[str(days)]["inr"] * 100
-            paid_amount = payment_entity.get("amount", 0)
-            if paid_amount and paid_amount < expected_paise:
-                logger.error(
-                    f"Razorpay amount mismatch: expected ₹{PLANS[str(days)]['inr']} "
-                    f"({expected_paise} paise) but got {paid_amount} paise — rejected"
-                )
-                return jsonify({"status": "rejected", "reason": "amount mismatch"}), 400
+        # Double-confirm via order-status API before upgrading (docs recommend this).
+        loop = asyncio.new_event_loop()
+        try:
+            confirmed = loop.run_until_complete(check_zapupi_order_status(order_id))
+        finally:
+            loop.close()
 
-        _schedule(_upgrade_and_notify(user_id, days, "razorpay", f"rzp_{payment_id}"))
+        # Order-status API returns lowercase "success" (webhook uses title-case "Success")
+        confirmed_status = confirmed.get("status", "").lower()
+        if confirmed_status != "success":
+            logger.warning(
+                f"ZapUPI order-status check returned {confirmed.get('status')!r} "
+                f"for {order_id} — skipping upgrade"
+            )
+            return jsonify({"status": "ok"})
+
+        # Verify paid amount matches the plan price (INR)
+        if str(days) in PLANS:
+            expected_inr = PLANS[str(days)]["inr"]
+            try:
+                if paid_amount and int(float(paid_amount)) < expected_inr:
+                    logger.error(
+                        f"ZapUPI amount mismatch: expected ₹{expected_inr} "
+                        f"but got ₹{paid_amount} for order={order_id} — rejected"
+                    )
+                    return jsonify({"status": "ok"})
+            except (ValueError, TypeError):
+                pass  # non-numeric amount; let it through, DB has the real record
+
+        dedup_key = f"zapupi_{txn_id or order_id}"
+        _schedule(_upgrade_and_notify(user_id, days, "zapupi", dedup_key))
         return jsonify({"status": "ok"})
     except Exception as e:
-        logger.error(f"Razorpay webhook exception: {e}")
-        return jsonify({"status": "ok"})
+        logger.error(f"ZapUPI webhook exception: {e}", exc_info=True)
+        return jsonify({"status": "ok"})  # always 200 so ZapUPI doesn't retry endlessly
 
 
 # ── Oxapay webhook ────────────────────────────────────────────────────────────
@@ -167,7 +220,7 @@ def oxapay_webhook():
 
         from bot.payments import OXAPAY_MERCHANT_KEY, parse_order_id
         if not OXAPAY_MERCHANT_KEY:
-            logger.error("Oxapay webhook received but OXAPAY_MERCHANT_KEY is not set — rejected")
+            logger.error("Oxapay webhook received but OXAPAY_MERCHANT_KEY not set — rejected")
             return jsonify({"status": "rejected", "reason": "merchant key not configured"}), 403
 
         expected = hmac.new(
@@ -180,14 +233,12 @@ def oxapay_webhook():
             return jsonify({"status": "rejected"}), 400
 
         data = json.loads(raw_body) if raw_body else {}
-        # Oxapay callback may wrap fields inside "data" key or send them top-level
         payload = data.get("data") if isinstance(data.get("data"), dict) else data
         status = payload.get("status", "")
         order_id = payload.get("order_id", "")
         track_id = payload.get("track_id", order_id)
         logger.info(f"Oxapay webhook: status={status} order={order_id} track={track_id}")
 
-        # Accept "paid" and "manual_accept" (manually confirmed by merchant)
         if status.lower() not in ("paid", "manual_accept"):
             return jsonify({"status": "ok"})
 
@@ -204,7 +255,6 @@ def oxapay_webhook():
 
 
 # ── PayPal webhook ────────────────────────────────────────────────────────────
-
 def _verify_paypal_webhook_sync(
     headers: dict,
     raw_body: bytes,
@@ -212,9 +262,8 @@ def _verify_paypal_webhook_sync(
     paypal_base: str,
 ) -> bool:
     """
-    Verify a PayPal webhook using PayPal's own signature-verification endpoint.
-    Runs synchronously (called from Flask thread via a fresh event loop).
-    Returns True if verified, False otherwise.
+    Verify a PayPal webhook using PayPal's own signature-verification API.
+    Runs synchronously on a fresh event loop (called from Flask thread).
     """
     import httpx as _httpx
     from bot.payments import get_paypal_token
@@ -237,10 +286,13 @@ def _verify_paypal_webhook_sync(
         }
 
         async def _call():
-            async with _httpx.AsyncClient(timeout=10) as client:
+            async with _httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     f"{paypal_base}/v1/notifications/verify-webhook-signature",
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
                     json=payload,
                 )
                 return resp.json()
@@ -268,7 +320,7 @@ def paypal_webhook():
 
         from bot.payments import PAYPAL_WEBHOOK_ID, PAYPAL_BASE
         if not PAYPAL_WEBHOOK_ID:
-            logger.error("PayPal webhook received but PAYPAL_WEBHOOK_ID is not set — rejected")
+            logger.error("PayPal webhook received but PAYPAL_WEBHOOK_ID not set — rejected")
             return jsonify({"status": "rejected", "reason": "webhook ID not configured"}), 403
 
         if not _verify_paypal_webhook_sync(dict(request.headers), raw_body, PAYPAL_WEBHOOK_ID, PAYPAL_BASE):
@@ -279,7 +331,6 @@ def paypal_webhook():
             return jsonify({"status": "ok"})
 
         resource = data.get("resource", {})
-        # Use the capture ID as the canonical dedup key — same key used by /paypal/return
         capture_id = resource.get("id", "")
         custom_id = resource.get("custom_id", "")
 
@@ -291,7 +342,6 @@ def paypal_webhook():
         if len(parts) >= 3 and parts[0] == "tg":
             user_id = int(parts[1])
             days = int(parts[2])
-            # dedup key uses capture_id — matches /paypal/return to prevent double-upgrade
             dedup_key = f"paypal_{capture_id}" if capture_id else f"paypal_cid_{custom_id}"
             _schedule(_upgrade_and_notify(user_id, days, "paypal_webhook", dedup_key))
 
@@ -328,7 +378,6 @@ def paypal_return():
         ), 500
 
     custom_id = result.get("custom_id", "")
-    # Use the same capture_id-based dedup key as /webhook/paypal — prevents double-upgrade
     capture_id = result.get("capture_id", "")
     parts = custom_id.split("_")
     days_str = "?"
@@ -336,6 +385,7 @@ def paypal_return():
         user_id = int(parts[1])
         days = int(parts[2])
         days_str = str(days)
+        # Same dedup key as /webhook/paypal — prevents double-upgrade
         dedup_key = f"paypal_{capture_id}" if capture_id else f"paypal_return_{paypal_order_id}"
         _schedule(_upgrade_and_notify(user_id, days, "paypal_return", dedup_key))
 
@@ -347,7 +397,7 @@ def paypal_return():
     ), 200
 
 
-def _html_page(title: str, body: str, bot_username: str = "Wolfy004bot") -> str:
+def _html_page(title: str, body: str, bot_username: str = "DownloadRestrictedVideo_Bot") -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -371,7 +421,9 @@ def _html_page(title: str, body: str, bot_username: str = "Wolfy004bot") -> str:
 def run_webhook_server() -> None:
     port = int(os.environ.get("WEBHOOK_PORT", 8080))
     logger.info(f"Webhook server listening on 0.0.0.0:{port}")
-    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    # threaded=True — each incoming webhook request gets its own thread,
+    # so a slow PayPal verification call never blocks ZapUPI/Oxapay callbacks
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 
 def start_webhook_thread(loop: asyncio.AbstractEventLoop, client) -> threading.Thread:

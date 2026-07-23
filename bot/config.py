@@ -24,13 +24,11 @@ OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW and OWNER_ID_RAW.isdigit() else Non
 SUPPORT_CHAT_LINK = os.environ.get("SUPPORT_CHAT_LINK", "https://t.me/Wolfy004chatbot")
 
 # ── Payment gateway keys ──────────────────────────────────────────────────────
-RAZORPAY_KEY_ID         = os.environ.get("RAZORPAY_KEY_ID", "")
-RAZORPAY_KEY_SECRET     = os.environ.get("RAZORPAY_KEY_SECRET", "")
-RAZORPAY_WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
-OXAPAY_MERCHANT_KEY     = os.environ.get("OXAPAY_MERCHANT_KEY", "")
-PAYPAL_CLIENT_ID        = os.environ.get("PAYPAL_CLIENT_ID", "")
-PAYPAL_CLIENT_SECRET    = os.environ.get("PAYPAL_CLIENT_SECRET", "")
-PAYPAL_WEBHOOK_ID       = os.environ.get("PAYPAL_WEBHOOK_ID", "")
+ZAPUPI_MERCHANT_KEY    = os.environ.get("ZAPUPI_MERCHANT_KEY", "")
+OXAPAY_MERCHANT_KEY    = os.environ.get("OXAPAY_MERCHANT_KEY", "")
+PAYPAL_CLIENT_ID       = os.environ.get("PAYPAL_CLIENT_ID", "")
+PAYPAL_CLIENT_SECRET   = os.environ.get("PAYPAL_CLIENT_SECRET", "")
+PAYPAL_WEBHOOK_ID      = os.environ.get("PAYPAL_WEBHOOK_ID", "")
 
 # ── Webhook server ────────────────────────────────────────────────────────────
 WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "https://wolfy004bot.duckdns.org")

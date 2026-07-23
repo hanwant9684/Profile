@@ -1,6 +1,10 @@
 """
-Payment gateway integrations: Razorpay (UPI/India), Oxapay (Crypto), PayPal (Card/Apple Pay).
+Payment gateway integrations: ZapUPI (UPI/India), Oxapay (Crypto), PayPal (Card/Apple Pay).
+
+Each create_* function retries up to 3 times with backoff so transient
+gateway errors never show an error to the user.
 """
+import asyncio
 import os
 import time
 import logging
@@ -18,27 +22,24 @@ PLANS: dict[str, dict] = {
 }
 
 # ── Env vars ──────────────────────────────────────────────────────────────────
-RAZORPAY_KEY_ID        = os.environ.get("RAZORPAY_KEY_ID", "")
-RAZORPAY_KEY_SECRET    = os.environ.get("RAZORPAY_KEY_SECRET", "")
-RAZORPAY_WEBHOOK_SECRET= os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+ZAPUPI_MERCHANT_KEY   = os.environ.get("ZAPUPI_MERCHANT_KEY", "")
 
-OXAPAY_MERCHANT_KEY    = os.environ.get("OXAPAY_MERCHANT_KEY", "")
+OXAPAY_MERCHANT_KEY   = os.environ.get("OXAPAY_MERCHANT_KEY", "")
 
-PAYPAL_CLIENT_ID       = os.environ.get("PAYPAL_CLIENT_ID", "")
-PAYPAL_CLIENT_SECRET   = os.environ.get("PAYPAL_CLIENT_SECRET", "")
-PAYPAL_WEBHOOK_ID      = os.environ.get("PAYPAL_WEBHOOK_ID", "")
+PAYPAL_CLIENT_ID        = os.environ.get("PAYPAL_CLIENT_ID", "")
+PAYPAL_CLIENT_SECRET    = os.environ.get("PAYPAL_CLIENT_SECRET", "")
+PAYPAL_WEBHOOK_ID       = os.environ.get("PAYPAL_WEBHOOK_ID", "")
 
-# Set PAYPAL_SANDBOX=true to use PayPal sandbox (test) environment.
-# Use sandbox credentials from developer.paypal.com → Sandbox → Apps & Credentials.
-_paypal_sandbox        = os.environ.get("PAYPAL_SANDBOX", "false").lower() == "true"
-PAYPAL_BASE = "https://api-m.sandbox.paypal.com" if _paypal_sandbox else "https://api-m.paypal.com"
+PAYPAL_BASE = "https://api-m.paypal.com"
 
-WEBHOOK_BASE_URL       = os.environ.get("WEBHOOK_BASE_URL", "https://wolfy004bot.duckdns.org")
+WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "https://wolfy004bot.duckdns.org")
+
 
 def _bot_username() -> str:
     """Always return the live value set by main.py after app.start()."""
     from bot.config import BOT_USERNAME
     return BOT_USERNAME or os.environ.get("BOT_USERNAME", "")
+
 
 # Keep a module-level alias for places that do `from bot.payments import BOT_USERNAME`
 BOT_USERNAME = _bot_username()
@@ -61,149 +62,240 @@ def parse_order_id(order_id: str) -> tuple[int | None, int | None]:
     return None, None
 
 
-# ── Razorpay ──────────────────────────────────────────────────────────────────
-async def create_razorpay_payment_link(user_id: int, days: int) -> dict:
-    """
-    Create a Razorpay Payment Link for UPI / all Indian payment methods.
-    Returns {ok, url, link_id} or {ok: False, error}.
+# ── ZapUPI (UPI / India) ──────────────────────────────────────────────────────
+# API base: https://pay.zapupi.com  (docs: https://zapupi.com/docs)
+_ZAPUPI_API_BASE = "https://pay.zapupi.com"
 
-    Razorpay fees: 0% for first 90 days, then 2%.
-    The link works with: UPI (GPay, PhonePe, Paytm, BHIM), Cards, Net Banking, Wallets.
+
+async def create_zapupi_payment(user_id: int, days: int) -> dict:
+    """
+    Create a ZapUPI payment order (UPI — GPay, PhonePe, Paytm, BHIM, etc.).
+
+    Docs: https://zapupi.com/docs — Section B (Backend Integration)
+    Endpoint : POST https://pay.zapupi.com/api/create-order
+    Auth     : zap_key field in request body (NOT a Bearer header)
+    Body     : { zap_key, order_id, amount (INR string), webhook_url,
+                 customer_mobile (opt), remark (opt) }
+    Response : { status: "success", payment_url, order_id, txn_id, ... }
+
+    Retries up to 3 times on network/5xx errors.
+    Returns {ok, url, order_id} or {ok: False, error}.
     """
     plan = PLANS[str(days)]
-    amount_paise = plan["inr"] * 100  # Razorpay uses paise (1 INR = 100 paise)
+    order_id = make_order_id(user_id, days)
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                "https://api.razorpay.com/v1/payment_links",
-                auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
-                json={
-                    "amount": amount_paise,
-                    "currency": "INR",
-                    "accept_partial": False,
-                    "description": f"Wolfy Bot Premium — {plan['label']}",
-                    "notes": {
-                        "telegram_id": str(user_id),
-                        "days": str(days),
+    last_err = "Unknown error"
+    for attempt in range(3):
+        try:
+            bot_url = f"https://t.me/{_bot_username()}"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+                resp = await client.post(
+                    f"{_ZAPUPI_API_BASE}/api/create-order",
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "zap_key":     ZAPUPI_MERCHANT_KEY,
+                        "order_id":    order_id,
+                        "amount":      str(plan["inr"]),   # INR as string
+                        "remark":      f"WolfyBot Premium | {user_id}",
+                        # Redirect user back to the bot after payment
+                        "success_url": bot_url,
+                        "failed_url":  bot_url,
+                        "timeout_url": bot_url,
+                        # Do NOT send webhook_url here — it would override the URL
+                        # already configured in the ZapUPI dashboard. The dashboard
+                        # webhook URL is the correct Replit endpoint.
                     },
-                    "notify": {"sms": False, "email": False},
-                    "reminder_enable": False,
-                    "expire_by": int(time.time()) + 3600,  # 1-hour expiry
+                )
+            data = resp.json()
+            # Docs: success response has status="success" and payment_url at top level
+            if data.get("status") == "success" and data.get("payment_url"):
+                return {
+                    "ok": True,
+                    "url": data["payment_url"],
+                    "order_id": order_id,
                 }
+            last_err = data.get("message") or data.get("error") or str(data)
+            logger.warning(f"ZapUPI create-order non-success on attempt {attempt + 1}/3: {last_err}")
+            if resp.status_code < 500:
+                break
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            last_err = f"Network error: {e}"
+            logger.warning(f"ZapUPI attempt {attempt + 1}/3 network error: {e}")
+        except Exception as e:
+            last_err = str(e)
+            logger.error(f"ZapUPI attempt {attempt + 1}/3 unexpected error: {e}")
+            break
+
+        if attempt < 2:
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+    logger.error(f"ZapUPI create_payment failed after 3 attempts: {last_err}")
+    return {"ok": False, "error": last_err}
+
+
+async def check_zapupi_order_status(order_id: str) -> dict:
+    """
+    Confirm a ZapUPI payment server-side via the order-status API.
+    Docs: POST https://pay.zapupi.com/api/order-status
+
+    Returns the full response dict, or {"status": "error"} on failure.
+    Fields: status, amount, pay_amount, txn_id, utr, environment
+    """
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+            resp = await client.post(
+                f"{_ZAPUPI_API_BASE}/api/order-status",
+                headers={"Content-Type": "application/json"},
+                json={"zap_key": ZAPUPI_MERCHANT_KEY, "order_id": order_id},
             )
-        data = resp.json()
-        if "short_url" in data:
-            return {"ok": True, "url": data["short_url"], "link_id": data["id"]}
-        err = data.get("error", {}).get("description", str(data))
-        return {"ok": False, "error": err}
+        return resp.json()
     except Exception as e:
-        logger.error(f"Razorpay create_payment_link error: {e}")
-        return {"ok": False, "error": str(e)}
+        logger.error(f"ZapUPI order-status check failed for {order_id}: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 # ── Oxapay (Crypto) ───────────────────────────────────────────────────────────
 async def create_oxapay_invoice(user_id: int, days: int) -> dict:
     """
     Create an Oxapay crypto invoice (BTC, ETH, USDT, and 100+ coins).
+    Retries up to 3 times on network/5xx errors.
     Returns {ok, url, order_id} or {ok: False, error}.
     """
     plan = PLANS[str(days)]
     order_id = make_order_id(user_id, days)
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                "https://api.oxapay.com/v1/payment/invoice",
-                headers={
-                    "merchant_api_key": OXAPAY_MERCHANT_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "amount": plan["usd"],
-                    "currency": "USD",
-                    "lifetime": 60,
-                    "callback_url": f"{WEBHOOK_BASE_URL}/webhook/oxapay",
-                    "return_url": f"https://t.me/{_bot_username()}",
-                    "order_id": order_id,
-                    "description": f"Wolfy Bot Premium — {plan['label']}",
-                    "thanks_message": "Premium activated! Return to Telegram.",
-                }
-            )
-        data = resp.json()
-        # Oxapay v1 API: status 200 = success, URL is in data["data"]["payment_url"]
-        if data.get("status") == 200:
-            return {"ok": True, "url": data["data"]["payment_url"], "order_id": order_id}
-        return {"ok": False, "error": data.get("message", f"Oxapay error (status={data.get('status')})")}
-    except Exception as e:
-        logger.error(f"Oxapay create_invoice error: {e}")
-        return {"ok": False, "error": str(e)}
+
+    last_err = "Unknown error"
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+                resp = await client.post(
+                    "https://api.oxapay.com/v1/payment/invoice",
+                    headers={
+                        "merchant_api_key": OXAPAY_MERCHANT_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "amount": plan["usd"],
+                        "currency": "USD",
+                        "lifetime": 60,
+                        "callback_url": f"{WEBHOOK_BASE_URL}/webhook/oxapay",
+                        "return_url": f"https://t.me/{_bot_username()}",
+                        "order_id": order_id,
+                        "description": f"Wolfy Bot Premium — {plan['label']}",
+                        "thanks_message": "Premium activated! Return to Telegram.",
+                    }
+                )
+            data = resp.json()
+            if data.get("status") == 200:
+                return {"ok": True, "url": data["data"]["payment_url"], "order_id": order_id}
+            last_err = data.get("message", f"Oxapay error (status={data.get('status')})")
+            if resp.status_code < 500:
+                break
+            logger.warning(f"Oxapay 5xx on attempt {attempt + 1}/3: {last_err}")
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            last_err = f"Network error: {e}"
+            logger.warning(f"Oxapay attempt {attempt + 1}/3 network error: {e}")
+        except Exception as e:
+            last_err = str(e)
+            logger.error(f"Oxapay attempt {attempt + 1}/3 unexpected error: {e}")
+            break
+
+        if attempt < 2:
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+    logger.error(f"Oxapay create_invoice failed after 3 attempts: {last_err}")
+    return {"ok": False, "error": last_err}
 
 
-# ── PayPal (PayPal balance + Credit/Debit Card + Apple Pay) ──────────────────
+# ── PayPal ────────────────────────────────────────────────────────────────────
 async def get_paypal_token() -> str | None:
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{PAYPAL_BASE}/v1/oauth2/token",
-                auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
-                data={"grant_type": "client_credentials"},
-            )
-        return resp.json().get("access_token")
-    except Exception as e:
-        logger.error(f"PayPal token error: {e}")
-        return None
+    """Fetch a PayPal OAuth token. Retries once on failure."""
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
+                resp = await client.post(
+                    f"{PAYPAL_BASE}/v1/oauth2/token",
+                    auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
+                    data={"grant_type": "client_credentials"},
+                )
+            token = resp.json().get("access_token")
+            if token:
+                return token
+        except Exception as e:
+            logger.error(f"PayPal token attempt {attempt + 1}/2 error: {e}")
+        if attempt == 0:
+            await asyncio.sleep(1.5)
+    return None
 
 
 async def create_paypal_order(user_id: int, days: int) -> dict:
     """
-    Create a PayPal order. The approval URL opens PayPal's checkout page
-    which supports: PayPal balance, credit/debit cards, Apple Pay, Google Pay.
+    Create a PayPal order (PayPal balance, credit/debit cards, Apple Pay, Google Pay).
+    Retries up to 3 times on network/5xx errors.
     Returns {ok, url, paypal_order_id} or {ok: False, error}.
     """
     plan = PLANS[str(days)]
-    token = await get_paypal_token()
-    if not token:
-        return {"ok": False, "error": "PayPal authentication failed"}
-
     custom_id = f"tg_{user_id}_{days}"
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{PAYPAL_BASE}/v2/checkout/orders",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "intent": "CAPTURE",
-                    "purchase_units": [{
-                        "amount": {
-                            "currency_code": "USD",
-                            "value": f"{plan['usd']:.2f}",
-                        },
-                        "description": f"Wolfy Bot Premium — {plan['label']}",
-                        "custom_id": custom_id,
-                    }],
-                    "application_context": {
-                        "return_url": f"{WEBHOOK_BASE_URL}/paypal/return",
-                        "cancel_url": f"https://t.me/{_bot_username()}",
-                        "brand_name": "Wolfy Bot Premium",
-                        "user_action": "PAY_NOW",
-                        "shipping_preference": "NO_SHIPPING",
+
+    last_err = "Unknown error"
+    for attempt in range(3):
+        try:
+            token = await get_paypal_token()
+            if not token:
+                last_err = "PayPal authentication failed"
+                await asyncio.sleep(1.5)
+                continue
+
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
+                resp = await client.post(
+                    f"{PAYPAL_BASE}/v2/checkout/orders",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
                     },
-                }
+                    json={
+                        "intent": "CAPTURE",
+                        "purchase_units": [{
+                            "amount": {
+                                "currency_code": "USD",
+                                "value": f"{plan['usd']:.2f}",
+                            },
+                            "description": f"Wolfy Bot Premium — {plan['label']}",
+                            "custom_id": custom_id,
+                        }],
+                        "application_context": {
+                            "return_url": f"{WEBHOOK_BASE_URL}/paypal/return",
+                            "cancel_url": f"https://t.me/{_bot_username()}",
+                            "brand_name": "Wolfy Bot Premium",
+                            "user_action": "PAY_NOW",
+                            "shipping_preference": "NO_SHIPPING",
+                        },
+                    }
+                )
+            data = resp.json()
+            approve_url = next(
+                (lnk["href"] for lnk in data.get("links", []) if lnk["rel"] == "approve"),
+                None
             )
-        data = resp.json()
-        approve_url = next(
-            (lnk["href"] for lnk in data.get("links", []) if lnk["rel"] == "approve"),
-            None
-        )
-        if approve_url:
-            return {"ok": True, "url": approve_url, "paypal_order_id": data["id"]}
-        return {"ok": False, "error": f"No approval URL: {data}"}
-    except Exception as e:
-        logger.error(f"PayPal create_order error: {e}")
-        return {"ok": False, "error": str(e)}
+            if approve_url:
+                return {"ok": True, "url": approve_url, "paypal_order_id": data["id"]}
+            last_err = f"No approval URL: {data}"
+            if resp.status_code < 500:
+                break
+            logger.warning(f"PayPal 5xx on attempt {attempt + 1}/3: {last_err}")
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            last_err = f"Network error: {e}"
+            logger.warning(f"PayPal attempt {attempt + 1}/3 network error: {e}")
+        except Exception as e:
+            last_err = str(e)
+            logger.error(f"PayPal attempt {attempt + 1}/3 unexpected error: {e}")
+            break
+
+        if attempt < 2:
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+    logger.error(f"PayPal create_order failed after 3 attempts: {last_err}")
+    return {"ok": False, "error": last_err}
 
 
 async def capture_paypal_order(paypal_order_id: str) -> dict:
@@ -212,7 +304,7 @@ async def capture_paypal_order(paypal_order_id: str) -> dict:
     if not token:
         return {"ok": False, "error": "PayPal auth failed"}
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
             resp = await client.post(
                 f"{PAYPAL_BASE}/v2/checkout/orders/{paypal_order_id}/capture",
                 headers={
@@ -226,7 +318,6 @@ async def capture_paypal_order(paypal_order_id: str) -> dict:
             unit = units[0] if units else {}
             captures = unit.get("payments", {}).get("captures", [])
             capture = captures[0] if captures else {}
-            # PayPal puts custom_id at the purchase_unit level AND/OR inside captures
             custom_id = unit.get("custom_id", "") or capture.get("custom_id", "")
             capture_id = capture.get("id", "")
             logger.info(f"PayPal capture OK — custom_id={custom_id!r} capture_id={capture_id!r} order={paypal_order_id}")
