@@ -21,7 +21,7 @@ from bot.config import (
     PAYPAL_CLIENT_ID,
     PAYPAL_CLIENT_SECRET,
 )
-from bot.payments import PLANS, create_zapupi_payment, create_oxapay_invoice, create_paypal_order
+from bot.payments import PLANS, create_zapupi_payment, create_oxapay_invoice, create_paypal_order, paypal_total
 from bot.database import get_user
 
 
@@ -214,6 +214,7 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
     user_id = cq.from_user.id
     days_int = int(days)
     p = PLANS[days]
+    fee_note = ""  # shown on the payment page only for PayPal
 
     try:
         if gateway == "zapupi":
@@ -227,14 +228,22 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
             amount_str = f"${p['usd']:.0f}"
 
         elif gateway in ("paypal", "card", "apple"):
-            result = await create_paypal_order(user_id, days_int)
+            base = p["usd"]
+            total = paypal_total(base)
+            result = await create_paypal_order(user_id, days_int, charge_amount=total)
             if gateway == "card":
                 method_label = "💳 Credit/Debit Card (PayPal)"
             elif gateway == "apple":
                 method_label = "🍎 Apple Pay (PayPal)"
             else:
                 method_label = "💲 PayPal"
-            amount_str = f"${p['usd']:.0f}"
+            amount_str = f"${total:.2f}"
+            fee_note = (
+                f"\n💡 **Fee breakdown:**\n"
+                f"  • Plan price: ${base:.2f}\n"
+                f"  • Processing fee: $0.45 + 10%\n"
+                f"  • **Total charged: ${total:.2f}**\n"
+            )
 
         else:
             await cq.edit_message_text("Unknown gateway.")
@@ -254,8 +263,15 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
     if not result.get("ok"):
         err = result.get("error", "Unknown error")
         logger.error(f"Gateway error ({gateway}): {err}")
+
+        # Map raw gateway errors to user-friendly messages
+        if gateway == "zapupi":
+            user_msg = "UPI payments are temporarily unavailable. Please try another payment method or contact support."
+        else:
+            user_msg = "Could not generate a payment link. Please try again or contact support."
+
         await cq.edit_message_text(
-            f"❌ Payment link failed: {err}\n\nPlease try again or contact support.",
+            f"❌ {user_msg}",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Try Again", callback_data=f"upg_plan_{days}"),
                 InlineKeyboardButton("Support", url=_support_link()),
@@ -268,7 +284,8 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
         f"✅ **Your Payment Link is Ready!**\n\n"
         f"📋 **Plan:** {p['label']}\n"
         f"💰 **Amount:** {amount_str}\n"
-        f"💳 **Method:** {method_label}\n\n"
+        f"💳 **Method:** {method_label}\n"
+        f"{fee_note}\n"
         f"👇 **Tap the button below to pay:**\n\n"
         f"⚠️ This link expires in 1 hour and is unique to you.\n"
         f"✅ Premium is activated **automatically** once payment is confirmed.",

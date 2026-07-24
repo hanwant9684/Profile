@@ -99,7 +99,7 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
                     f"• 📦 Batch up to 50 files\n"
                     f"• ⚡ Fast download engine\n"
                     f"• 🏷 Caption tools (/capadd · /caprem)\n\n"
-                    f"Use /info to check your status.\n"
+                    f"Use /myinfo to check your status.\n"
                     f"Thank you for your support! 🙏"
                 ),
                 _bot_loop,

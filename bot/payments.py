@@ -228,13 +228,25 @@ async def get_paypal_token() -> str | None:
     return None
 
 
-async def create_paypal_order(user_id: int, days: int) -> dict:
+def paypal_total(base_usd: float) -> float:
+    """
+    Calculate the total amount charged via PayPal including processing fees:
+      $0.45 fixed fee + 10% of the base price.
+    Rounded to 2 decimal places.
+    """
+    return round(base_usd * 1.10 + 0.45, 2)
+
+
+async def create_paypal_order(user_id: int, days: int, charge_amount: float | None = None) -> dict:
     """
     Create a PayPal order (PayPal balance, credit/debit cards, Apple Pay, Google Pay).
     Retries up to 3 times on network/5xx errors.
     Returns {ok, url, paypal_order_id} or {ok: False, error}.
+
+    charge_amount: the amount to actually charge (with fees). If None, uses plan['usd'].
     """
     plan = PLANS[str(days)]
+    amount = charge_amount if charge_amount is not None else plan["usd"]
     custom_id = f"tg_{user_id}_{days}"
 
     last_err = "Unknown error"
@@ -258,7 +270,7 @@ async def create_paypal_order(user_id: int, days: int) -> dict:
                         "purchase_units": [{
                             "amount": {
                                 "currency_code": "USD",
-                                "value": f"{plan['usd']:.2f}",
+                                "value": f"{amount:.2f}",
                             },
                             "description": f"Wolfy Bot Premium — {plan['label']}",
                             "custom_id": custom_id,
