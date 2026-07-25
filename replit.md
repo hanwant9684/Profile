@@ -46,7 +46,7 @@ Preferred communication style: Simple, everyday language.
 | Module | Purpose |
 |--------|---------|
 | `bot/config.py` | Environment variables, bot client initialization, global state (semaphores, active downloads) |
-| `bot/database.py` | SQLite database connection and user/settings CRUD operations |
+| `bot/database.py` | PostgreSQL (asyncpg) connection pool and user/settings/payments CRUD |
 | `bot/handlers.py` | Main download link processing and force-subscribe verification |
 | `bot/batch.py` | `/batch` and `/mlinks` commands (Premium bulk download), `/cancelbatch` |
 | `bot/login.py` | User onboarding, terms acceptance, and Telegram session authentication |
@@ -87,13 +87,15 @@ For all restricted/private content downloads, **each user must register their ow
 - The Cloud Storage channel resolver adds the **user's own bot** as channel admin (not the owner's bot) via the user's userbot.
 - Fallback to the user's userbot for upload only triggers on **size-limit** / `FILE_PARTS_INVALID` errors (i.e. >2 GB files where bots physically can't upload). FloodWait and PEER_FLOOD are absorbed by the user's bot — never shifted to their userbot account.
 
-### Data Models (SQLite)
+### Data Models (PostgreSQL — Replit built-in)
 Users table stores:
 - `telegram_id`, `role`, `downloads_today`, `last_download_date`
 - `is_agreed_terms`, `phone_session_string`, `premium_expiry_date`
-- `is_banned`, `created_at`
+- `is_banned`, `created_at`, `download_engine` (pyrogram/telethon)
 
 Settings table stores key-value pairs (e.g., `force_sub_channel`)
+
+Payments table tracks ZaPuPi / OxaPay / PayPal transactions and deduplication.
 
 ## Dependencies (Python)
 - `pyrotgfork` — Pyrogram fork for Telegram, imports as `pyrogram` namespace.

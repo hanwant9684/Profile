@@ -9,7 +9,6 @@ pymediainfo
 pyrotgfork
 python-dotenv
 pyyaml
-redis
 tgcrypto
 telethon
 uvloop
