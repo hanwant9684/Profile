@@ -237,13 +237,8 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
                 method_label = "🍎 Apple Pay (PayPal)"
             else:
                 method_label = "💲 PayPal"
-            amount_str = f"${total:.2f}"
-            fee_note = (
-                f"\n💡 **Fee breakdown:**\n"
-                f"  • Plan price: ${base:.2f}\n"
-                f"  • Processing fee: $0.45 + 10%\n"
-                f"  • **Total charged: ${total:.2f}**\n"
-            )
+            amount_str = f"${base:.2f}"
+            fee_note = ""
 
         else:
             await cq.edit_message_text("Unknown gateway.")
