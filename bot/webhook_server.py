@@ -51,11 +51,12 @@ def _schedule(coro) -> None:
 
 
 # ── Core upgrade logic ────────────────────────────────────────────────────────
-async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: str) -> None:
+async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: str, order_id: str | None = None) -> None:
     """
-    Runs on the dedicated upgrade loop (never on the bot's download loop).
-    1. Validates plan, deduplicates, extends premium — all via DB.
-    2. Schedules the Telegram notification back on the bot's main loop.
+    Runs on the bot's main event loop (scheduled via _schedule).
+    1. For ZaPuPi: optionally double-confirms via order-status API (async, non-blocking).
+    2. Validates plan, deduplicates, extends premium — all via DB.
+    3. Sends Telegram notification.
     """
     from bot.database import extend_premium, get_user, claim_payment_dedup
     from bot.payments import PLANS
@@ -67,6 +68,20 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
                 f"(gateway={gateway}, key={dedup_key})"
             )
             return
+
+        # For ZaPuPi: async order-status double-check (runs here on the bot loop,
+        # so it never blocks the Flask webhook response / ZapUPI's 10-second window)
+        if gateway == "zapupi" and order_id:
+            from bot.payments import check_zapupi_order_status
+            confirmed = await check_zapupi_order_status(order_id)
+            logger.info(f"ZapUPI order-status response for {order_id}: {confirmed}")
+            confirmed_status = confirmed.get("status", "").lower()
+            if confirmed_status != "success":
+                logger.warning(
+                    f"ZapUPI order-status check returned {confirmed.get('status')!r} "
+                    f"for {order_id} — skipping upgrade"
+                )
+                return
 
         # Atomic DB dedup — safe across restarts and concurrent webhooks
         claimed = await claim_payment_dedup(dedup_key)
@@ -134,7 +149,7 @@ def zapupi_webhook():
         status      = data.get("status", "")
         order_id    = data.get("order_id", "")
         txn_id      = data.get("txn_id", "")
-        paid_amount = data.get("amount", 0)
+        paid_amount = data.get("pay_amount") or data.get("amount", 0)  # pay_amount = actual amount paid
         utr         = data.get("utr", "")
         environment = data.get("environment", "")
 
@@ -156,22 +171,7 @@ def zapupi_webhook():
             logger.warning(f"ZapUPI: unrecognised order_id={order_id!r}")
             return jsonify({"status": "ok"})
 
-        loop = asyncio.new_event_loop()
-        try:
-            confirmed = loop.run_until_complete(check_zapupi_order_status(order_id))
-        finally:
-            loop.close()
-
-        logger.info(f"ZapUPI order-status response for {order_id}: {confirmed}")
-
-        confirmed_status = confirmed.get("status", "").lower()
-        if confirmed_status != "success":
-            logger.warning(
-                f"ZapUPI order-status check returned {confirmed.get('status')!r} "
-                f"for {order_id} — skipping upgrade"
-            )
-            return jsonify({"status": "ok"})
-
+        # Amount sanity check using the webhook payload (fast, no extra HTTP call)
         if str(days) in PLANS:
             expected_inr = PLANS[str(days)]["inr"]
             try:
@@ -185,7 +185,10 @@ def zapupi_webhook():
                 pass
 
         dedup_key = f"zapupi_{txn_id or order_id}"
-        _schedule(_upgrade_and_notify(user_id, days, "zapupi", dedup_key))
+        # Schedule upgrade BEFORE returning so ZapUPI gets HTTP 200 within its
+        # 10-second window. The order-status double-check runs async inside
+        # _upgrade_and_notify on the bot's loop — it never blocks this response.
+        _schedule(_upgrade_and_notify(user_id, days, "zapupi", dedup_key, order_id))
         return jsonify({"status": "ok"})
     except Exception as e:
         logger.error(f"ZapUPI webhook exception: {e}", exc_info=True)

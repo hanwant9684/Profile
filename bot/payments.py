@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # ── Plan definitions ──────────────────────────────────────────────────────────
 PLANS: dict[str, dict] = {
-    "10":  {"days": 10,  "usd": 3.00,  "inr": 300,  "label": "10 days"},
+    "10":  {"days": 10,  "usd": 3.00,  "inr": 10,   "label": "10 days"},
     "30":  {"days": 30,  "usd": 4.00,  "inr": 400,  "label": "30 days"},
     "60":  {"days": 60,  "usd": 8.00,  "inr": 800,  "label": "60 days"},
     "90":  {"days": 90,  "usd": 12.00, "inr": 1200, "label": "90 days"},
@@ -74,23 +74,32 @@ async def create_zapupi_payment(user_id: int, days: int) -> dict:
     last_err = "Unknown error"
     for attempt in range(3):
         try:
-            bot_url = f"https://t.me/{_bot_username()}"
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
                 resp = await client.post(
                     f"{_ZAPUPI_API_BASE}/api/create-order",
                     headers={"Content-Type": "application/json"},
                     json={
-                        "zap_key":     ZAPUPI_MERCHANT_KEY,
-                        "order_id":    order_id,
-                        "amount":      str(plan["inr"]),
-                        "remark":      f"WolfyBot Premium | {user_id}",
-                        "success_url": bot_url,
-                        "failed_url":  bot_url,
-                        "timeout_url": bot_url,
-                        "webhook_url": f"{WEBHOOK_BASE_URL}/webhook/zapupi",
+                        # ZapUPI create-order supported fields:
+                        # zap_key, order_id, amount, customer_mobile, remark,
+                        # cashier_id, webhook_url, success_url, failed_url, timeout_url
+                        "zap_key":      ZAPUPI_MERCHANT_KEY,
+                        "order_id":     order_id,
+                        "amount":       float(plan["inr"]),   # API expects a float, not a string
+                        "remark":       f"WolfyBot Premium {days}d | {user_id}",
+                        # Per-order webhook override — ZapUPI POSTs to this URL on payment.
+                        # Returning HTTP 200 immediately (no blocking sub-call) keeps us
+                        # well within ZapUPI's 10-second response window.
+                        "webhook_url":  f"{WEBHOOK_BASE_URL}/webhook/zapupi",
+                        # Redirect user back to Telegram after payment instead of
+                        # ZapUPI's panel (which shows a 404 with no success_url set).
+                        "success_url":  f"https://t.me/{_bot_username()}",
+                        "failed_url":   f"https://t.me/{_bot_username()}",
+                        "timeout_url":  f"https://t.me/{_bot_username()}",
                     },
                 )
             data = resp.json()
+            logger.info(f"ZapUPI create-order response (attempt {attempt + 1}): {data}")
+            # ZapUPI returns status "success" (lowercase) on success
             if data.get("status") == "success" and data.get("payment_url"):
                 return {
                     "ok": True,
