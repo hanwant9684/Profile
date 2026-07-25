@@ -121,23 +121,6 @@ def health():
 # ── ZapUPI webhook ────────────────────────────────────────────────────────────
 @flask_app.route("/webhook/zapupi", methods=["POST"])
 def zapupi_webhook():
-    """
-    ZapUPI sends a POST to this endpoint when a payment status changes.
-
-    Docs: https://zapupi.com/docs — Section B, Step 3
-    ZapUPI does NOT sign webhooks with any HMAC — no signature to verify.
-
-    Payload fields:
-      order_id    — our order ID
-      status      — "Success" | "Failed"  (title-case)
-      txn_id      — ZapUPI transaction ID
-      amount      — INR amount paid
-      utr         — bank UTR reference number
-      environment — "cashier" | "zappay" | "test"
-
-    Flow: accept → confirm via order-status API → upgrade user.
-    Always respond HTTP 200 + {"status":"ok"} regardless of outcome.
-    """
     try:
         raw_body = request.get_data()
         data = json.loads(raw_body) if raw_body else {}
@@ -146,7 +129,7 @@ def zapupi_webhook():
 
         if not ZAPUPI_MERCHANT_KEY:
             logger.error("ZapUPI webhook received but ZAPUPI_MERCHANT_KEY not set")
-            return jsonify({"status": "ok"})  # still 200 so ZapUPI doesn't retry
+            return jsonify({"status": "ok"})
 
         status      = data.get("status", "")
         order_id    = data.get("order_id", "")
@@ -160,7 +143,6 @@ def zapupi_webhook():
             f"txn={txn_id!r} utr={utr!r} env={environment!r} amount={paid_amount}"
         )
 
-        # ZapUPI sends "Success" (title-case) for successful payments
         if status != "Success":
             logger.info(f"ZapUPI webhook: ignoring status={status!r}")
             return jsonify({"status": "ok"})
@@ -174,14 +156,14 @@ def zapupi_webhook():
             logger.warning(f"ZapUPI: unrecognised order_id={order_id!r}")
             return jsonify({"status": "ok"})
 
-        # Double-confirm via order-status API before upgrading (docs recommend this).
         loop = asyncio.new_event_loop()
         try:
             confirmed = loop.run_until_complete(check_zapupi_order_status(order_id))
         finally:
             loop.close()
 
-        # Order-status API returns lowercase "success" (webhook uses title-case "Success")
+        logger.info(f"ZapUPI order-status response for {order_id}: {confirmed}")
+
         confirmed_status = confirmed.get("status", "").lower()
         if confirmed_status != "success":
             logger.warning(
@@ -190,7 +172,6 @@ def zapupi_webhook():
             )
             return jsonify({"status": "ok"})
 
-        # Verify paid amount matches the plan price (INR)
         if str(days) in PLANS:
             expected_inr = PLANS[str(days)]["inr"]
             try:
@@ -201,14 +182,14 @@ def zapupi_webhook():
                     )
                     return jsonify({"status": "ok"})
             except (ValueError, TypeError):
-                pass  # non-numeric amount; let it through, DB has the real record
+                pass
 
         dedup_key = f"zapupi_{txn_id or order_id}"
         _schedule(_upgrade_and_notify(user_id, days, "zapupi", dedup_key))
         return jsonify({"status": "ok"})
     except Exception as e:
         logger.error(f"ZapUPI webhook exception: {e}", exc_info=True)
-        return jsonify({"status": "ok"})  # always 200 so ZapUPI doesn't retry endlessly
+        return jsonify({"status": "ok"})
 
 
 # ── Oxapay webhook ────────────────────────────────────────────────────────────

@@ -68,19 +68,6 @@ _ZAPUPI_API_BASE = "https://pay.zapupi.com"
 
 
 async def create_zapupi_payment(user_id: int, days: int) -> dict:
-    """
-    Create a ZapUPI payment order (UPI — GPay, PhonePe, Paytm, BHIM, etc.).
-
-    Docs: https://zapupi.com/docs — Section B (Backend Integration)
-    Endpoint : POST https://pay.zapupi.com/api/create-order
-    Auth     : zap_key field in request body (NOT a Bearer header)
-    Body     : { zap_key, order_id, amount (INR string), webhook_url,
-                 customer_mobile (opt), remark (opt) }
-    Response : { status: "success", payment_url, order_id, txn_id, ... }
-
-    Retries up to 3 times on network/5xx errors.
-    Returns {ok, url, order_id} or {ok: False, error}.
-    """
     plan = PLANS[str(days)]
     order_id = make_order_id(user_id, days)
 
@@ -95,19 +82,15 @@ async def create_zapupi_payment(user_id: int, days: int) -> dict:
                     json={
                         "zap_key":     ZAPUPI_MERCHANT_KEY,
                         "order_id":    order_id,
-                        "amount":      str(plan["inr"]),   # INR as string
+                        "amount":      str(plan["inr"]),
                         "remark":      f"WolfyBot Premium | {user_id}",
-                        # Redirect user back to the bot after payment
                         "success_url": bot_url,
                         "failed_url":  bot_url,
                         "timeout_url": bot_url,
-                        # Do NOT send webhook_url here — it would override the URL
-                        # already configured in the ZapUPI dashboard. The dashboard
-                        # webhook URL is the correct Replit endpoint.
+                        "webhook_url": f"{WEBHOOK_BASE_URL}/webhook/zapupi",
                     },
                 )
             data = resp.json()
-            # Docs: success response has status="success" and payment_url at top level
             if data.get("status") == "success" and data.get("payment_url"):
                 return {
                     "ok": True,
