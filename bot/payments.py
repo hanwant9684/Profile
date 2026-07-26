@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # ── Plan definitions ──────────────────────────────────────────────────────────
 PLANS: dict[str, dict] = {
     "10":  {"days": 10,  "usd": 3.00,  "inr": 300,   "label": "10 days"},
-    "30":  {"days": 30,  "usd": 4.00,  "inr": 400,  "label": "30 days"},
+    "30":  {"days": 30,  "usd": 1.00,  "inr": 400,  "label": "30 days"},
     "60":  {"days": 60,  "usd": 8.00,  "inr": 800,  "label": "60 days"},
     "90":  {"days": 90,  "usd": 12.00, "inr": 1200, "label": "90 days"},
     "365": {"days": 365, "usd": 45.00, "inr": 4500, "label": "1 Year"},
@@ -370,7 +370,8 @@ async def capture_paypal_order(paypal_order_id: str) -> dict:
             )
             data = resp.json()
 
-            if data.get("status") == "COMPLETED":
+            if data.get("status") in ("COMPLETED", "PENDING"):
+                is_pending = data.get("status") == "PENDING"
                 units = data.get("purchase_units", [])
                 unit = units[0] if units else {}
                 captures = unit.get("payments", {}).get("captures", [])
@@ -394,8 +395,28 @@ async def capture_paypal_order(paypal_order_id: str) -> dict:
                     if order_units:
                         custom_id = order_units[0].get("custom_id", "")
 
-                logger.info(f"PayPal capture OK — custom_id={custom_id!r} capture_id={capture_id!r} order={paypal_order_id}")
-                return {"ok": True, "custom_id": custom_id, "capture_id": capture_id}
+                if is_pending:
+                    logger.info(
+                        f"PayPal capture PENDING — custom_id={custom_id!r} "
+                        f"capture_id={capture_id!r} order={paypal_order_id} "
+                        f"(PAYMENT.CAPTURE.COMPLETED webhook will grant premium)"
+                    )
+                else:
+                    logger.info(f"PayPal capture OK — custom_id={custom_id!r} capture_id={capture_id!r} order={paypal_order_id}")
+                return {"ok": True, "pending": is_pending, "custom_id": custom_id, "capture_id": capture_id}
+
+            # ORDER_ALREADY_CAPTURED means the CHECKOUT.ORDER.APPROVED webhook
+            # handler captured this order first (race between webhook and return URL).
+            # The upgrade was already scheduled — tell the caller so it can show
+            # a success page instead of an error.
+            details = data.get("details", [])
+            issue = details[0].get("issue", "") if details else ""
+            if issue == "ORDER_ALREADY_CAPTURED":
+                logger.info(
+                    f"PayPal capture: order {paypal_order_id} already captured "
+                    f"(handled by CHECKOUT.ORDER.APPROVED webhook) — returning success"
+                )
+                return {"ok": True, "already_captured": True}
 
             logger.error(f"PayPal capture non-COMPLETED: {data}")
             return {"ok": False, "data": data}

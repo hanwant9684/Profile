@@ -536,15 +536,44 @@ def paypal_return():
             BOT_USERNAME
         ), 500
 
+    # ORDER_ALREADY_CAPTURED: the CHECKOUT.ORDER.APPROVED webhook handler captured
+    # the order before this redirect arrived (race condition). The upgrade is already
+    # scheduled — just show success so the user doesn't see a false error page.
+    if result.get("already_captured"):
+        logger.info(f"PayPal return: order {paypal_order_id} already captured by webhook — showing success page")
+        return _html_page(
+            "✅ Payment Successful!",
+            "Your Premium is being activated. Return to Telegram — you'll get a confirmation message shortly.",
+            BOT_USERNAME
+        ), 200
+
     custom_id = result.get("custom_id", "")
     capture_id = result.get("capture_id", "")
     parts = custom_id.split("_")
     days_str = "?"
+
     if len(parts) >= 3 and parts[0] == "tg":
         user_id = int(parts[1])
         days = int(parts[2])
         days_str = str(days)
-        # Same dedup key as /webhook/paypal — prevents double-upgrade
+
+        if result.get("pending"):
+            # Capture is pending review (fraud check, new account, etc.).
+            # Do NOT schedule an upgrade here — PAYMENT.CAPTURE.COMPLETED webhook
+            # will fire when PayPal clears the payment and grant premium then.
+            logger.info(
+                f"PayPal return: capture pending for order={paypal_order_id} "
+                f"user={user_id} days={days} — waiting for PAYMENT.CAPTURE.COMPLETED"
+            )
+            return _html_page(
+                "⏳ Payment Under Review",
+                f"Your payment for <strong>{days_str} days</strong> Premium is being reviewed by PayPal. "
+                f"This usually takes a few minutes. Return to Telegram — "
+                f"you'll get a confirmation message automatically once it clears.",
+                BOT_USERNAME
+            ), 200
+
+        # Normal completed capture — schedule upgrade immediately.
         dedup_key = f"paypal_{capture_id}" if capture_id else f"paypal_return_{paypal_order_id}"
         _schedule(_upgrade_and_notify(user_id, days, "paypal_return", dedup_key))
 
