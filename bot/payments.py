@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # ── Plan definitions ──────────────────────────────────────────────────────────
 PLANS: dict[str, dict] = {
     "10":  {"days": 10,  "usd": 3.00,  "inr": 300,   "label": "10 days"},
-    "30":  {"days": 30,  "usd": 1.00,  "inr": 400,  "label": "30 days"},
+    "30":  {"days": 30,  "usd": 4.00,  "inr": 400,  "label": "30 days"},
     "60":  {"days": 60,  "usd": 8.00,  "inr": 800,  "label": "60 days"},
     "90":  {"days": 90,  "usd": 12.00, "inr": 1200, "label": "90 days"},
     "365": {"days": 365, "usd": 45.00, "inr": 4500, "label": "1 Year"},
