@@ -473,7 +473,9 @@ async def handle_login_steps(client, message: Message):
             await message.reply(
                 "📩 **Verification Code**\n\n"
                 "A code was sent to your Telegram account.\n"
-                "Enter it here with spaces: `1 2 3 4 5`"
+                "Enter it here **with spaces between each digit**.\n\n"
+                "For example, if your code is `12345`, type it as:\n"
+                "`1 2 3 4 5`"
             )
 
         elif step == "CODE":
@@ -648,6 +650,7 @@ async def setbot_command(client, message: Message):
         "1. Open @BotFather → /newbot\n"
         "2. Follow the steps and copy the token\n"
         "3. Paste it here\n\n"
+        "📹 **Watch how to set up your bot:** https://t.me/Wolfy004/194\n\n"
         "⏱ This prompt expires in 5 minutes.\n"
         "Send /cancel_login to cancel.",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
