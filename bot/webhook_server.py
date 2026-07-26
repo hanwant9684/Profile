@@ -123,223 +123,6 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
         logger.error(f"_upgrade_and_notify error user={user_id}: {e}")
 
 
-# ── Revoke + notify ───────────────────────────────────────────────────────────
-async def _revoke_and_notify(user_id: int, reason: str, dedup_key: str) -> None:
-    """
-    Demote user to free and send a Telegram notification.
-    Runs on the bot's main event loop (scheduled via _schedule).
-    reason: "refunded" or "reversed" — shown in the Telegram message.
-    """
-    from bot.database import revoke_premium, claim_payment_dedup, get_user
-    try:
-        claimed = await claim_payment_dedup(dedup_key)
-        if not claimed:
-            logger.info(f"Duplicate revocation ignored: {dedup_key}")
-            return
-
-        user = await get_user(user_id)
-        if not user:
-            logger.warning(f"PayPal {reason}: user {user_id} not in DB — nothing to revoke")
-            return
-
-        await revoke_premium(user_id)
-        logger.info(f"Premium revoked: user={user_id} reason={reason} key={dedup_key}")
-
-        if _bot_loop and _bot_client:
-            verb = "refunded" if reason == "refunded" else "reversed by PayPal"
-            asyncio.run_coroutine_threadsafe(
-                _bot_client.send_message(
-                    user_id,
-                    f"⚠️ **Premium Access Revoked**\n\n"
-                    f"Your PayPal payment was {verb}.\n"
-                    f"Your account has been downgraded to the free plan.\n\n"
-                    f"If you believe this is a mistake, please contact support.",
-                ),
-                _bot_loop,
-            )
-    except Exception as e:
-        logger.error(f"_revoke_and_notify error user={user_id}: {e}")
-
-
-# ── PayPal order-lookup for revocation (REFUNDED / REVERSED fallback) ─────────
-async def _paypal_lookup_and_revoke(order_id: str, dedup_suffix: str, reason: str) -> None:
-    """
-    Fetch the PayPal order by ID to recover custom_id, then revoke premium.
-    Used when custom_id is absent from the REVERSED/REFUNDED webhook resource.
-    """
-    from bot.payments import get_paypal_token, PAYPAL_BASE
-    import httpx as _httpx
-    try:
-        token = await get_paypal_token()
-        if not token:
-            logger.error(f"_paypal_lookup_and_revoke: could not get token for order={order_id}")
-            return
-        async with _httpx.AsyncClient(timeout=_httpx.Timeout(15.0, connect=10.0)) as client:
-            resp = await client.get(
-                f"{PAYPAL_BASE}/v2/checkout/orders/{order_id}",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        units = resp.json().get("purchase_units", [])
-        if not units:
-            logger.error(f"_paypal_lookup_and_revoke: no purchase_units for order={order_id}")
-            return
-        custom_id = units[0].get("custom_id", "")
-        parts = custom_id.split("_")
-        if len(parts) >= 3 and parts[0] == "tg":
-            user_id = int(parts[1])
-            dedup_key = f"paypal_revoke_{reason}_{dedup_suffix}"
-            await _revoke_and_notify(user_id, reason, dedup_key)
-        else:
-            logger.error(f"_paypal_lookup_and_revoke: unrecognised custom_id={custom_id!r}")
-    except Exception as e:
-        logger.error(f"_paypal_lookup_and_revoke error for order={order_id}: {e}")
-
-
-# ── PayPal capture-lookup for revocation (REFUNDED only, when order_id absent) ─
-async def _paypal_capture_lookup_and_revoke(capture_id: str, refund_id: str) -> None:
-    """
-    For PAYMENT.CAPTURE.REFUNDED when supplementary_data lacks order_id:
-    fetch GET /v2/payments/captures/{id}, extract the parent order_id from the
-    "up" HATEOAS link, then call _paypal_lookup_and_revoke.
-    """
-    from bot.payments import get_paypal_token, PAYPAL_BASE
-    import httpx as _httpx
-    try:
-        token = await get_paypal_token()
-        if not token:
-            logger.error(f"_paypal_capture_lookup_and_revoke: no token for capture={capture_id}")
-            return
-        async with _httpx.AsyncClient(timeout=_httpx.Timeout(15.0, connect=10.0)) as client:
-            resp = await client.get(
-                f"{PAYPAL_BASE}/v2/payments/captures/{capture_id}",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        capture_data = resp.json()
-        order_id = ""
-        for lnk in capture_data.get("links", []):
-            if lnk.get("rel") == "up":
-                order_id = lnk.get("href", "").rstrip("/").split("/")[-1]
-                break
-        if order_id:
-            await _paypal_lookup_and_revoke(order_id, refund_id, "refunded")
-        else:
-            logger.error(
-                f"_paypal_capture_lookup_and_revoke: no 'up' link for capture={capture_id}"
-            )
-    except Exception as e:
-        logger.error(f"_paypal_capture_lookup_and_revoke error capture={capture_id}: {e}")
-
-
-# ── PayPal order-lookup fallback ─────────────────────────────────────────────
-async def _paypal_lookup_and_upgrade(order_id: str, capture_id: str, gateway: str) -> None:
-    """
-    Fetch the PayPal order by ID to recover custom_id when it's absent from the
-    PAYMENT.CAPTURE.COMPLETED webhook payload, then call _upgrade_and_notify.
-    Runs on the bot's main event loop (scheduled via _schedule).
-    """
-    from bot.payments import get_paypal_token, PAYPAL_BASE
-    import httpx as _httpx
-
-    try:
-        token = await get_paypal_token()
-        if not token:
-            logger.error(f"_paypal_lookup_and_upgrade: could not get PayPal token for order={order_id}")
-            return
-
-        async with _httpx.AsyncClient(timeout=_httpx.Timeout(15.0, connect=10.0)) as client:
-            resp = await client.get(
-                f"{PAYPAL_BASE}/v2/checkout/orders/{order_id}",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        data = resp.json()
-        units = data.get("purchase_units", [])
-        if not units:
-            logger.error(f"_paypal_lookup_and_upgrade: no purchase_units for order={order_id}")
-            return
-
-        custom_id = units[0].get("custom_id", "")
-        if not custom_id:
-            logger.error(f"_paypal_lookup_and_upgrade: custom_id still empty after order lookup for order={order_id}")
-            return
-
-        parts = custom_id.split("_")
-        if len(parts) >= 3 and parts[0] == "tg":
-            user_id = int(parts[1])
-            days = int(parts[2])
-            dedup_key = f"paypal_{capture_id}" if capture_id else f"paypal_order_{order_id}"
-            await _upgrade_and_notify(user_id, days, gateway, dedup_key)
-        else:
-            logger.error(f"_paypal_lookup_and_upgrade: unrecognised custom_id={custom_id!r} for order={order_id}")
-    except Exception as e:
-        logger.error(f"_paypal_lookup_and_upgrade error for order={order_id}: {e}")
-
-
-# ── PayPal CHECKOUT.ORDER.APPROVED capture ────────────────────────────────────
-async def _paypal_approved_capture_and_upgrade(order_id: str) -> None:
-    """
-    Handle CHECKOUT.ORDER.APPROVED: capture the order then grant premium.
-    Runs on the bot's main event loop (scheduled via _schedule).
-
-    This fires when the user approves payment on PayPal but their browser closes
-    before the redirect to /paypal/return lands — leaving the order in APPROVED
-    state indefinitely. Without this handler, the user is charged but gets nothing.
-
-    Uses the same dedup key pattern as the other PayPal paths so a subsequent
-    PAYMENT.CAPTURE.COMPLETED webhook (or a late /paypal/return redirect) cannot
-    double-upgrade the same user.
-    """
-    from bot.payments import capture_paypal_order
-
-    try:
-        result = await capture_paypal_order(order_id)
-
-        if not result.get("ok"):
-            # already_captured: /paypal/return won the race — nothing to do.
-            if result.get("already_captured"):
-                logger.info(
-                    f"PayPal CHECKOUT.ORDER.APPROVED: order {order_id} "
-                    f"already captured — skipping (handled by return URL)"
-                )
-                return
-            logger.error(
-                f"PayPal CHECKOUT.ORDER.APPROVED: capture failed for "
-                f"order={order_id}: {result}"
-            )
-            return
-
-        # PENDING: PayPal is holding the capture for review.
-        # Do NOT upgrade here — PAYMENT.CAPTURE.COMPLETED will fire when it
-        # settles and grant premium through the normal webhook path (which also
-        # does full amount validation before upgrading).
-        if result.get("pending"):
-            logger.info(
-                f"PayPal CHECKOUT.ORDER.APPROVED: capture PENDING for "
-                f"order={order_id} — waiting for PAYMENT.CAPTURE.COMPLETED"
-            )
-            return
-
-        custom_id = result.get("custom_id", "")
-        capture_id = result.get("capture_id", "")
-
-        parts = custom_id.split("_")
-        if len(parts) >= 3 and parts[0] == "tg":
-            user_id = int(parts[1])
-            days = int(parts[2])
-            dedup_key = f"paypal_{capture_id}" if capture_id else f"paypal_order_{order_id}"
-            logger.info(
-                f"PayPal CHECKOUT.ORDER.APPROVED: captured order={order_id} "
-                f"user={user_id} days={days} dedup={dedup_key}"
-            )
-            await _upgrade_and_notify(user_id, days, "paypal_approved", dedup_key)
-        else:
-            logger.error(
-                f"PayPal CHECKOUT.ORDER.APPROVED: unrecognised custom_id={custom_id!r} "
-                f"for order={order_id} — upgrade skipped"
-            )
-    except Exception as e:
-        logger.error(f"_paypal_approved_capture_and_upgrade error for order={order_id}: {e}")
-
-
 # ── Health check ──────────────────────────────────────────────────────────────
 @flask_app.route("/health")
 def health():
@@ -524,91 +307,9 @@ def paypal_webhook():
             logger.error("PayPal webhook received but PAYPAL_WEBHOOK_ID not set — rejected")
             return jsonify({"status": "rejected", "reason": "webhook ID not configured"}), 403
 
-        # Normalize header keys to uppercase before passing to the verifier.
-        # dict(request.headers) produces title-cased keys (e.g. "Paypal-Auth-Algo")
-        # because Werkzeug reconstructs them from the WSGI environ, but our verifier
-        # (and PayPal's own docs) use ALL-CAPS names like "PAYPAL-AUTH-ALGO".
-        # A plain-dict lookup is case-sensitive, so without this normalization every
-        # header read returns "" and PayPal's API returns FAILURE for every webhook.
-        normalized_headers = {k.upper(): v for k, v in request.headers.items()}
-        if not _verify_paypal_webhook_sync(normalized_headers, raw_body, PAYPAL_WEBHOOK_ID, PAYPAL_BASE):
+        if not _verify_paypal_webhook_sync(dict(request.headers), raw_body, PAYPAL_WEBHOOK_ID, PAYPAL_BASE):
             logger.warning("PayPal webhook signature verification failed — rejected")
             return jsonify({"status": "rejected"}), 400
-
-        if event_type == "CHECKOUT.ORDER.APPROVED":
-            # User approved payment but browser closed before /paypal/return redirect.
-            # Capture the order here so premium is still granted.
-            resource = data.get("resource", {})
-            order_id = resource.get("id", "")
-            if not order_id:
-                logger.warning("PayPal CHECKOUT.ORDER.APPROVED: no order ID in resource — skipped")
-                return jsonify({"status": "ok"})
-            logger.info(f"PayPal CHECKOUT.ORDER.APPROVED: scheduling capture for order={order_id}")
-            _schedule(_paypal_approved_capture_and_upgrade(order_id))
-            return jsonify({"status": "ok"})
-
-        # ── Refund / reversal — revoke premium ───────────────────────────────
-        if event_type == "PAYMENT.CAPTURE.REVERSED":
-            # resource IS the capture object (status=REVERSED), same shape as
-            # PAYMENT.CAPTURE.COMPLETED — custom_id is usually present directly.
-            resource = data.get("resource", {})
-            capture_id = resource.get("id", "")
-            custom_id = resource.get("custom_id", "")
-
-            if not custom_id:
-                # Fallback: supplementary_data or HATEOAS "up" → parent order
-                order_id_for_lookup = (
-                    resource.get("supplementary_data", {})
-                            .get("related_ids", {}).get("order_id", "")
-                )
-                if not order_id_for_lookup:
-                    for lnk in resource.get("links", []):
-                        if lnk.get("rel") == "up":
-                            order_id_for_lookup = lnk.get("href", "").rstrip("/").split("/")[-1]
-                            break
-                if order_id_for_lookup:
-                    logger.info(f"PayPal REVERSED: resolving custom_id via order={order_id_for_lookup}")
-                    _schedule(_paypal_lookup_and_revoke(order_id_for_lookup, capture_id, "reversed"))
-                else:
-                    logger.warning(f"PayPal REVERSED: could not resolve custom_id for capture={capture_id!r}")
-                return jsonify({"status": "ok"})
-
-            parts = custom_id.split("_")
-            if len(parts) >= 3 and parts[0] == "tg":
-                user_id = int(parts[1])
-                dedup_key = f"paypal_revoke_reversed_{capture_id}" if capture_id else f"paypal_revoke_rcid_{custom_id}"
-                logger.info(f"PayPal REVERSED: scheduling revoke user={user_id} capture={capture_id}")
-                _schedule(_revoke_and_notify(user_id, "reversed", dedup_key))
-            else:
-                logger.warning(f"PayPal REVERSED: unrecognised custom_id={custom_id!r}")
-            return jsonify({"status": "ok"})
-
-        if event_type == "PAYMENT.CAPTURE.REFUNDED":
-            # resource is the REFUND object (not the capture).
-            # supplementary_data usually carries both order_id and capture_id.
-            resource = data.get("resource", {})
-            refund_id = resource.get("id", "")
-            related = resource.get("supplementary_data", {}).get("related_ids", {})
-
-            order_id_for_lookup = related.get("order_id", "")
-            if order_id_for_lookup:
-                logger.info(f"PayPal REFUNDED: resolving via order={order_id_for_lookup} refund={refund_id}")
-                _schedule(_paypal_lookup_and_revoke(order_id_for_lookup, refund_id, "refunded"))
-                return jsonify({"status": "ok"})
-
-            # Fallback: get capture_id → fetch capture → "up" link → order
-            capture_id = related.get("capture_id", "")
-            if not capture_id:
-                for lnk in resource.get("links", []):
-                    if lnk.get("rel") == "up":
-                        capture_id = lnk.get("href", "").rstrip("/").split("/")[-1]
-                        break
-            if capture_id:
-                logger.info(f"PayPal REFUNDED: resolving via capture={capture_id} refund={refund_id}")
-                _schedule(_paypal_capture_lookup_and_revoke(capture_id, refund_id))
-            else:
-                logger.warning(f"PayPal REFUNDED: could not resolve order for refund={refund_id!r}")
-            return jsonify({"status": "ok"})
 
         if event_type != "PAYMENT.CAPTURE.COMPLETED":
             return jsonify({"status": "ok"})
@@ -617,67 +318,14 @@ def paypal_webhook():
         capture_id = resource.get("id", "")
         custom_id = resource.get("custom_id", "")
 
-        # Fallback: some PayPal webhook payloads omit custom_id on the capture
-        # resource even though it was set on purchase_units at order creation.
-        # In that case, look it up via the Orders API using the order ID from
-        # supplementary_data or the links in the resource.
         if not custom_id:
-            order_id_for_lookup = (
-                resource.get("supplementary_data", {})
-                        .get("related_ids", {})
-                        .get("order_id", "")
-            )
-            if not order_id_for_lookup:
-                # Try HATEOAS links: rel="up" points to the parent order
-                for lnk in resource.get("links", []):
-                    if lnk.get("rel") == "up":
-                        href = lnk.get("href", "")
-                        order_id_for_lookup = href.rstrip("/").split("/")[-1]
-                        break
-
-            if order_id_for_lookup:
-                logger.info(
-                    f"PayPal webhook: custom_id missing — fetching order "
-                    f"{order_id_for_lookup} to resolve"
-                )
-                _schedule(_paypal_lookup_and_upgrade(
-                    order_id_for_lookup, capture_id, "paypal_webhook"
-                ))
-                return jsonify({"status": "ok"})
-
-            logger.warning(
-                f"PayPal webhook: no custom_id and could not find order ID "
-                f"for capture {capture_id!r} — upgrade skipped"
-            )
+            logger.warning("PayPal webhook: no custom_id in resource")
             return jsonify({"status": "ok"})
 
         parts = custom_id.split("_")
         if len(parts) >= 3 and parts[0] == "tg":
             user_id = int(parts[1])
             days = int(parts[2])
-
-            # Amount validation — prevent someone paying $0.01 and getting premium.
-            # The captured gross_amount (or amount.value) must be >= expected plan price.
-            from bot.payments import PLANS, paypal_total
-            if str(days) in PLANS:
-                expected_usd = paypal_total(PLANS[str(days)]["usd"])
-                # PayPal puts captured amount at resource.seller_receivable_breakdown
-                # or resource.amount.value (gross); check both.
-                try:
-                    gross = float(
-                        resource.get("seller_receivable_breakdown", {}).get("gross_amount", {}).get("value")
-                        or resource.get("amount", {}).get("value", 0)
-                    )
-                    if gross < expected_usd - 0.10:   # 10¢ tolerance for rounding
-                        logger.error(
-                            f"PayPal webhook amount mismatch: expected ${expected_usd:.2f} "
-                            f"but captured ${gross:.2f} for user={user_id} days={days} "
-                            f"capture={capture_id} — upgrade rejected"
-                        )
-                        return jsonify({"status": "ok"})
-                except (TypeError, ValueError):
-                    pass  # If we can't parse the amount, allow it through — don't block legit payments
-
             dedup_key = f"paypal_{capture_id}" if capture_id else f"paypal_cid_{custom_id}"
             _schedule(_upgrade_and_notify(user_id, days, "paypal_webhook", dedup_key))
 
@@ -694,9 +342,9 @@ def paypal_return():
     BOT_USERNAME = _bot_username()
 
     paypal_order_id = request.args.get("token")
-    # PayerID is present in the old application_context flow but may be absent
-    # with payment_source.paypal. Only the order token is needed to capture.
-    if not paypal_order_id:
+    payer_id = request.args.get("PayerID")
+
+    if not paypal_order_id or not payer_id:
         return _html_page("❌ Payment Cancelled", "No payment data received."), 400
 
     loop = asyncio.new_event_loop()
@@ -713,44 +361,15 @@ def paypal_return():
             BOT_USERNAME
         ), 500
 
-    # ORDER_ALREADY_CAPTURED: the CHECKOUT.ORDER.APPROVED webhook handler captured
-    # the order before this redirect arrived (race condition). The upgrade is already
-    # scheduled — just show success so the user doesn't see a false error page.
-    if result.get("already_captured"):
-        logger.info(f"PayPal return: order {paypal_order_id} already captured by webhook — showing success page")
-        return _html_page(
-            "✅ Payment Successful!",
-            "Your Premium is being activated. Return to Telegram — you'll get a confirmation message shortly.",
-            BOT_USERNAME
-        ), 200
-
     custom_id = result.get("custom_id", "")
     capture_id = result.get("capture_id", "")
     parts = custom_id.split("_")
     days_str = "?"
-
     if len(parts) >= 3 and parts[0] == "tg":
         user_id = int(parts[1])
         days = int(parts[2])
         days_str = str(days)
-
-        if result.get("pending"):
-            # Capture is pending review (fraud check, new account, etc.).
-            # Do NOT schedule an upgrade here — PAYMENT.CAPTURE.COMPLETED webhook
-            # will fire when PayPal clears the payment and grant premium then.
-            logger.info(
-                f"PayPal return: capture pending for order={paypal_order_id} "
-                f"user={user_id} days={days} — waiting for PAYMENT.CAPTURE.COMPLETED"
-            )
-            return _html_page(
-                "⏳ Payment Under Review",
-                f"Your payment for <strong>{days_str} days</strong> Premium is being reviewed by PayPal. "
-                f"This usually takes a few minutes. Return to Telegram — "
-                f"you'll get a confirmation message automatically once it clears.",
-                BOT_USERNAME
-            ), 200
-
-        # Normal completed capture — schedule upgrade immediately.
+        # Same dedup key as /webhook/paypal — prevents double-upgrade
         dedup_key = f"paypal_{capture_id}" if capture_id else f"paypal_return_{paypal_order_id}"
         _schedule(_upgrade_and_notify(user_id, days, "paypal_return", dedup_key))
 

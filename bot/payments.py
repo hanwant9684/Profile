@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # ── Plan definitions ──────────────────────────────────────────────────────────
 PLANS: dict[str, dict] = {
-    "10":  {"days": 10,  "usd": 1.00,  "inr": 300,   "label": "10 days"},
+    "10":  {"days": 10,  "usd": 3.00,  "inr": 300,   "label": "10 days"},
     "30":  {"days": 30,  "usd": 4.00,  "inr": 400,  "label": "30 days"},
     "60":  {"days": 60,  "usd": 8.00,  "inr": 800,  "label": "60 days"},
     "90":  {"days": 90,  "usd": 12.00, "inr": 1200, "label": "90 days"},
@@ -200,22 +200,8 @@ async def create_oxapay_invoice(user_id: int, days: int) -> dict:
 
 
 # ── PayPal ────────────────────────────────────────────────────────────────────
-
-# Simple in-process token cache. PayPal access tokens are valid for ~9 hours;
-# we refresh 5 minutes before expiry to avoid races on long-running requests.
-_paypal_token_cache: dict = {"token": None, "expires_at": 0.0}
-
-
 async def get_paypal_token() -> str | None:
-    """
-    Fetch (or return cached) a PayPal OAuth2 access token.
-    Tokens are cached for up to ~8h55m to avoid a fresh HTTP round-trip on
-    every API call (order creation, capture, webhook verification).
-    """
-    now = time.monotonic()
-    if _paypal_token_cache["token"] and now < _paypal_token_cache["expires_at"]:
-        return _paypal_token_cache["token"]
-
+    """Fetch a PayPal OAuth token. Retries once on failure."""
     for attempt in range(2):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=10.0)) as client:
@@ -224,13 +210,8 @@ async def get_paypal_token() -> str | None:
                     auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
                     data={"grant_type": "client_credentials"},
                 )
-            body = resp.json()
-            token = body.get("access_token")
-            expires_in = int(body.get("expires_in", 32400))  # default 9 h
+            token = resp.json().get("access_token")
             if token:
-                _paypal_token_cache["token"] = token
-                # Expire 5 minutes early to avoid using a token right as it dies
-                _paypal_token_cache["expires_at"] = now + expires_in - 300
                 return token
         except Exception as e:
             logger.error(f"PayPal token attempt {attempt + 1}/2 error: {e}")
@@ -256,17 +237,9 @@ async def create_paypal_order(user_id: int, days: int, charge_amount: float | No
 
     charge_amount: the amount to actually charge (with fees). If None, uses plan['usd'].
     """
-    import uuid
     plan = PLANS[str(days)]
     amount = charge_amount if charge_amount is not None else plan["usd"]
     custom_id = f"tg_{user_id}_{days}"
-
-    # Generate ONE idempotency key for the whole retry loop.
-    # PayPal caches the response for 6 hours under the same PayPal-Request-Id,
-    # so retrying with the same key is safe — PayPal returns the cached order
-    # instead of creating a duplicate. Regenerating the key per-attempt defeats
-    # this protection and can create multiple orders on network timeouts.
-    request_id = str(uuid.uuid4())
 
     last_err = "Unknown error"
     for attempt in range(3):
@@ -277,14 +250,12 @@ async def create_paypal_order(user_id: int, days: int, charge_amount: float | No
                 await asyncio.sleep(1.5)
                 continue
 
-
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
                 resp = await client.post(
                     f"{PAYPAL_BASE}/v2/checkout/orders",
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
-                        "PayPal-Request-Id": request_id,
                     },
                     json={
                         "intent": "CAPTURE",
@@ -296,29 +267,18 @@ async def create_paypal_order(user_id: int, days: int, charge_amount: float | No
                             "description": f"Wolfy Bot Premium — {plan['label']}",
                             "custom_id": custom_id,
                         }],
-                        # payment_source.paypal.experience_context is the current
-                        # PayPal v2 API field (replaces deprecated application_context).
-                        "payment_source": {
-                            "paypal": {
-                                "experience_context": {
-                                    "return_url": f"{WEBHOOK_BASE_URL}/paypal/return",
-                                    "cancel_url": f"https://t.me/{_bot_username()}",
-                                    "brand_name": "Wolfy Bot Premium",
-                                    "user_action": "PAY_NOW",
-                                    "shipping_preference": "NO_SHIPPING",
-                                    "landing_page": "LOGIN",
-                                    "payment_method_preference": "IMMEDIATE_PAYMENT_REQUIRED",
-                                },
-                            },
+                        "application_context": {
+                            "return_url": f"{WEBHOOK_BASE_URL}/paypal/return",
+                            "cancel_url": f"https://t.me/{_bot_username()}",
+                            "brand_name": "Wolfy Bot Premium",
+                            "user_action": "PAY_NOW",
+                            "shipping_preference": "NO_SHIPPING",
                         },
                     }
                 )
             data = resp.json()
-            # With application_context the rel is "approve";
-            # with payment_source.paypal it becomes "payer-action". Accept both.
             approve_url = next(
-                (lnk["href"] for lnk in data.get("links", [])
-                 if lnk.get("rel") in ("approve", "payer-action")),
+                (lnk["href"] for lnk in data.get("links", []) if lnk["rel"] == "approve"),
                 None
             )
             if approve_url:
@@ -343,16 +303,7 @@ async def create_paypal_order(user_id: int, days: int, charge_amount: float | No
 
 
 async def capture_paypal_order(paypal_order_id: str) -> dict:
-    """
-    Capture a PayPal order after the user approves it.
-
-    IMPORTANT: We send 'Prefer: return=representation' so PayPal returns the full
-    order object (including purchase_units with custom_id and payments.captures).
-    Without this header PayPal defaults to 'return=minimal' which only returns
-    {id, status, links} — custom_id and capture_id would be missing and we could
-    not identify the user to grant premium.
-    """
-    import uuid
+    """Capture a PayPal order after the user approves it."""
     token = await get_paypal_token()
     if not token:
         return {"ok": False, "error": "PayPal auth failed"}
@@ -363,108 +314,20 @@ async def capture_paypal_order(paypal_order_id: str) -> dict:
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
-                    # Required: without this, PayPal defaults to 'return=minimal'
-                    # which only returns {id, status, links} — purchase_units and
-                    # custom_id are absent, so we can never identify the user.
-                    "Prefer": "return=representation",
-                    "PayPal-Request-Id": str(uuid.uuid4()),
                 },
-                # Empty JSON body required by PayPal for the capture endpoint
-                content=b"{}",
             )
-            data = resp.json()
-
-            if data.get("status") in ("COMPLETED", "PENDING"):
-                is_pending = data.get("status") == "PENDING"
-                units = data.get("purchase_units", [])
-                unit = units[0] if units else {}
-                captures = unit.get("payments", {}).get("captures", [])
-                capture = captures[0] if captures else {}
-                custom_id = unit.get("custom_id", "") or capture.get("custom_id", "")
-                capture_id = capture.get("id", "")
-
-                # Fallback: if custom_id is still empty (defensive — should not
-                # happen with return=representation), fetch the order directly.
-                if not custom_id:
-                    logger.warning(
-                        f"PayPal capture: custom_id missing in capture response for "
-                        f"order={paypal_order_id} — fetching order details as fallback"
-                    )
-                    order_resp = await client.get(
-                        f"{PAYPAL_BASE}/v2/checkout/orders/{paypal_order_id}",
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-                    order_data = order_resp.json()
-                    order_units = order_data.get("purchase_units", [])
-                    if order_units:
-                        custom_id = order_units[0].get("custom_id", "")
-
-                if is_pending:
-                    logger.info(
-                        f"PayPal capture PENDING — custom_id={custom_id!r} "
-                        f"capture_id={capture_id!r} order={paypal_order_id} "
-                        f"(PAYMENT.CAPTURE.COMPLETED webhook will grant premium)"
-                    )
-                    # Skip amount validation for PENDING — the PAYMENT.CAPTURE.COMPLETED
-                    # webhook already validates amount before granting premium.
-                    return {"ok": True, "pending": True, "custom_id": custom_id, "capture_id": capture_id}
-
-                # ── Amount + currency validation (COMPLETED only) ─────────────
-                # Centralised here so every capture path (return URL, APPROVED
-                # webhook) is protected — not just the PAYMENT.CAPTURE.COMPLETED
-                # webhook handler.
-                parts_check = custom_id.split("_")
-                if len(parts_check) >= 3 and parts_check[0] == "tg":
-                    try:
-                        _days = int(parts_check[2])
-                        _plan = PLANS.get(str(_days))
-                        if _plan:
-                            _expected = paypal_total(_plan["usd"])
-                            _gross = float(
-                                capture.get("seller_receivable_breakdown", {})
-                                        .get("gross_amount", {}).get("value")
-                                or capture.get("amount", {}).get("value", 0)
-                            )
-                            _currency = (
-                                capture.get("seller_receivable_breakdown", {})
-                                        .get("gross_amount", {}).get("currency_code")
-                                or capture.get("amount", {}).get("currency_code", "USD")
-                            )
-                            if _currency.upper() != "USD":
-                                logger.error(
-                                    f"PayPal capture: unexpected currency {_currency!r} "
-                                    f"for order={paypal_order_id} — rejected"
-                                )
-                                return {"ok": False, "error": f"unexpected currency {_currency!r}"}
-                            if _gross < _expected - 0.10:   # 10¢ tolerance for rounding
-                                logger.error(
-                                    f"PayPal capture amount mismatch: expected "
-                                    f"${_expected:.2f} but captured ${_gross:.2f} "
-                                    f"for days={_days} order={paypal_order_id} — rejected"
-                                )
-                                return {"ok": False, "error": "amount_mismatch"}
-                    except (ValueError, TypeError) as _ve:
-                        # Parse failure — don't block a legitimate payment
-                        logger.warning(f"PayPal capture: amount validation skipped ({_ve})")
-
-                logger.info(f"PayPal capture OK — custom_id={custom_id!r} capture_id={capture_id!r} order={paypal_order_id}")
-                return {"ok": True, "pending": False, "custom_id": custom_id, "capture_id": capture_id}
-
-            # ORDER_ALREADY_CAPTURED means the CHECKOUT.ORDER.APPROVED webhook
-            # handler captured this order first (race between webhook and return URL).
-            # The upgrade was already scheduled — tell the caller so it can show
-            # a success page instead of an error.
-            details = data.get("details", [])
-            issue = details[0].get("issue", "") if details else ""
-            if issue == "ORDER_ALREADY_CAPTURED":
-                logger.info(
-                    f"PayPal capture: order {paypal_order_id} already captured "
-                    f"(handled by CHECKOUT.ORDER.APPROVED webhook) — returning success"
-                )
-                return {"ok": True, "already_captured": True}
-
-            logger.error(f"PayPal capture non-COMPLETED: {data}")
-            return {"ok": False, "data": data}
+        data = resp.json()
+        if data.get("status") == "COMPLETED":
+            units = data.get("purchase_units", [{}])
+            unit = units[0] if units else {}
+            captures = unit.get("payments", {}).get("captures", [])
+            capture = captures[0] if captures else {}
+            custom_id = unit.get("custom_id", "") or capture.get("custom_id", "")
+            capture_id = capture.get("id", "")
+            logger.info(f"PayPal capture OK — custom_id={custom_id!r} capture_id={capture_id!r} order={paypal_order_id}")
+            return {"ok": True, "custom_id": custom_id, "capture_id": capture_id}
+        logger.error(f"PayPal capture non-COMPLETED: {data}")
+        return {"ok": False, "data": data}
     except Exception as e:
         logger.error(f"PayPal capture error: {e}")
         return {"ok": False, "error": str(e)}
