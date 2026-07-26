@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # ── Plan definitions ──────────────────────────────────────────────────────────
 PLANS: dict[str, dict] = {
-    "10":  {"days": 10,  "usd": 3.00,  "inr": 300,   "label": "10 days"},
+    "10":  {"days": 10,  "usd": 1.00,  "inr": 300,   "label": "10 days"},
     "30":  {"days": 30,  "usd": 4.00,  "inr": 400,  "label": "30 days"},
     "60":  {"days": 60,  "usd": 8.00,  "inr": 800,  "label": "60 days"},
     "90":  {"days": 90,  "usd": 12.00, "inr": 1200, "label": "90 days"},
@@ -261,6 +261,13 @@ async def create_paypal_order(user_id: int, days: int, charge_amount: float | No
     amount = charge_amount if charge_amount is not None else plan["usd"]
     custom_id = f"tg_{user_id}_{days}"
 
+    # Generate ONE idempotency key for the whole retry loop.
+    # PayPal caches the response for 6 hours under the same PayPal-Request-Id,
+    # so retrying with the same key is safe — PayPal returns the cached order
+    # instead of creating a duplicate. Regenerating the key per-attempt defeats
+    # this protection and can create multiple orders on network timeouts.
+    request_id = str(uuid.uuid4())
+
     last_err = "Unknown error"
     for attempt in range(3):
         try:
@@ -270,9 +277,6 @@ async def create_paypal_order(user_id: int, days: int, charge_amount: float | No
                 await asyncio.sleep(1.5)
                 continue
 
-            # PayPal-Request-Id ensures idempotency: same ID on retry = no duplicate order.
-            # We generate one per attempt so a genuine retry gets a new order.
-            request_id = str(uuid.uuid4())
 
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
                 resp = await client.post(
@@ -401,9 +405,50 @@ async def capture_paypal_order(paypal_order_id: str) -> dict:
                         f"capture_id={capture_id!r} order={paypal_order_id} "
                         f"(PAYMENT.CAPTURE.COMPLETED webhook will grant premium)"
                     )
-                else:
-                    logger.info(f"PayPal capture OK — custom_id={custom_id!r} capture_id={capture_id!r} order={paypal_order_id}")
-                return {"ok": True, "pending": is_pending, "custom_id": custom_id, "capture_id": capture_id}
+                    # Skip amount validation for PENDING — the PAYMENT.CAPTURE.COMPLETED
+                    # webhook already validates amount before granting premium.
+                    return {"ok": True, "pending": True, "custom_id": custom_id, "capture_id": capture_id}
+
+                # ── Amount + currency validation (COMPLETED only) ─────────────
+                # Centralised here so every capture path (return URL, APPROVED
+                # webhook) is protected — not just the PAYMENT.CAPTURE.COMPLETED
+                # webhook handler.
+                parts_check = custom_id.split("_")
+                if len(parts_check) >= 3 and parts_check[0] == "tg":
+                    try:
+                        _days = int(parts_check[2])
+                        _plan = PLANS.get(str(_days))
+                        if _plan:
+                            _expected = paypal_total(_plan["usd"])
+                            _gross = float(
+                                capture.get("seller_receivable_breakdown", {})
+                                        .get("gross_amount", {}).get("value")
+                                or capture.get("amount", {}).get("value", 0)
+                            )
+                            _currency = (
+                                capture.get("seller_receivable_breakdown", {})
+                                        .get("gross_amount", {}).get("currency_code")
+                                or capture.get("amount", {}).get("currency_code", "USD")
+                            )
+                            if _currency.upper() != "USD":
+                                logger.error(
+                                    f"PayPal capture: unexpected currency {_currency!r} "
+                                    f"for order={paypal_order_id} — rejected"
+                                )
+                                return {"ok": False, "error": f"unexpected currency {_currency!r}"}
+                            if _gross < _expected - 0.10:   # 10¢ tolerance for rounding
+                                logger.error(
+                                    f"PayPal capture amount mismatch: expected "
+                                    f"${_expected:.2f} but captured ${_gross:.2f} "
+                                    f"for days={_days} order={paypal_order_id} — rejected"
+                                )
+                                return {"ok": False, "error": "amount_mismatch"}
+                    except (ValueError, TypeError) as _ve:
+                        # Parse failure — don't block a legitimate payment
+                        logger.warning(f"PayPal capture: amount validation skipped ({_ve})")
+
+                logger.info(f"PayPal capture OK — custom_id={custom_id!r} capture_id={capture_id!r} order={paypal_order_id}")
+                return {"ok": True, "pending": False, "custom_id": custom_id, "capture_id": capture_id}
 
             # ORDER_ALREADY_CAPTURED means the CHECKOUT.ORDER.APPROVED webhook
             # handler captured this order first (race between webhook and return URL).

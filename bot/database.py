@@ -338,6 +338,28 @@ async def set_user_role(user_id, role, duration_days=None):
         logger.error(f"Error setting role for {user_id}: {e}")
 
 
+async def revoke_premium(user_id: int) -> None:
+    """
+    Demote user to free and clear their premium expiry date.
+    Called when PayPal issues a refund or reversal for a captured payment.
+    """
+    _require_pool()
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE users
+                SET role = 'free', premium_expiry_date = NULL, updated_at = NOW()
+                WHERE telegram_id = $1
+                """,
+                int(user_id),
+            )
+        logger.info(f"Premium revoked for user {user_id} — downgraded to free")
+    except Exception as e:
+        logger.error(f"revoke_premium error for {user_id}: {e}")
+        raise
+
+
 async def extend_premium(user_id: int, days: int):
     """
     Atomically extend (or grant) premium for user_id by the given number of days.

@@ -123,6 +123,113 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
         logger.error(f"_upgrade_and_notify error user={user_id}: {e}")
 
 
+# ── Revoke + notify ───────────────────────────────────────────────────────────
+async def _revoke_and_notify(user_id: int, reason: str, dedup_key: str) -> None:
+    """
+    Demote user to free and send a Telegram notification.
+    Runs on the bot's main event loop (scheduled via _schedule).
+    reason: "refunded" or "reversed" — shown in the Telegram message.
+    """
+    from bot.database import revoke_premium, claim_payment_dedup, get_user
+    try:
+        claimed = await claim_payment_dedup(dedup_key)
+        if not claimed:
+            logger.info(f"Duplicate revocation ignored: {dedup_key}")
+            return
+
+        user = await get_user(user_id)
+        if not user:
+            logger.warning(f"PayPal {reason}: user {user_id} not in DB — nothing to revoke")
+            return
+
+        await revoke_premium(user_id)
+        logger.info(f"Premium revoked: user={user_id} reason={reason} key={dedup_key}")
+
+        if _bot_loop and _bot_client:
+            verb = "refunded" if reason == "refunded" else "reversed by PayPal"
+            asyncio.run_coroutine_threadsafe(
+                _bot_client.send_message(
+                    user_id,
+                    f"⚠️ **Premium Access Revoked**\n\n"
+                    f"Your PayPal payment was {verb}.\n"
+                    f"Your account has been downgraded to the free plan.\n\n"
+                    f"If you believe this is a mistake, please contact support.",
+                ),
+                _bot_loop,
+            )
+    except Exception as e:
+        logger.error(f"_revoke_and_notify error user={user_id}: {e}")
+
+
+# ── PayPal order-lookup for revocation (REFUNDED / REVERSED fallback) ─────────
+async def _paypal_lookup_and_revoke(order_id: str, dedup_suffix: str, reason: str) -> None:
+    """
+    Fetch the PayPal order by ID to recover custom_id, then revoke premium.
+    Used when custom_id is absent from the REVERSED/REFUNDED webhook resource.
+    """
+    from bot.payments import get_paypal_token, PAYPAL_BASE
+    import httpx as _httpx
+    try:
+        token = await get_paypal_token()
+        if not token:
+            logger.error(f"_paypal_lookup_and_revoke: could not get token for order={order_id}")
+            return
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(15.0, connect=10.0)) as client:
+            resp = await client.get(
+                f"{PAYPAL_BASE}/v2/checkout/orders/{order_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        units = resp.json().get("purchase_units", [])
+        if not units:
+            logger.error(f"_paypal_lookup_and_revoke: no purchase_units for order={order_id}")
+            return
+        custom_id = units[0].get("custom_id", "")
+        parts = custom_id.split("_")
+        if len(parts) >= 3 and parts[0] == "tg":
+            user_id = int(parts[1])
+            dedup_key = f"paypal_revoke_{reason}_{dedup_suffix}"
+            await _revoke_and_notify(user_id, reason, dedup_key)
+        else:
+            logger.error(f"_paypal_lookup_and_revoke: unrecognised custom_id={custom_id!r}")
+    except Exception as e:
+        logger.error(f"_paypal_lookup_and_revoke error for order={order_id}: {e}")
+
+
+# ── PayPal capture-lookup for revocation (REFUNDED only, when order_id absent) ─
+async def _paypal_capture_lookup_and_revoke(capture_id: str, refund_id: str) -> None:
+    """
+    For PAYMENT.CAPTURE.REFUNDED when supplementary_data lacks order_id:
+    fetch GET /v2/payments/captures/{id}, extract the parent order_id from the
+    "up" HATEOAS link, then call _paypal_lookup_and_revoke.
+    """
+    from bot.payments import get_paypal_token, PAYPAL_BASE
+    import httpx as _httpx
+    try:
+        token = await get_paypal_token()
+        if not token:
+            logger.error(f"_paypal_capture_lookup_and_revoke: no token for capture={capture_id}")
+            return
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(15.0, connect=10.0)) as client:
+            resp = await client.get(
+                f"{PAYPAL_BASE}/v2/payments/captures/{capture_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        capture_data = resp.json()
+        order_id = ""
+        for lnk in capture_data.get("links", []):
+            if lnk.get("rel") == "up":
+                order_id = lnk.get("href", "").rstrip("/").split("/")[-1]
+                break
+        if order_id:
+            await _paypal_lookup_and_revoke(order_id, refund_id, "refunded")
+        else:
+            logger.error(
+                f"_paypal_capture_lookup_and_revoke: no 'up' link for capture={capture_id}"
+            )
+    except Exception as e:
+        logger.error(f"_paypal_capture_lookup_and_revoke error capture={capture_id}: {e}")
+
+
 # ── PayPal order-lookup fallback ─────────────────────────────────────────────
 async def _paypal_lookup_and_upgrade(order_id: str, capture_id: str, gateway: str) -> None:
     """
@@ -187,12 +294,8 @@ async def _paypal_approved_capture_and_upgrade(order_id: str) -> None:
         result = await capture_paypal_order(order_id)
 
         if not result.get("ok"):
-            # ORDER_ALREADY_CAPTURED means /paypal/return already handled this —
-            # that's fine, nothing to do.
-            data = result.get("data", {})
-            details = data.get("details", [])
-            issue = details[0].get("issue", "") if details else ""
-            if issue == "ORDER_ALREADY_CAPTURED":
+            # already_captured: /paypal/return won the race — nothing to do.
+            if result.get("already_captured"):
                 logger.info(
                     f"PayPal CHECKOUT.ORDER.APPROVED: order {order_id} "
                     f"already captured — skipping (handled by return URL)"
@@ -201,6 +304,17 @@ async def _paypal_approved_capture_and_upgrade(order_id: str) -> None:
             logger.error(
                 f"PayPal CHECKOUT.ORDER.APPROVED: capture failed for "
                 f"order={order_id}: {result}"
+            )
+            return
+
+        # PENDING: PayPal is holding the capture for review.
+        # Do NOT upgrade here — PAYMENT.CAPTURE.COMPLETED will fire when it
+        # settles and grant premium through the normal webhook path (which also
+        # does full amount validation before upgrading).
+        if result.get("pending"):
+            logger.info(
+                f"PayPal CHECKOUT.ORDER.APPROVED: capture PENDING for "
+                f"order={order_id} — waiting for PAYMENT.CAPTURE.COMPLETED"
             )
             return
 
@@ -431,6 +545,69 @@ def paypal_webhook():
                 return jsonify({"status": "ok"})
             logger.info(f"PayPal CHECKOUT.ORDER.APPROVED: scheduling capture for order={order_id}")
             _schedule(_paypal_approved_capture_and_upgrade(order_id))
+            return jsonify({"status": "ok"})
+
+        # ── Refund / reversal — revoke premium ───────────────────────────────
+        if event_type == "PAYMENT.CAPTURE.REVERSED":
+            # resource IS the capture object (status=REVERSED), same shape as
+            # PAYMENT.CAPTURE.COMPLETED — custom_id is usually present directly.
+            resource = data.get("resource", {})
+            capture_id = resource.get("id", "")
+            custom_id = resource.get("custom_id", "")
+
+            if not custom_id:
+                # Fallback: supplementary_data or HATEOAS "up" → parent order
+                order_id_for_lookup = (
+                    resource.get("supplementary_data", {})
+                            .get("related_ids", {}).get("order_id", "")
+                )
+                if not order_id_for_lookup:
+                    for lnk in resource.get("links", []):
+                        if lnk.get("rel") == "up":
+                            order_id_for_lookup = lnk.get("href", "").rstrip("/").split("/")[-1]
+                            break
+                if order_id_for_lookup:
+                    logger.info(f"PayPal REVERSED: resolving custom_id via order={order_id_for_lookup}")
+                    _schedule(_paypal_lookup_and_revoke(order_id_for_lookup, capture_id, "reversed"))
+                else:
+                    logger.warning(f"PayPal REVERSED: could not resolve custom_id for capture={capture_id!r}")
+                return jsonify({"status": "ok"})
+
+            parts = custom_id.split("_")
+            if len(parts) >= 3 and parts[0] == "tg":
+                user_id = int(parts[1])
+                dedup_key = f"paypal_revoke_reversed_{capture_id}" if capture_id else f"paypal_revoke_rcid_{custom_id}"
+                logger.info(f"PayPal REVERSED: scheduling revoke user={user_id} capture={capture_id}")
+                _schedule(_revoke_and_notify(user_id, "reversed", dedup_key))
+            else:
+                logger.warning(f"PayPal REVERSED: unrecognised custom_id={custom_id!r}")
+            return jsonify({"status": "ok"})
+
+        if event_type == "PAYMENT.CAPTURE.REFUNDED":
+            # resource is the REFUND object (not the capture).
+            # supplementary_data usually carries both order_id and capture_id.
+            resource = data.get("resource", {})
+            refund_id = resource.get("id", "")
+            related = resource.get("supplementary_data", {}).get("related_ids", {})
+
+            order_id_for_lookup = related.get("order_id", "")
+            if order_id_for_lookup:
+                logger.info(f"PayPal REFUNDED: resolving via order={order_id_for_lookup} refund={refund_id}")
+                _schedule(_paypal_lookup_and_revoke(order_id_for_lookup, refund_id, "refunded"))
+                return jsonify({"status": "ok"})
+
+            # Fallback: get capture_id → fetch capture → "up" link → order
+            capture_id = related.get("capture_id", "")
+            if not capture_id:
+                for lnk in resource.get("links", []):
+                    if lnk.get("rel") == "up":
+                        capture_id = lnk.get("href", "").rstrip("/").split("/")[-1]
+                        break
+            if capture_id:
+                logger.info(f"PayPal REFUNDED: resolving via capture={capture_id} refund={refund_id}")
+                _schedule(_paypal_capture_lookup_and_revoke(capture_id, refund_id))
+            else:
+                logger.warning(f"PayPal REFUNDED: could not resolve order for refund={refund_id!r}")
             return jsonify({"status": "ok"})
 
         if event_type != "PAYMENT.CAPTURE.COMPLETED":
