@@ -240,7 +240,7 @@ def oxapay_webhook():
 
 # ── PayPal webhook ────────────────────────────────────────────────────────────
 def _verify_paypal_webhook_sync(
-    headers: dict,
+    headers,
     raw_body: bytes,
     webhook_id: str,
     paypal_base: str,
@@ -248,9 +248,17 @@ def _verify_paypal_webhook_sync(
     """
     Verify a PayPal webhook using PayPal's own signature-verification API.
     Runs synchronously on a fresh event loop (called from Flask thread).
+
+    `headers` must be a case-insensitive mapping (e.g. Werkzeug's Headers
+    object passed directly from request.headers).  Do NOT pass dict(request.headers)
+    — plain dicts are case-sensitive and will miss headers lowercased by proxies.
     """
     import httpx as _httpx
     from bot.payments import get_paypal_token
+
+    # Normalise to uppercase so lookups work regardless of proxy casing
+    # (nginx and many reverse-proxies lowercase all incoming headers).
+    normalised = {k.upper(): v for k, v in headers.items()}
 
     loop = asyncio.new_event_loop()
     try:
@@ -259,12 +267,30 @@ def _verify_paypal_webhook_sync(
             logger.error("PayPal webhook verify: could not obtain access token")
             return False
 
+        auth_algo        = normalised.get("PAYPAL-AUTH-ALGO", "")
+        cert_url         = normalised.get("PAYPAL-CERT-URL", "")
+        transmission_id  = normalised.get("PAYPAL-TRANSMISSION-ID", "")
+        transmission_sig = normalised.get("PAYPAL-TRANSMISSION-SIG", "")
+        transmission_time= normalised.get("PAYPAL-TRANSMISSION-TIME", "")
+
+        logger.info(
+            f"PayPal webhook headers — auth_algo={auth_algo!r} "
+            f"transmission_id={transmission_id!r} cert_url={cert_url!r}"
+        )
+
+        if not auth_algo or not transmission_id or not transmission_sig:
+            logger.error(
+                "PayPal webhook verify: required headers missing after normalisation. "
+                f"Raw header keys: {list(headers.keys())}"
+            )
+            return False
+
         payload = {
-            "auth_algo":         headers.get("PAYPAL-AUTH-ALGO", ""),
-            "cert_url":          headers.get("PAYPAL-CERT-URL", ""),
-            "transmission_id":   headers.get("PAYPAL-TRANSMISSION-ID", ""),
-            "transmission_sig":  headers.get("PAYPAL-TRANSMISSION-SIG", ""),
-            "transmission_time": headers.get("PAYPAL-TRANSMISSION-TIME", ""),
+            "auth_algo":         auth_algo,
+            "cert_url":          cert_url,
+            "transmission_id":   transmission_id,
+            "transmission_sig":  transmission_sig,
+            "transmission_time": transmission_time,
             "webhook_id":        webhook_id,
             "webhook_event":     json.loads(raw_body),
         }
@@ -307,7 +333,7 @@ def paypal_webhook():
             logger.error("PayPal webhook received but PAYPAL_WEBHOOK_ID not set — rejected")
             return jsonify({"status": "rejected", "reason": "webhook ID not configured"}), 403
 
-        if not _verify_paypal_webhook_sync(dict(request.headers), raw_body, PAYPAL_WEBHOOK_ID, PAYPAL_BASE):
+        if not _verify_paypal_webhook_sync(request.headers, raw_body, PAYPAL_WEBHOOK_ID, PAYPAL_BASE):
             logger.warning("PayPal webhook signature verification failed — rejected")
             return jsonify({"status": "rejected"}), 400
 
