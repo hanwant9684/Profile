@@ -273,11 +273,6 @@ def _verify_paypal_webhook_sync(
         transmission_sig = normalised.get("PAYPAL-TRANSMISSION-SIG", "")
         transmission_time= normalised.get("PAYPAL-TRANSMISSION-TIME", "")
 
-        logger.info(
-            f"PayPal webhook headers — auth_algo={auth_algo!r} "
-            f"transmission_id={transmission_id!r} cert_url={cert_url!r}"
-        )
-
         if not auth_algo or not transmission_id or not transmission_sig:
             logger.error(
                 "PayPal webhook verify: required headers missing after normalisation. "

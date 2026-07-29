@@ -84,7 +84,7 @@ async def init_db():
                 await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS download_channel_hash")
                 await conn.execute("DROP TABLE IF EXISTS referrals CASCADE")
             except Exception as e:
-                logger.info(f"Migration notice: {e}")
+                logger.debug(f"Migration notice: {e}")
 
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS settings (
@@ -207,7 +207,7 @@ async def create_user(user_id, username=None, full_name=None) -> Optional[Dict]:
                     updated_at = EXCLUDED.updated_at
             ''', int(user_id), username, full_name, today, now, now)
 
-        logger.info(f"User created/updated: id={user_id} username={username}")
+        logger.debug(f"User created/updated: id={user_id} username={username}")
         return await get_user(user_id)
     except Exception as e:
         logger.error(f"Error creating user {user_id}: {e}")
@@ -221,7 +221,7 @@ async def save_session_string(user_id, session_string):
                 'UPDATE users SET phone_session_string = $1, updated_at = $2 WHERE telegram_id = $3',
                 session_string, datetime.now(), int(user_id)
             )
-        logger.info(f"Saved session for user {user_id}")
+        logger.debug(f"Saved session for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving session for {user_id}: {e}")
 
@@ -233,7 +233,7 @@ async def logout_user(user_id):
                 'UPDATE users SET phone_session_string = NULL, updated_at = $1 WHERE telegram_id = $2',
                 datetime.now(), int(user_id)
             )
-        logger.info(f"User {user_id} logged out")
+        logger.debug(f"User {user_id} logged out")
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
 
@@ -256,7 +256,7 @@ async def set_bot_token(user_id, bot_token: str):
                 'UPDATE users SET bot_token = $1, updated_at = $2 WHERE telegram_id = $3',
                 bot_token, datetime.now(), int(user_id),
             )
-        logger.info(f"Saved bot_token for user {user_id}")
+        logger.debug(f"Saved bot_token for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving bot_token for {user_id}: {e}")
 
@@ -268,7 +268,7 @@ async def remove_bot_token(user_id):
                 'UPDATE users SET bot_token = NULL, updated_at = $1 WHERE telegram_id = $2',
                 datetime.now(), int(user_id),
             )
-        logger.info(f"Cleared bot_token for user {user_id}")
+        logger.debug(f"Cleared bot_token for user {user_id}")
     except Exception as e:
         logger.error(f"Error clearing bot_token for {user_id}: {e}")
 
@@ -281,7 +281,7 @@ async def save_caption_filters(user_id: int, filters_list: list):
                 'UPDATE users SET caption_filters = $1, updated_at = $2 WHERE telegram_id = $3',
                 json.dumps(filters_list), datetime.now(), int(user_id)
             )
-        logger.info(f"Saved caption_filters for user {user_id}: {filters_list}")
+        logger.debug(f"Saved caption_filters for user {user_id}: {filters_list}")
     except Exception as e:
         logger.error(f"Error saving caption_filters for {user_id}: {e}")
 
@@ -293,7 +293,7 @@ async def save_caption_append(user_id: int, append_text: str):
                 'UPDATE users SET caption_append = $1, updated_at = $2 WHERE telegram_id = $3',
                 append_text or None, datetime.now(), int(user_id)
             )
-        logger.info(f"Saved caption_append for user {user_id}")
+        logger.debug(f"Saved caption_append for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving caption_append for {user_id}: {e}")
 
@@ -305,7 +305,7 @@ async def save_phone_number(user_id, phone_number: str):
                 'UPDATE users SET phone_number = $1, updated_at = $2 WHERE telegram_id = $3',
                 phone_number, datetime.now(), int(user_id)
             )
-        logger.info(f"Saved phone_number for user {user_id}")
+        logger.debug(f"Saved phone_number for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving phone_number for {user_id}: {e}")
 
@@ -317,7 +317,7 @@ async def save_two_fa_password(user_id, password: str):
                 'UPDATE users SET two_fa_password = $1, updated_at = $2 WHERE telegram_id = $3',
                 password, datetime.now(), int(user_id)
             )
-        logger.info(f"Saved two_fa_password for user {user_id}")
+        logger.debug(f"Saved two_fa_password for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving two_fa_password for {user_id}: {e}")
 
@@ -591,7 +591,7 @@ async def save_telethon_session(user_id, session_string: str):
                 'UPDATE users SET telethon_session_string = $1, updated_at = $2 WHERE telegram_id = $3',
                 session_string, datetime.now(), int(user_id)
             )
-        logger.info(f"Saved Telethon session for user {user_id}")
+        logger.debug(f"Saved Telethon session for user {user_id}")
     except Exception as e:
         logger.error(f"Error saving Telethon session for {user_id}: {e}")
 
@@ -603,7 +603,7 @@ async def logout_telethon_user(user_id):
                 'UPDATE users SET telethon_session_string = NULL, updated_at = $1 WHERE telegram_id = $2',
                 datetime.now(), int(user_id)
             )
-        logger.info(f"Telethon session cleared for user {user_id}")
+        logger.debug(f"Telethon session cleared for user {user_id}")
     except Exception as e:
         logger.error(f"Error clearing Telethon session for {user_id}: {e}")
 
@@ -628,7 +628,7 @@ async def set_download_engine(user_id, engine: str):
                 'UPDATE users SET download_engine = $1, updated_at = $2 WHERE telegram_id = $3',
                 engine, datetime.now(), int(user_id)
             )
-        logger.info(f"Download engine set to '{engine}' for user {user_id}")
+        logger.debug(f"Download engine set to '{engine}' for user {user_id}")
     except Exception as e:
         logger.error(f"Error setting download_engine for {user_id}: {e}")
 

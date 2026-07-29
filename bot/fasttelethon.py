@@ -132,7 +132,7 @@ async def download_file_fast(
     n_workers = min(workers, total_chunks)
     chunks_per_worker = math.ceil(total_chunks / n_workers)
 
-    logger.info(
+    logger.debug(
         "Fast-TL download: %.1f MB | %d chunks | %d workers | seg=%.1f MB → %s",
         file_size / 1_000_000,
         total_chunks,
@@ -192,7 +192,7 @@ async def download_file_fast(
                             break
                         out_fh.write(buf)
 
-        logger.info(
+        logger.debug(
             "Fast-TL download complete: %s (%.1f MB)", out_path, file_size / 1_000_000
         )
         return out_path
