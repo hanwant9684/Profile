@@ -38,6 +38,17 @@ from bot.log_channel import log_download
 
 PREMIUM_MAX_FILE_SIZE = 4_000_000_000
 
+_SETBOT_NOT_SET_MSG = (
+    "❌ **Upload bot not set up.**\n\n"
+    "Premium users need to register their own upload bot.\n"
+    "Use /setbot to set one up.\n\n"
+    "1. Open @BotFather → `/newbot`\n"
+    "2. Copy the token\n"
+    "3. Run /setbot and send the token when prompted\n"
+    "4. Press **Start** on your bot\n\n"
+    "📹 Watch how to set up your bot: https://t.me/Wolfy004/194"
+)
+
 _DOWNLOADABLE_TYPES = {
     enums.MessageMediaType.AUDIO,
     enums.MessageMediaType.DOCUMENT,
@@ -1335,18 +1346,8 @@ async def download_handler(
                     await update_status(status, "❌ Your bot's token is no longer valid. Please use /setbot to register a new one.")
                     return None
                 if _ub is None:
-                    await update_status(
-                        status,
-                        "❌ **Upload bot not set up.**\n\n"
-                        "Premium users need to register their own bot.\n"
-                        "Use /setbot to set one up.\n\n"
-                        "1. Open @BotFather → `/newbot`\n"
-                        "2. Copy the token\n"
-                        "3. Run /setbot and send the token when prompted\n"
-                        "4. Press **Start** on your bot\n\n"
-                        "📹 Watch how to set up your bot: https://t.me/Wolfy004/194",
-                        link_preview_options=LinkPreviewOptions(is_disabled=True),
-                    )
+                    await update_status(status, _SETBOT_NOT_SET_MSG,
+                                        link_preview_options=LinkPreviewOptions(is_disabled=True))
                     return None
                 _extract_client = _ub
             else:
@@ -1475,18 +1476,8 @@ async def download_handler(
             return None
 
         if user_bot is None and is_premium:
-            await update_status(
-                status,
-                "❌ **Upload bot not set up.**\n\n"
-                "Premium users need to register their own upload bot.\n"
-                "Use /setbot to set one up.\n\n"
-                "1. Open @BotFather → `/newbot`\n"
-                "2. Copy the token\n"
-                "3. Run /setbot and send the token when prompted\n"
-                "4. Press **Start** on your bot\n\n"
-                "📹 Watch how to set up your bot: https://t.me/Wolfy004/194",
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
+            await update_status(status, _SETBOT_NOT_SET_MSG,
+                                link_preview_options=LinkPreviewOptions(is_disabled=True))
             return None
 
         upload_client = user_bot if user_bot is not None else client
