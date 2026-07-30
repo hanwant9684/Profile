@@ -1338,7 +1338,7 @@ async def download_handler(
                     await update_status(
                         status,
                         "❌ **Upload bot not set up.**\n\n"
-                        "Premium users need to register their own bot for direct extraction.\n"
+                        "Premium users need to register their own bot.\n"
                         "Use /setbot to set one up.\n\n"
                         "1. Open @BotFather → `/newbot`\n"
                         "2. Copy the token\n"
