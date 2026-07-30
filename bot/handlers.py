@@ -231,15 +231,17 @@ class _LazyStatus:
     def id(self):
         return self._sent.id if self._sent else self._message.id
 
-    async def edit_text(self, text, reply_markup=None):
+    async def edit_text(self, text, reply_markup=None, link_preview_options=None):
         if self._sent is None:
             try:
-                self._sent = await self._message.reply(text, reply_markup=reply_markup)
+                self._sent = await self._message.reply(text, reply_markup=reply_markup,
+                                                        link_preview_options=link_preview_options)
             except Exception as e:
                 logging.debug(f"_LazyStatus.reply: {e}")
         else:
             try:
-                await self._sent.edit_text(text, reply_markup=reply_markup)
+                await self._sent.edit_text(text, reply_markup=reply_markup,
+                                           link_preview_options=link_preview_options)
             except Exception as e:
                 if "MESSAGE_NOT_MODIFIED" not in str(e):
                     logging.debug(f"_LazyStatus.edit_text: {e}")
@@ -252,11 +254,11 @@ class _LazyStatus:
                 pass
 
 
-async def update_status(msg, text: str, reply_markup=None):
+async def update_status(msg, text: str, reply_markup=None, link_preview_options=None):
     if not msg:
         return
     try:
-        await msg.edit_text(text, reply_markup=reply_markup)
+        await msg.edit_text(text, reply_markup=reply_markup, link_preview_options=link_preview_options)
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logging.debug(f"update_status: {e}")
@@ -1321,7 +1323,35 @@ async def download_handler(
                 )
                 return None
 
+        is_premium = user.get("role") in ("premium", "admin", "owner")
+
         if not is_private:
+            # Premium users must use their registered setbot for direct extraction
+            # to avoid FloodWaits on the owner bot (which also blocks OTP delivery).
+            if is_premium:
+                try:
+                    _ub = await get_user_bot(user_id)
+                except (AccessTokenExpired, AccessTokenInvalid):
+                    await update_status(status, "❌ Your bot's token is no longer valid. Please use /setbot to register a new one.")
+                    return None
+                if _ub is None:
+                    await update_status(
+                        status,
+                        "❌ **Upload bot not set up.**\n\n"
+                        "Premium users need to register their own bot for direct extraction.\n"
+                        "Use /setbot to set one up.\n\n"
+                        "1. Open @BotFather → `/newbot`\n"
+                        "2. Copy the token\n"
+                        "3. Run /setbot and send the token when prompted\n"
+                        "4. Press **Start** on your bot\n\n"
+                        "📹 Watch how to set up your bot: https://t.me/Wolfy004/194",
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    )
+                    return None
+                _extract_client = _ub
+            else:
+                _extract_client = client
+
             media_group_id = getattr(msg, "media_group_id", None)
             try:
                 await update_status(status, "🚀 Extracting directly...")
@@ -1334,22 +1364,22 @@ async def download_handler(
                             _cap_append if _cap_append else None
                         )
                         _captions = [first_cap] + [""] * (len(messages) - 1)
-                        await client.copy_media_group(
+                        await _extract_client.copy_media_group(
                             chat_id=user_id, from_chat_id=chat_id, message_id=msg_id,
                             captions=_captions,
                         )
                     else:
-                        await client.copy_media_group(
+                        await _extract_client.copy_media_group(
                             chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
                         )
                 else:
                     if _cap_filters or _cap_append:
-                        await client.copy_message(
+                        await _extract_client.copy_message(
                             chat_id=user_id, from_chat_id=chat_id, message_id=msg_id,
                             caption=apply_caption_filter(msg.caption or "", _cap_filters, _cap_append),
                         )
                     else:
-                        await client.copy_message(
+                        await _extract_client.copy_message(
                             chat_id=user_id, from_chat_id=chat_id, message_id=msg_id
                         )
                 if not skip_quota and user.get("role", "free") == "free":
@@ -1370,12 +1400,12 @@ async def download_handler(
                 if "MEDIA_CAPTION_TOO_LONG" in error_str:
                     try:
                         if media_group_id:
-                            await client.copy_media_group(
+                            await _extract_client.copy_media_group(
                                 chat_id=user_id, from_chat_id=chat_id,
                                 message_id=msg_id, captions=""
                             )
                         else:
-                            await client.copy_message(
+                            await _extract_client.copy_message(
                                 chat_id=user_id, from_chat_id=chat_id,
                                 message_id=msg_id, caption=""
                             )
@@ -1438,7 +1468,6 @@ async def download_handler(
                 await update_status(status, f"❌ Album contains a file that is {readable}. Files over 2 GB cannot be part of an album download.")
                 return None
 
-        is_premium = user.get("role") in ("premium", "admin", "owner")
         try:
             user_bot = await get_user_bot(user_id)
         except (AccessTokenExpired, AccessTokenInvalid):
@@ -1454,7 +1483,9 @@ async def download_handler(
                 "1. Open @BotFather → `/newbot`\n"
                 "2. Copy the token\n"
                 "3. Run /setbot and send the token when prompted\n"
-                "4. Press **Start** on your bot",
+                "4. Press **Start** on your bot\n\n"
+                "📹 Watch how to set up your bot: https://t.me/Wolfy004/194",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
             return None
 
