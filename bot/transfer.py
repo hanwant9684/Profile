@@ -52,7 +52,7 @@ async def validate_bot_token(bot_token: str):
         bot_token=bot_token,
         in_memory=True,
         no_updates=True,
-        workers=100,
+        workers=15,
     )
     try:
         await asyncio.wait_for(probe.start(), timeout=20)
@@ -105,7 +105,7 @@ async def get_user_bot(user_id: int):
             in_memory=True,
             no_updates=True,
             sleep_threshold=30,
-            workers=100,
+            workers=15,
         )
         try:
             await asyncio.wait_for(client.start(), timeout=30)
