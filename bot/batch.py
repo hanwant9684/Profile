@@ -104,7 +104,7 @@ async def batch_handler(client, message):
 
     if second_arg.isdigit():
         count = int(second_arg)
-        if not 1 <= count <= 50:
+        if not 1 <= count <= 200:
             await message.reply("⚠️ Count must be between 1 and 50.")
             return
         end_id = start_id + count - 1
