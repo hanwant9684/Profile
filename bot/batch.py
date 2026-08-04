@@ -122,7 +122,7 @@ async def batch_handler(client, message):
         if start_id > end_id:
             start_id, end_id = end_id, start_id
         count = end_id - start_id + 1
-        if count > 50:
+        if count > 200:
             await message.reply("⚠️ Maximum 50 files per batch.")
             return
 
