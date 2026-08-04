@@ -52,7 +52,7 @@ async def validate_bot_token(bot_token: str):
         bot_token=bot_token,
         in_memory=True,
         no_updates=True,
-        workers=15,
+        workers=4,
     )
     try:
         await asyncio.wait_for(probe.start(), timeout=20)
@@ -105,7 +105,7 @@ async def get_user_bot(user_id: int):
             in_memory=True,
             no_updates=True,
             sleep_threshold=30,
-            workers=15,
+            workers=4,
         )
         try:
             await asyncio.wait_for(client.start(), timeout=30)
@@ -373,12 +373,21 @@ async def download_media(client, message, progress=None, progress_args=()):
     """
     for attempt in range(3):
         try:
-            return await client.download_media(
+            path = await client.download_media(
                 message,
                 file_name="downloads/",
                 progress=progress,
                 progress_args=progress_args,
             )
+            # Guard: Telegram sometimes returns an empty file — catch it early
+            # before we waste time uploading 0 bytes or hitting send_media_group errors.
+            if path and os.path.getsize(path) == 0:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                raise ValueError("File size equals to 0 B")
+            return path
         except (FileReferenceExpired, FileReferenceInvalid):
             raise
         except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
@@ -455,7 +464,11 @@ async def upload_media(
     ext = os.path.splitext(path)[1].lower()
     kw = dict(caption=safe_cap, progress=progress, progress_args=progress_args)
 
-    _NO_RETRY_CODES = ("USER_IS_BLOCKED", "INPUT_USER_DEACTIVATED", "PEER_ID_INVALID")
+    _NO_RETRY_CODES = (
+        "USER_IS_BLOCKED", "INPUT_USER_DEACTIVATED", "PEER_ID_INVALID",
+        # Terminal bot-account errors — retrying wastes time and floods logs
+        "USER_DEACTIVATED", "ACCESS_TOKEN_INVALID", "ACCESS_TOKEN_EXPIRED",
+    )
 
     last_exc = None
     for attempt in range(3):
