@@ -49,7 +49,7 @@ if missing_vars:
     logging.critical(f"Missing required environment variables: {', '.join(missing_vars)} — bot cannot start")
     sys.exit(1)
 
-MAX_CONCURRENT_DOWNLOADS = 10
+MAX_CONCURRENT_DOWNLOADS = 25
 
 active_downloads: set = set()
 cancel_flags: set = set()
