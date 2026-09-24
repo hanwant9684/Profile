@@ -32,8 +32,12 @@ from bot.transfer import (
     get_media_info, get_audio_tags,
     check_user_premium, split_file, split_video_ffmpeg,
     stop_user_bot,
-    BOT_MAX_FILE_SIZE, PART_SAFE_SIZE,
+    is_stale_transport_error,
+    cleanup_download_artifacts,
+    send_media_group, BOT_MAX_FILE_SIZE, PART_SAFE_SIZE,
 )
+from bot.task_supervisor import create_background_task
+from bot.status_utils import is_stale_status_error
 
 # ── User-bot error helpers ────────────────────────────────────────────────────
 # Codes that mean the user's bot account/token is permanently gone.
@@ -46,11 +50,30 @@ _TERMINAL_BOT_CODES = (
 # We evict and reconnect once before giving up.
 _STALE_TRANSPORT_MSGS = (
     "TCPTransport closed", "handler is closed", "Connection lost", "[Errno 32]",
+    "[Errno 104]", "unknown constructor", "Cannot operate on a closed database",
+    "FILE_WRITE_FAILED",
 )
 _USER_BOT_DEACT_MSG = (
     "❌ Your bot account was deactivated or its token is invalid.\n"
     "Use /rembot then /setbot to register a new one."
 )
+_LINK_TRAILING_PUNCTUATION = ".,!?;:)]}>\"'"
+
+
+def _extract_message_link(message, link_override: str = None) -> str:
+    """Extract a Telegram URL from message text or a media caption."""
+    if link_override:
+        return link_override.strip()
+
+    source = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    source = source.strip()
+    if not source:
+        return ""
+
+    match = re.search(rf"{TG_LINK_HOST_RE}\S+", source, re.IGNORECASE)
+    if match:
+        return match.group(0).rstrip(_LINK_TRAILING_PUNCTUATION)
+    return source
 
 
 async def _evict_user_bot(user_id: int) -> None:
@@ -103,6 +126,8 @@ def _get_msg_file_size(m) -> int:
 user_clients: dict = {}
 active_sessions: set = set()
 _cleanup_started = False
+_user_session_recovery_locks: dict = {}
+_USER_SESSION_HEALTH_TTL = 30.0
 
 
 async def _evict_user_session(user_id: int) -> None:
@@ -122,7 +147,8 @@ async def _evict_user_session(user_id: int) -> None:
             await asyncio.wait_for(entry["client"].stop(), timeout=5)
         except Exception:
             pass
-    # Also evict Telethon client — it uses the same phone session
+
+    # Also evict Telethon client — it uses the same phone session.
     tl_entry = telethon_clients.pop(user_id, None)
     telethon_clients_last_used.pop(user_id, None)
     if tl_entry:
@@ -130,6 +156,69 @@ async def _evict_user_session(user_id: int) -> None:
             await tl_entry["client"].disconnect()
         except Exception:
             pass
+
+
+def _session_recovery_lock_for(user_id: int) -> asyncio.Lock:
+    lock = _user_session_recovery_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _user_session_recovery_locks[user_id] = lock
+    return lock
+
+
+async def _download_with_session_recovery(
+    user_id: int,
+    session_str: str,
+    client,
+    message,
+    progress=None,
+    progress_args=(),
+):
+    """Download once, then retry once with a newly created user client.
+
+    Pyrogram can leave a cached client looking connected after its packet
+    handler has failed.  Reusing that object is what caused the repeated
+    `handler is closed` and `FILE_WRITE_FAILED` bursts in the uploaded logs.
+    """
+    try:
+        path = await download_media(
+            client,
+            message,
+            progress=progress,
+            progress_args=progress_args,
+        )
+        return path, client
+    except Exception as first_exc:
+        if not is_stale_transport_error(first_exc):
+            raise
+
+        logging.warning(
+            "Stale Pyrogram download client for user %s — replacing it: %r",
+            user_id,
+            first_exc,
+        )
+        # Album downloads can notice the same dead client at the same time.
+        # Serialize replacement and reuse the first fresh client rather than
+        # repeatedly stopping and starting clients.
+        async with _session_recovery_lock_for(user_id):
+            current = user_clients.get(user_id)
+            if (
+                current
+                and current["client"] is not client
+                and current["client"].is_connected
+            ):
+                fresh = current["client"]
+            else:
+                await _evict_user_session(user_id)
+                fresh = await get_user_client(user_id, session_str)
+        active_sessions.add(user_id)
+        path = await download_media(
+            fresh,
+            message,
+            progress=progress,
+            progress_args=progress_args,
+        )
+        return path, fresh
 
 
 
@@ -140,13 +229,31 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
     if user_id in user_clients:
         entry = user_clients[user_id]
         if entry["client"].is_connected:
-            entry["last_used"] = now
-            return entry["client"]
-        try:
-            await asyncio.wait_for(entry["client"].stop(), timeout=10)
-        except Exception:
-            pass
-        del user_clients[user_id]
+            last_health = entry.get("last_health", 0)
+            if now - last_health >= _USER_SESSION_HEALTH_TTL:
+                try:
+                    await asyncio.wait_for(entry["client"].get_me(), timeout=10)
+                    entry["last_health"] = now
+                except Exception as health_exc:
+                    logging.warning(
+                        "Cached Pyrogram session for user %s failed health check — replacing it: %r",
+                        user_id,
+                        health_exc,
+                    )
+                    await _evict_user_session(user_id)
+                    entry = None
+                else:
+                    entry["last_used"] = now
+                    return entry["client"]
+            else:
+                entry["last_used"] = now
+                return entry["client"]
+        if entry is not None:
+            try:
+                await asyncio.wait_for(entry["client"].stop(), timeout=10)
+            except Exception:
+                pass
+            user_clients.pop(user_id, None)
 
     if len(user_clients) >= 10:
         idle = [
@@ -172,10 +279,14 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
         workers=100,
     )
     await asyncio.wait_for(client.start(), timeout=30)
-    user_clients[user_id] = {"client": client, "last_used": now}
+    user_clients[user_id] = {
+        "client": client,
+        "last_used": now,
+        "last_health": now,
+    }
 
     if not _cleanup_started:
-        asyncio.create_task(_cleanup_loop())
+        create_background_task(_cleanup_loop(), name="phone-session-cleanup")
         _cleanup_started = True
 
     return client
@@ -193,6 +304,10 @@ async def _cleanup_loop():
             and now - d["last_used"] > 600
         ]
         for uid in stale:
+            # Re-check after building the stale list. A request may have
+            # started while the cleanup loop was awaiting another client stop.
+            if uid in active_sessions or uid in batch_sessions:
+                continue
             entry = user_clients.pop(uid, None)
             if entry:
                 try:
@@ -260,6 +375,7 @@ class _LazyStatus:
     def __init__(self, message):
         self._message = message
         self._sent = None
+        self._stale = False
 
     @property
     def chat(self):
@@ -270,18 +386,25 @@ class _LazyStatus:
         return self._sent.id if self._sent else self._message.id
 
     async def edit_text(self, text, reply_markup=None, link_preview_options=None):
+        if self._stale:
+            return
         if self._sent is None:
             try:
                 self._sent = await self._message.reply(text, reply_markup=reply_markup,
                                                         link_preview_options=link_preview_options)
             except Exception as e:
-                logging.debug(f"_LazyStatus.reply: {e}")
+                if is_stale_status_error(e):
+                    self._stale = True
+                else:
+                    logging.debug(f"_LazyStatus.reply: {e}")
         else:
             try:
                 await self._sent.edit_text(text, reply_markup=reply_markup,
                                            link_preview_options=link_preview_options)
             except Exception as e:
-                if "MESSAGE_NOT_MODIFIED" not in str(e):
+                if is_stale_status_error(e):
+                    self._stale = True
+                else:
                     logging.debug(f"_LazyStatus.edit_text: {e}")
 
     async def delete(self):
@@ -293,12 +416,17 @@ class _LazyStatus:
 
 
 async def update_status(msg, text: str, reply_markup=None, link_preview_options=None):
-    if not msg:
+    if not msg or getattr(msg, "_stale", False):
         return
     try:
         await msg.edit_text(text, reply_markup=reply_markup, link_preview_options=link_preview_options)
     except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
+        if is_stale_status_error(e):
+            try:
+                msg._stale = True
+            except Exception:
+                pass
+        else:
             logging.debug(f"update_status: {e}")
 
 
@@ -319,16 +447,28 @@ def _fmt_time(seconds: float) -> str:
 
 
 async def progress_bar(current: int, total: int, msg, label: str):
-    if total == 0:
+    if msg is None or current is None or total is None:
         return
-    if msg.chat.id in cancel_flags:
+    try:
+        current = float(current)
+        total = float(total)
+    except (TypeError, ValueError):
+        return
+    if total <= 0 or current < 0:
+        return
+    current = min(current, total)
+    try:
+        chat_id = msg.chat.id
+        mid = msg.id
+    except (AttributeError, TypeError):
+        return
+    if chat_id in cancel_flags:
         raise StopTransmission
 
     if not hasattr(progress_bar, "_data"):
         progress_bar._data = {}
 
     now = time.time()
-    mid = msg.id
     data = progress_bar._data.setdefault(
         mid, {"start": now, "last": 0, "samples": deque(maxlen=30)}
     )
@@ -650,8 +790,12 @@ async def _handle_telethon_download(
                 _out = f"downloads/{user_id}_{m.id}{_ext}"
                 return await download_file_fast(tl_client, m, _out, _tl_album_progress)
             except StopTransmission:
+                if "_out" in locals():
+                    cleanup_download_artifacts(_out)
                 raise
             except Exception as dl_e:
+                if "_out" in locals():
+                    cleanup_download_artifacts(_out)
                 logging.warning(f"Telethon album item download failed: {dl_e}")
                 return None
 
@@ -673,7 +817,7 @@ async def _handle_telethon_download(
             if _os.path.getsize(result) == 0:
                 logging.warning(f"Telethon album item is 0 bytes, skipping: {result}")
                 try:
-                    _os.remove(result)
+                    cleanup_download_artifacts(result)
                 except Exception:
                     pass
                 continue
@@ -729,7 +873,7 @@ async def _handle_telethon_download(
 
             await update_status(status, f"📤 Uploading album ({len(media_list)} files)...")
             try:
-                await upload_client.send_media_group(user_id, media_list)
+                await send_media_group(upload_client, user_id, media_list)
             except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as grp_exc:
                 logging.error(f"User bot for {user_id} deactivated during Telethon album upload: {type(grp_exc).__name__} — evicting")
                 await _evict_user_bot(user_id)
@@ -768,7 +912,7 @@ async def _handle_telethon_download(
             for path in paths:
                 try:
                     if _os.path.exists(path):
-                        _os.remove(path)
+                        cleanup_download_artifacts(path)
                 except Exception:
                     pass
 
@@ -812,12 +956,18 @@ async def _handle_telethon_download(
             logging.warning(f"Fast download failed for user {user_id}: {_fast_exc!r}")
             try:
                 if _os.path.exists(_tl_out):
-                    _os.remove(_tl_out)
+                    cleanup_download_artifacts(_tl_out)
             except Exception:
                 pass
             await update_status(status, "⚠️ Retrying with fallback method...")
             await asyncio.sleep(1)
-            path = await tl_client.download_media(m, file="downloads/", progress_callback=_tl_progress)
+            try:
+                path = await tl_client.download_media(
+                    m, file=_tl_out, progress_callback=_tl_progress
+                )
+            except BaseException:
+                cleanup_download_artifacts(_tl_out)
+                raise
 
         if not path:
             await update_status(status, "❌ Download returned no data. Please try again.")
@@ -867,7 +1017,7 @@ async def _handle_telethon_download(
                     if _os.path.exists(_tp) and _os.path.getsize(_tp) > 0:
                         thumb_path = _tp
                     elif _os.path.exists(_tp):
-                        _os.remove(_tp)
+                        cleanup_download_artifacts(_tp)
             except Exception:
                 thumb_path = None
 
@@ -949,7 +1099,7 @@ async def _handle_telethon_download(
                 for pp in part_paths:
                     try:
                         if _os.path.exists(pp):
-                            _os.remove(pp)
+                            cleanup_download_artifacts(pp)
                     except Exception:
                         pass
             _large_handled = True
@@ -1009,12 +1159,12 @@ async def _handle_telethon_download(
     finally:
         if path and _os.path.exists(path):
             try:
-                _os.remove(path)
+                cleanup_download_artifacts(path)
             except Exception:
                 pass
         if thumb_path and _os.path.exists(thumb_path):
             try:
-                _os.remove(thumb_path)
+                cleanup_download_artifacts(thumb_path)
             except Exception:
                 pass
 
@@ -1031,7 +1181,7 @@ async def download_handler(
     user_override=None,
 ):
     user_id = message.from_user.id
-    link = link_override or message.text.strip()
+    link = _extract_message_link(message, link_override)
     _username = getattr(message.from_user, "username", None)
     _ltype = "private"
 
@@ -1577,8 +1727,33 @@ async def download_handler(
             async def _album_dl_progress(current, total):
                 await progress_bar(current, total, status, "📥 Downloading album")
 
+            can_recover_session = (
+                user_client is not client
+                and bool(user.get("phone_session_string"))
+            )
+
+            async def _download_album_item(album_message):
+                if can_recover_session:
+                    return await _download_with_session_recovery(
+                        user_id,
+                        user["phone_session_string"],
+                        user_client,
+                        album_message,
+                        progress=_album_dl_progress,
+                        progress_args=(),
+                    )
+                return (
+                    await download_media(
+                        user_client,
+                        album_message,
+                        progress=_album_dl_progress,
+                        progress_args=(),
+                    ),
+                    user_client,
+                )
+
             download_tasks = [
-                download_media(user_client, m, progress=_album_dl_progress, progress_args=())
+                _download_album_item(m)
                 for m in messages
             ]
             results = await asyncio.gather(*download_tasks, return_exceptions=True)
@@ -1599,11 +1774,17 @@ async def download_handler(
                     reason = repr(result) if isinstance(result, Exception) else "None returned"
                     logging.warning(f"Album item failed to download: {reason}")
                     continue
+                result, recovered_client = result
+                if recovered_client is not user_client:
+                    user_client = recovered_client
+                if not result:
+                    logging.warning(f"Album item returned no path for user {user_id}")
+                    continue
                 # Skip zero-byte files to avoid send_media_group / 0 B upload errors
                 if os.path.getsize(result) == 0:
                     logging.warning(f"Album item downloaded as 0 bytes, skipping: {result}")
                     try:
-                        os.remove(result)
+                        cleanup_download_artifacts(result)
                     except Exception:
                         pass
                     continue
@@ -1661,8 +1842,28 @@ async def download_handler(
                         media_list.append(InputMediaDocument(path, caption=cap, file_name=fn))
 
                 await update_status(status, f"📤 Uploading album ({len(media_list)} files)...")
+
+                async def _send_album_with_recovery():
+                    nonlocal upload_client
+                    try:
+                        return await send_media_group(upload_client, user_id, media_list)
+                    except Exception as first_exc:
+                        if upload_client is client or not is_stale_transport_error(first_exc):
+                            raise
+                        logging.warning(
+                            "Stale upload bot for user %s during album upload — replacing it: %r",
+                            user_id,
+                            first_exc,
+                        )
+                        await stop_user_bot(user_id)
+                        fresh_upload_client = await get_user_bot(user_id)
+                        if fresh_upload_client is None:
+                            raise first_exc
+                        upload_client = fresh_upload_client
+                        return await send_media_group(upload_client, user_id, media_list)
+
                 try:
-                    await upload_client.send_media_group(user_id, media_list)
+                    await _send_album_with_recovery()
                 except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as grp_exc:
                     logging.error(f"User bot for {user_id} deactivated during album upload: {type(grp_exc).__name__} — evicting")
                     await _evict_user_bot(user_id)
@@ -1717,7 +1918,7 @@ async def download_handler(
                 for path in paths:
                     try:
                         if os.path.exists(path):
-                            os.remove(path)
+                            cleanup_download_artifacts(path)
                     except Exception:
                         pass
 
@@ -1732,14 +1933,31 @@ async def download_handler(
             path = None
             thumb = None
             try:
-                path = await asyncio.wait_for(
-                    download_media(
-                        user_client, m,
-                        progress=progress_bar,
-                        progress_args=(status, "📥 Downloading"),
-                    ),
-                    timeout=1800,
-                )
+                if (
+                    user_client is not client
+                    and user.get("phone_session_string")
+                ):
+                    path, user_client = await asyncio.wait_for(
+                        _download_with_session_recovery(
+                            user_id,
+                            user["phone_session_string"],
+                            user_client,
+                            m,
+                            progress=progress_bar,
+                            progress_args=(status, "📥 Downloading"),
+                        ),
+                        timeout=1800,
+                    )
+                else:
+                    path = await asyncio.wait_for(
+                        download_media(
+                            user_client,
+                            m,
+                            progress=progress_bar,
+                            progress_args=(status, "📥 Downloading"),
+                        ),
+                        timeout=1800,
+                    )
                 if not path:
                     return None
 
@@ -1914,7 +2132,7 @@ async def download_handler(
                             for pp in part_paths:
                                 try:
                                     if os.path.exists(pp):
-                                        os.remove(pp)
+                                        cleanup_download_artifacts(pp)
                                 except Exception:
                                     pass
                         _large_file_handled = True
@@ -1982,7 +2200,7 @@ async def download_handler(
                 return None
             finally:
                 if path and os.path.exists(path):
-                    os.remove(path)
+                    cleanup_download_artifacts(path)
 
         if not skip_quota and user.get("role", "free") == "free":
             await increment_quota(user_id, count=len(messages))

@@ -50,6 +50,8 @@ if missing_vars:
     sys.exit(1)
 
 MAX_CONCURRENT_DOWNLOADS = 25
+# Keep one unstable Telegram client from consuming the entire transfer pool.
+MAX_CLIENT_DOWNLOADS = 2
 
 active_downloads: set = set()
 cancel_flags: set = set()

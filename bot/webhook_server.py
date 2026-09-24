@@ -20,6 +20,7 @@ import os
 import threading
 
 from flask import Flask, request, jsonify
+from bot.task_supervisor import schedule_coroutine_threadsafe
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,13 @@ def _schedule(coro) -> None:
     Pyrogram also requires its own loop, so both DB and Telegram work go here.
     """
     if _bot_loop and _bot_loop.is_running():
-        asyncio.run_coroutine_threadsafe(coro, _bot_loop)
+        schedule_coroutine_threadsafe(
+            coro,
+            _bot_loop,
+            name="payment-webhook-upgrade",
+        )
     else:
+        coro.close()
         logger.warning("Webhook: bot loop not ready, upgrade skipped")
 
 
@@ -104,7 +110,7 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
         # Schedule Telegram notification on the bot's main loop
         # (Pyrogram is not thread-safe; must run on its own loop)
         if _bot_loop and _bot_client:
-            asyncio.run_coroutine_threadsafe(
+            schedule_coroutine_threadsafe(
                 _bot_client.send_message(
                     user_id,
                     f"🎉 **Payment Confirmed!**\n\n"
@@ -118,6 +124,7 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
                     f"Thank you for your support! 🙏"
                 ),
                 _bot_loop,
+                name=f"payment-confirmation-{user_id}",
             )
     except Exception as e:
         logger.error(f"_upgrade_and_notify error user={user_id}: {e}")
