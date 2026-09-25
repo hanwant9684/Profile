@@ -49,9 +49,7 @@ if missing_vars:
     logging.critical(f"Missing required environment variables: {', '.join(missing_vars)} — bot cannot start")
     sys.exit(1)
 
-MAX_CONCURRENT_DOWNLOADS = 25
-# Keep one unstable Telegram client from consuming the entire transfer pool.
-MAX_CLIENT_DOWNLOADS = 2
+MAX_CONCURRENT_DOWNLOADS = 10
 
 active_downloads: set = set()
 cancel_flags: set = set()

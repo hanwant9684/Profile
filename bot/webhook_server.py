@@ -20,7 +20,6 @@ import os
 import threading
 
 from flask import Flask, request, jsonify
-from bot.task_supervisor import schedule_coroutine_threadsafe
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +45,8 @@ def _schedule(coro) -> None:
     Pyrogram also requires its own loop, so both DB and Telegram work go here.
     """
     if _bot_loop and _bot_loop.is_running():
-        schedule_coroutine_threadsafe(
-            coro,
-            _bot_loop,
-            name="payment-webhook-upgrade",
-        )
+        asyncio.run_coroutine_threadsafe(coro, _bot_loop)
     else:
-        coro.close()
         logger.warning("Webhook: bot loop not ready, upgrade skipped")
 
 
@@ -110,7 +104,7 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
         # Schedule Telegram notification on the bot's main loop
         # (Pyrogram is not thread-safe; must run on its own loop)
         if _bot_loop and _bot_client:
-            schedule_coroutine_threadsafe(
+            asyncio.run_coroutine_threadsafe(
                 _bot_client.send_message(
                     user_id,
                     f"🎉 **Payment Confirmed!**\n\n"
@@ -124,7 +118,6 @@ async def _upgrade_and_notify(user_id: int, days: int, gateway: str, dedup_key: 
                     f"Thank you for your support! 🙏"
                 ),
                 _bot_loop,
-                name=f"payment-confirmation-{user_id}",
             )
     except Exception as e:
         logger.error(f"_upgrade_and_notify error user={user_id}: {e}")
@@ -432,14 +425,10 @@ def _html_page(title: str, body: str, bot_username: str = "DownloadRestrictedVid
 # ── Server startup ────────────────────────────────────────────────────────────
 def run_webhook_server() -> None:
     port = int(os.environ.get("WEBHOOK_PORT", 8080))
-    # WEBHOOK_HOST: set to "127.0.0.1" when a reverse-proxy (nginx/caddy) sits
-    # in front so the raw port is not exposed to the internet (eliminates TLS-probe
-    # and JSON-RPC scanner noise). Leave as "0.0.0.0" if no proxy is in use.
-    host = os.environ.get("WEBHOOK_HOST", "0.0.0.0")
-    logger.info(f"Webhook server listening on {host}:{port}")
+    logger.info(f"Webhook server listening on 0.0.0.0:{port}")
     # threaded=True — each incoming webhook request gets its own thread,
     # so a slow PayPal verification call never blocks ZapUPI/Oxapay callbacks
-    flask_app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 
 def start_webhook_thread(loop: asyncio.AbstractEventLoop, client) -> threading.Thread:

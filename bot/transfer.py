@@ -2,11 +2,6 @@ import os
 import re
 import asyncio
 import logging
-import glob
-import shutil
-import tempfile
-import uuid
-import weakref
 from pyrogram import Client, StopTransmission
 from pyrogram.errors.exceptions.bad_request_400 import (
     PhotoExtInvalid,
@@ -22,10 +17,7 @@ from pyrogram.errors import (
 )
 
 import time
-from bot.config import (
-    API_ID, API_HASH, user_bots, user_bots_last_used,
-    MAX_CLIENT_DOWNLOADS,
-)
+from bot.config import API_ID, API_HASH, user_bots, user_bots_last_used
 
 # Upload size limits
 BOT_MAX_FILE_SIZE  = 2_000_000_000   # 2 GB  — hard cap for bot accounts
@@ -39,69 +31,6 @@ PART_SAFE_SIZE     = 1_990_000_000   # ~1.99 GB — safe split boundary (free ac
 # commands and never uploads bytes.
 
 _user_bot_locks: dict = {}
-_user_bot_health_checked: dict = {}
-_USER_BOT_HEALTH_TTL = 30.0
-_client_download_semaphores = weakref.WeakKeyDictionary()
-_client_download_semaphores_fallback = {}
-_client_upload_locks = weakref.WeakKeyDictionary()
-_client_upload_locks_fallback = {}
-
-
-def client_download_semaphore(client) -> asyncio.Semaphore:
-    """Return the bounded transfer semaphore associated with a Telegram client."""
-    try:
-        semaphore = _client_download_semaphores.get(client)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(MAX_CLIENT_DOWNLOADS)
-            _client_download_semaphores[client] = semaphore
-        return semaphore
-    except TypeError:
-        # Keep compatibility with unusual client implementations that are not
-        # weak-referenceable or hashable. Their count is bounded by the client
-        # object lifetime in normal Pyrogram/Telethon usage.
-        key = id(client)
-        semaphore = _client_download_semaphores_fallback.get(key)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(MAX_CLIENT_DOWNLOADS)
-            _client_download_semaphores_fallback[key] = semaphore
-        return semaphore
-
-
-def client_upload_lock(client) -> asyncio.Lock:
-    """Return the lock that serializes uploads through one Telegram client."""
-    try:
-        lock = _client_upload_locks.get(client)
-        if lock is None:
-            lock = asyncio.Lock()
-            _client_upload_locks[client] = lock
-        return lock
-    except TypeError:
-        key = id(client)
-        lock = _client_upload_locks_fallback.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _client_upload_locks_fallback[key] = lock
-        return lock
-
-# These errors mean that the client object may still report `is_connected=True`
-# while its underlying Pyrogram session/transport is no longer usable.  They
-# must not be retried against the same client: the caller needs a fresh client.
-_STALE_TRANSPORT_MARKERS = (
-    "TCPTransport closed",
-    "handler is closed",
-    "Connection lost",
-    "[Errno 32]",
-    "[Errno 104]",
-    "unknown constructor",
-    "Cannot operate on a closed database",
-    "FILE_WRITE_FAILED",
-)
-
-
-def is_stale_transport_error(error: BaseException) -> bool:
-    """Return whether *error* requires replacing the Pyrogram client."""
-    text = str(error)
-    return any(marker in text for marker in _STALE_TRANSPORT_MARKERS)
 
 
 def _bot_lock_for(user_id: int) -> asyncio.Lock:
@@ -123,7 +52,7 @@ async def validate_bot_token(bot_token: str):
         bot_token=bot_token,
         in_memory=True,
         no_updates=True,
-        workers=20,
+        workers=100,
     )
     try:
         await asyncio.wait_for(probe.start(), timeout=20)
@@ -144,26 +73,19 @@ async def get_user_bot(user_id: int):
     """
     cached = user_bots.get(user_id)
     if cached is not None:
-        # `is_connected` can remain true after Pyrogram's packet handler has
-        # died.  A short get_me probe catches that state before save_file is
-        # called.  Avoid probing more than once per health TTL.
+        # Fix 5: verify the cached client is still connected; evict and re-instantiate if not.
         try:
             if not cached.is_connected:
                 logging.warning(f"Cached user bot for {user_id} is disconnected — evicting and reconnecting")
-                await stop_user_bot(user_id)
+                user_bots.pop(user_id, None)
+                user_bots_last_used.pop(user_id, None)
+                cached = None
             else:
-                now = time.time()
-                last_health = _user_bot_health_checked.get(user_id, 0)
-                if now - last_health >= _USER_BOT_HEALTH_TTL:
-                    await asyncio.wait_for(cached.get_me(), timeout=10)
-                    _user_bot_health_checked[user_id] = now
                 user_bots_last_used[user_id] = time.time()
                 return cached
-        except (AccessTokenExpired, AccessTokenInvalid):
-            raise
-        except Exception as e:
-            logging.warning(f"Cached user bot for {user_id} failed health check — evicting: {e!r}")
-            await stop_user_bot(user_id)
+        except Exception:
+            user_bots.pop(user_id, None)
+            user_bots_last_used.pop(user_id, None)
             cached = None
 
     from bot.database import get_bot_token  # lazy to avoid circular import
@@ -174,7 +96,6 @@ async def get_user_bot(user_id: int):
     async with _bot_lock_for(user_id):
         cached = user_bots.get(user_id)
         if cached is not None:
-            _user_bot_health_checked[user_id] = time.time()
             return cached
         client = Client(
             f"user_bot_{user_id}",
@@ -184,7 +105,7 @@ async def get_user_bot(user_id: int):
             in_memory=True,
             no_updates=True,
             sleep_threshold=30,
-            workers=20,
+            workers=100,
         )
         try:
             await asyncio.wait_for(client.start(), timeout=30)
@@ -199,27 +120,20 @@ async def get_user_bot(user_id: int):
             return None
         user_bots[user_id] = client
         user_bots_last_used[user_id] = time.time()
-        _user_bot_health_checked[user_id] = time.time()
         logging.info(f"Started per-user bot client for user {user_id}")
         return client
 
 
 async def stop_user_bot(user_id: int):
     """Stop & evict the cached bot client. Call from /rembot."""
-    # Keep the lock object for the lifetime of the process.  Removing it while
-    # another get_user_bot() call is waiting can create a second lock for the
-    # same user and reintroduce start/stop races.
-    lock = _bot_lock_for(user_id)
-    async with lock:
-        client = user_bots.pop(user_id, None)
-        user_bots_last_used.pop(user_id, None)
-        _user_bot_health_checked.pop(user_id, None)
-        if client is not None:
-            logging.info(f"Stopping user bot for user {user_id}")
-            try:
-                await asyncio.wait_for(client.stop(), timeout=10)
-            except Exception:
-                pass
+    client = user_bots.pop(user_id, None)
+    if client is not None:
+        logging.info(f"Stopping user bot for user {user_id}")
+        try:
+            await client.stop()
+        except Exception:
+            pass
+    _user_bot_locks.pop(user_id, None)
 
 
 def _parse_media_info_sync(path: str) -> tuple[int, int, int]:
@@ -336,37 +250,6 @@ _VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts", ".flv"}
 _MP4_EXTS   = {".mp4", ".mov", ".m4v"}
 
 
-def cleanup_download_artifacts(*paths: str) -> None:
-    """Remove downloaded files and any sidecar files created during a transfer.
-
-    Transfer failures can leave the destination, segment files, or split parts
-    behind.  Only paths supplied by the caller and their known sidecars are
-    touched; unrelated concurrent downloads are not scanned or removed.
-    """
-    seen = set()
-    for path in paths:
-        if not path:
-            continue
-        path = os.fspath(path)
-        base, ext = os.path.splitext(path)
-        candidates = [path, f"{path}.tmp"]
-        candidates.extend(glob.glob(f"{path}.seg*"))
-        candidates.extend(glob.glob(f"{path}.part*"))
-        # split_file/split_video_ffmpeg place parts beside the original
-        # extension, e.g. video.part1of2.mp4 rather than video.mp4.part1.
-        candidates.extend(glob.glob(f"{base}.part*{ext}"))
-        candidates.extend(glob.glob(f"{base}.__ffpart*{ext}"))
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            try:
-                if os.path.isfile(candidate) or os.path.islink(candidate):
-                    os.remove(candidate)
-            except OSError:
-                logging.debug("Could not remove transfer artifact %s", candidate, exc_info=True)
-
-
 def _split_file_sync(path: str, part_size: int) -> list:
     total = os.path.getsize(path)
     n_parts = (total + part_size - 1) // part_size
@@ -378,19 +261,20 @@ def _split_file_sync(path: str, part_size: int) -> list:
                 part_path = f"{base}.part{i}of{n_parts}{ext}"
                 remaining = part_size
                 with open(part_path, "wb") as dst:
-                    written = 0
                     while remaining > 0:
                         buf = src.read(min(_SPLIT_BUFFER, remaining))
                         if not buf:
                             break
                         dst.write(buf)
-                        written += len(buf)
                         remaining -= len(buf)
-                if not written or remaining:
-                    raise IOError(f"Incomplete split part: {part_path}")
                 parts.append(part_path)
     except Exception:
-        cleanup_download_artifacts(path, *parts)
+        for pp in parts:
+            try:
+                if os.path.exists(pp):
+                    os.remove(pp)
+            except Exception:
+                pass
         raise
     return parts
 
@@ -462,22 +346,12 @@ async def split_video_ffmpeg(path: str, part_size: int = PART_SAFE_SIZE) -> list
         logging.warning("split_video_ffmpeg: ffmpeg produced no output — raw fallback")
         return await split_file(path, part_size)
 
-    if any(os.path.getsize(part) == 0 for part in tmp_parts):
-        logging.warning("split_video_ffmpeg: ffmpeg produced an empty part — raw fallback")
-        _cleanup_glob(base, ext)
-        return await split_file(path, part_size)
-
     n = len(tmp_parts)
     parts = []
-    try:
-        for i, tmp in enumerate(tmp_parts, 1):
-            dest = f"{base}.part{i}of{n}{ext}"
-            os.rename(tmp, dest)
-            parts.append(dest)
-    except Exception:
-        cleanup_download_artifacts(path, *parts)
-        _cleanup_glob(base, ext)
-        raise
+    for i, tmp in enumerate(tmp_parts, 1):
+        dest = f"{base}.part{i}of{n}{ext}"
+        os.rename(tmp, dest)
+        parts.append(dest)
 
     logging.info(f"split_video_ffmpeg: {path!r} → {n} parts")
     return parts
@@ -497,60 +371,22 @@ async def download_media(client, message, progress=None, progress_args=()):
     Download media from a Telegram message to the downloads/ folder.
     Returns the local file path on success, raises on unrecoverable error.
     """
-    os.makedirs("downloads", exist_ok=True)
-    progress_args = tuple(progress_args or ())
     for attempt in range(3):
-        temp_dir = tempfile.mkdtemp(prefix=".download-", dir="downloads")
-        path = None
         try:
-            path = await client.download_media(
+            return await client.download_media(
                 message,
-                # Isolate each attempt so a failed Pyrogram write cannot be
-                # mistaken for a completed download or collide with another
-                # album item.
-                file_name=f"{temp_dir}{os.sep}",
+                file_name="downloads/",
                 progress=progress,
                 progress_args=progress_args,
             )
-            if not path:
-                cleanup_download_artifacts(temp_dir)
-                try:
-                    os.rmdir(temp_dir)
-                except OSError:
-                    pass
-                return None
-            # Guard: Telegram sometimes returns an empty file — catch it early
-            # before we waste time uploading 0 bytes or hitting send_media_group errors.
-            if not os.path.isfile(path) or os.path.getsize(path) == 0:
-                raise ValueError("File size equals to 0 B")
-            final_path = os.path.join(
-                "downloads",
-                f".media-{uuid.uuid4().hex}-{os.path.basename(path)}",
-            )
-            os.replace(path, final_path)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return final_path
         except (FileReferenceExpired, FileReferenceInvalid):
-            cleanup_download_artifacts(path, temp_dir)
-            shutil.rmtree(temp_dir, ignore_errors=True)
             raise
         except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                 AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
-            cleanup_download_artifacts(path, temp_dir)
-            shutil.rmtree(temp_dir, ignore_errors=True)
             raise
         except StopTransmission:
-            cleanup_download_artifacts(path, temp_dir)
-            shutil.rmtree(temp_dir, ignore_errors=True)
             raise
         except Exception as e:
-            cleanup_download_artifacts(path, temp_dir)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            if is_stale_transport_error(e):
-                # The caller owns client replacement. Retrying this exception
-                # on the same broken session only floods the log and delays
-                # recovery.
-                raise
             if attempt == 2:
                 raise
             logging.warning(f"Download attempt {attempt + 1} failed: {e!r}, retrying")
@@ -594,7 +430,7 @@ async def _send_by_ext(
         )
 
 
-async def _upload_media_unlocked(
+async def upload_media(
     client: Client,
     chat_id,
     path: str,
@@ -615,18 +451,11 @@ async def _upload_media_unlocked(
     sent Message object. Selects the appropriate send method based on file
     extension. Retries up to 3 times on transient errors and FloodWait.
     """
-    if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
-        raise ValueError(f"Cannot upload an empty or missing file: {path!r}")
     safe_cap = truncate_caption(caption)
     ext = os.path.splitext(path)[1].lower()
-    progress_args = tuple(progress_args or ())
     kw = dict(caption=safe_cap, progress=progress, progress_args=progress_args)
 
-    _NO_RETRY_CODES = (
-        "USER_IS_BLOCKED", "INPUT_USER_DEACTIVATED", "PEER_ID_INVALID",
-        # Terminal bot-account errors — retrying wastes time and floods logs
-        "USER_DEACTIVATED", "ACCESS_TOKEN_INVALID", "ACCESS_TOKEN_EXPIRED",
-    )
+    _NO_RETRY_CODES = ("USER_IS_BLOCKED", "INPUT_USER_DEACTIVATED", "PEER_ID_INVALID")
 
     last_exc = None
     for attempt in range(3):
@@ -642,11 +471,6 @@ async def _upload_media_unlocked(
             raise
         except Exception as e:
             last_exc = e
-            # Retrying a dead Pyrogram transport only produces more
-            # save_file/handler-is-closed noise.  Let the caller evict the
-            # client and retry with a fresh connection.
-            if is_stale_transport_error(e):
-                raise
             if attempt == 2 or any(code in str(e) for code in _NO_RETRY_CODES):
                 break
             logging.warning(f"Upload attempt {attempt + 1} failed: {e!r}, retrying")
@@ -655,15 +479,3 @@ async def _upload_media_unlocked(
     if last_exc is not None:
         raise last_exc
     return None
-
-
-async def upload_media(client: Client, chat_id, path: str, **kwargs):
-    """Serialize all uploads made through the same Telegram client."""
-    async with client_upload_lock(client):
-        return await _upload_media_unlocked(client, chat_id, path, **kwargs)
-
-
-async def send_media_group(client: Client, chat_id, media):
-    """Serialize album uploads made through the same Telegram client."""
-    async with client_upload_lock(client):
-        return await client.send_media_group(chat_id, media)
