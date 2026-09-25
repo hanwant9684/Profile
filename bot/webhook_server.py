@@ -425,10 +425,14 @@ def _html_page(title: str, body: str, bot_username: str = "DownloadRestrictedVid
 # ── Server startup ────────────────────────────────────────────────────────────
 def run_webhook_server() -> None:
     port = int(os.environ.get("WEBHOOK_PORT", 8080))
-    logger.info(f"Webhook server listening on 0.0.0.0:{port}")
+    # WEBHOOK_HOST: set to "127.0.0.1" when a reverse-proxy (nginx/caddy) sits
+    # in front so the raw port is not exposed to the internet (eliminates TLS-probe
+    # and JSON-RPC scanner noise). Leave as "0.0.0.0" if no proxy is in use.
+    host = os.environ.get("WEBHOOK_HOST", "0.0.0.0")
+    logger.info(f"Webhook server listening on {host}:{port}")
     # threaded=True — each incoming webhook request gets its own thread,
     # so a slow PayPal verification call never blocks ZapUPI/Oxapay callbacks
-    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
+    flask_app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
 
 
 def start_webhook_thread(loop: asyncio.AbstractEventLoop, client) -> threading.Thread:
