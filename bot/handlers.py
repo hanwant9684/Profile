@@ -7,7 +7,7 @@ from collections import deque
 
 import pyrogram
 from pyrogram import filters, Client, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 from pyrogram import StopTransmission
 from pyrogram.errors import (
     AuthKeyUnregistered, SessionRevoked, SessionExpired,
@@ -169,7 +169,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
         in_memory=True,
         sleep_threshold=30,
         no_updates=True,
-        workers=100,
+        workers=50,
     )
     await asyncio.wait_for(client.start(), timeout=30)
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -269,17 +269,17 @@ class _LazyStatus:
     def id(self):
         return self._sent.id if self._sent else self._message.id
 
-    async def edit_text(self, text, reply_markup=None, disable_web_page_preview=None):
+    async def edit_text(self, text, reply_markup=None, link_preview_options=None):
         if self._sent is None:
             try:
                 self._sent = await self._message.reply(text, reply_markup=reply_markup,
-                                                        disable_web_page_preview=disable_web_page_preview)
+                                                        link_preview_options=link_preview_options)
             except Exception as e:
                 logging.debug(f"_LazyStatus.reply: {e}")
         else:
             try:
                 await self._sent.edit_text(text, reply_markup=reply_markup,
-                                           disable_web_page_preview=disable_web_page_preview)
+                                           link_preview_options=link_preview_options)
             except Exception as e:
                 if "MESSAGE_NOT_MODIFIED" not in str(e):
                     logging.debug(f"_LazyStatus.edit_text: {e}")
@@ -292,12 +292,11 @@ class _LazyStatus:
                 pass
 
 
-async def update_status(msg, text: str, reply_markup=None, disable_web_page_preview=None):
+async def update_status(msg, text: str, reply_markup=None, link_preview_options=None):
     if not msg:
         return
     try:
-        await msg.edit_text(text, reply_markup=reply_markup,
-                            disable_web_page_preview=disable_web_page_preview)
+        await msg.edit_text(text, reply_markup=reply_markup, link_preview_options=link_preview_options)
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logging.debug(f"update_status: {e}")
@@ -1437,7 +1436,7 @@ async def download_handler(
                     return None
                 if _ub is None:
                     await update_status(status, _SETBOT_NOT_SET_MSG,
-                                        disable_web_page_preview=True)
+                                        link_preview_options=LinkPreviewOptions(is_disabled=True))
                     return None
                 _extract_client = _ub
             else:
@@ -1535,7 +1534,7 @@ async def download_handler(
                 await sender.send_message(
                     user_id, text,
                     entities=entities,
-                    disable_web_page_preview=False,
+                    link_preview_options=LinkPreviewOptions(is_disabled=False),
                 )
                 if not status_msg_override:
                     try:
@@ -1567,7 +1566,7 @@ async def download_handler(
 
         if user_bot is None and is_premium:
             await update_status(status, _SETBOT_NOT_SET_MSG,
-                                disable_web_page_preview=True)
+                                link_preview_options=LinkPreviewOptions(is_disabled=True))
             return None
 
         upload_client = user_bot if user_bot is not None else client
@@ -2113,7 +2112,7 @@ async def help_command(client, message):
             [InlineKeyboardButton("👑 Owner", url="https://t.me/Owner_wolfy")],
             [InlineKeyboardButton("💬 Support", url=_support_link())],
         ]),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 

@@ -9,6 +9,7 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
 
@@ -132,14 +133,14 @@ async def upgrade_command(client, message: Message):
             f"✅ You already have **Premium**!{expiry_str}\n\n"
             "To extend your subscription, pick a plan below:",
             reply_markup=_plan_keyboard(),
-            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         return
 
     await message.reply(
         _plan_text(),
         reply_markup=_plan_keyboard(),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
@@ -294,7 +295,7 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
                 InlineKeyboardButton("💬 Support", url=_support_link()),
             ],
         ]),
-        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
