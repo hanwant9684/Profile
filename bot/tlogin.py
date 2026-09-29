@@ -10,7 +10,7 @@ Telethon engine commands — premium only.
 import time
 import logging
 from pyrogram import filters
-from pyrogram.types import Message, LinkPreviewOptions
+from pyrogram.types import Message
 
 from bot.config import app, API_ID, API_HASH, telethon_login_states, telethon_clients, telethon_clients_last_used
 from bot.link_utils import TG_LINK_HOST_RE
@@ -166,7 +166,7 @@ async def setengine_command(client, message: Message):
             f"Switch with:\n"
             f"`/setengine pyrogram` — standard\n"
             f"`/setengine telethon` — faster downloads",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_web_page_preview=True,
         )
         return
 
@@ -396,5 +396,5 @@ async def _finish_tlogin(user_id: int, tl_client, message: Message):
     await message.reply(
         "✅ **Telethon session connected!**\n\n"
         "Your Telethon account is now ready." + engine_note,
-        link_preview_options=LinkPreviewOptions(is_disabled=True),
+        disable_web_page_preview=True,
     )

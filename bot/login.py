@@ -1,6 +1,6 @@
 import time
 from pyrogram import filters, Client
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
 from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import (
@@ -95,7 +95,7 @@ async def start(client, message):
                 + ("📹 [Setup guide for private links](https://t.me/Wolfy004/155)\n\n" if needs_setup else "")
                 + "Send any Telegram link to download.",
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
+                disable_web_page_preview=True,
             )
         except Exception:
             pass
@@ -108,7 +108,7 @@ async def start(client, message):
             "📎 **Public links work right away** — just send any `t.me` link.\n\n"
             "🔒 **For private / restricted links**, connect your Telegram account with /login.\n\n"
             "Send a link to get started!",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_web_page_preview=True,
         )
     except Exception:
         pass
@@ -377,7 +377,7 @@ async def handle_login_steps(client, message: Message):
             f"Open {bot_username} and press **Start** so it can DM you.\n"
             "Then send any Telegram link to start downloading.\n\n"
             "To change your bot: run /setbot again · To remove: /rembot ",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_web_page_preview=True,
         )
         return
 
@@ -416,7 +416,7 @@ async def handle_login_steps(client, message: Message):
                 f"✅ **Bot registered:** {bot_username}\n\n"
                 f"Open {bot_username} and press **Start** so it can DM you.\n\n"
                 "🚀 **You're fully set up!** Send any Telegram link to start downloading.",
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
+                disable_web_page_preview=True,
             )
         else:
             await status.edit_text(
@@ -429,7 +429,7 @@ async def handle_login_steps(client, message: Message):
                     [InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")],
                     [InlineKeyboardButton("⚡ Skip — Public Links Only", callback_data="onboard_skip_login")],
                 ]),
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
+                disable_web_page_preview=True,
             )
         return
 
@@ -653,7 +653,7 @@ async def setbot_command(client, message: Message):
         "📹 **Watch how to set up your bot:** https://t.me/Wolfy004/194\n\n"
         "⏱ This prompt expires in 5 minutes.\n"
         "Send /cancel_login to cancel.",
-        link_preview_options=LinkPreviewOptions(is_disabled=True),
+        disable_web_page_preview=True,
     )
 
 

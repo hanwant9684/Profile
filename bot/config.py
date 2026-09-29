@@ -86,6 +86,5 @@ app = Client(
     bot_token=BOT_TOKEN,
     in_memory=True,
     sleep_threshold=30,
-    skip_updates=True,
     workers=100,
 )

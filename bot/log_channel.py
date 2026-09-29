@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-from pyrogram.types import LinkPreviewOptions
 
 _RAW = os.environ.get("LOG_CHANNEL_ID", "").strip()
 LOG_CHANNEL_ID = (
@@ -32,7 +31,7 @@ async def _post(text: str):
         await app.send_message(
             LOG_CHANNEL_ID,
             text,
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
+            disable_web_page_preview=True,
         )
     except Exception as exc:
         logging.debug(f"Log channel send error: {exc}")
