@@ -6,9 +6,10 @@ flask
 httpx
 psutil
 pymediainfo
-pyrotgfork
+pyrogram
 python-dotenv
 pyyaml
 tgcrypto
 telethon
 uvloop
+pyrogram
