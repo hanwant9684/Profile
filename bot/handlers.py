@@ -169,7 +169,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
         in_memory=True,
         sleep_threshold=30,
         no_updates=True,
-        workers=50,
+        workers=4,
     )
     await asyncio.wait_for(client.start(), timeout=30)
     user_clients[user_id] = {"client": client, "last_used": now}
