@@ -6,12 +6,9 @@ flask
 httpx
 psutil
 pymediainfo
-# The fork provides the `pyrogram` import used by this project. Do not install
-# upstream `pyrogram` alongside it; pin both the fork and its crypto backend so
-# a resolver cannot silently change the Telegram transport implementation.
-pyrotgfork==2.2.24
+pyrotgfork
 python-dotenv
 pyyaml
-tgcrypto==1.2.5
+tgcrypto
 telethon
 uvloop

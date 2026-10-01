@@ -53,40 +53,33 @@ async def main():
 
     from bot.cloud_backup import periodic_cloud_backup
     from bot.database import periodic_premium_sweep
-    from bot.task_supervisor import create_background_task, cancel_background_tasks
-    create_background_task(periodic_cloud_backup(), name="periodic-cloud-backup")
-    create_background_task(periodic_premium_sweep(), name="periodic-premium-sweep")
+    asyncio.create_task(periodic_cloud_backup())
+    asyncio.create_task(periodic_premium_sweep())
 
     print("Starting bot...")
-    app_started = False
+    await app.start()
+
+    # Auto-detect bot username so all t.me/ links are always correct
+    import bot.config as _cfg
     try:
-        await app.start()
-        app_started = True
+        _me = await app.get_me()
+        if _me.username:
+            _cfg.BOT_USERNAME = _me.username
+            print(f"✅ Bot username detected: @{_me.username}")
+        # If SUPPORT_CHAT_LINK not set, default to the bot itself
+        if not _cfg.SUPPORT_CHAT_LINK:
+            _cfg.SUPPORT_CHAT_LINK = f"https://t.me/{_cfg.BOT_USERNAME}"
+    except Exception as _e:
+        print(f"⚠️ Could not detect bot username: {_e}")
 
-        # Auto-detect bot username so all t.me/ links are always correct
-        import bot.config as _cfg
-        try:
-            _me = await app.get_me()
-            if _me.username:
-                _cfg.BOT_USERNAME = _me.username
-                print(f"✅ Bot username detected: @{_me.username}")
-            # If SUPPORT_CHAT_LINK not set, default to the bot itself
-            if not _cfg.SUPPORT_CHAT_LINK:
-                _cfg.SUPPORT_CHAT_LINK = f"https://t.me/{_cfg.BOT_USERNAME}"
-        except Exception as _e:
-            print(f"⚠️ Could not detect bot username: {_e}")
+    # Start the webhook server on a background thread (needs the bot running first)
+    from bot.webhook_server import start_webhook_thread
+    wh_thread = start_webhook_thread(asyncio.get_event_loop(), app)
+    print(f"✅ Webhook server started (thread: {wh_thread.name})")
 
-        # Start the webhook server on a background thread (needs the bot running first)
-        from bot.webhook_server import start_webhook_thread
-        wh_thread = start_webhook_thread(asyncio.get_event_loop(), app)
-        print(f"✅ Webhook server started (thread: {wh_thread.name})")
-
-        from pyrogram.methods.utilities.idle import idle
-        await idle()
-    finally:
-        await cancel_background_tasks()
-        if app_started:
-            await app.stop()
+    from pyrogram.methods.utilities.idle import idle
+    await idle()
+    await app.stop()
 
 
 if __name__ == "__main__":
