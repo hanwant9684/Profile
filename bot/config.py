@@ -58,9 +58,6 @@ batch_sessions: set = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states: dict = {}
 
-user_bots: dict = {}
-user_bots_last_used: dict = {}
-
 # Telethon per-user client cache (premium only, for Telethon engine)
 telethon_clients: dict = {}
 telethon_clients_last_used: dict = {}

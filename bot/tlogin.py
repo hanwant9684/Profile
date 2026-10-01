@@ -183,15 +183,6 @@ async def setengine_command(client, message: Message):
                 "Use /tlogin to connect your account via Telethon."
             )
             return
-        if not user.get("bot_token"):
-            await message.reply(
-                "❌ **No upload bot registered.**\n\n"
-                "The Telethon engine uses Telethon only for **downloading**. "
-                "Uploading still goes through your personal upload bot.\n\n"
-                "Please run /setbot first, then switch engine."
-            )
-            return
-
     await set_download_engine(user_id, engine)
     logger.info(f"Engine set to '{engine}' for user={user_id}")
 
@@ -199,7 +190,7 @@ async def setengine_command(client, message: Message):
         await message.reply(
             "✅ **Fast engine activated.**\n\n"
             "Your downloads will now use the fast engine.\n"
-            "Uploads go through your registered bot (/setbot).\n\n"
+            "Downloaded files are sent by the main bot.\n\n"
             "Switch back anytime: `/setengine pyrogram`"
         )
     else:
@@ -241,7 +232,7 @@ async def cancel_tlogin(client, message: Message):
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
         "settings", "set_force_sub", "userinfo",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
-        "setbot", "rembot", "caprem", "capadd",
+        "caprem", "capadd",
     ])
     & ~filters.regex(TG_LINK_HOST_RE)
 )
@@ -390,7 +381,7 @@ async def _finish_tlogin(user_id: int, tl_client, message: Message):
         engine_note = (
             "\n\n💡 To use Telethon as your download engine:\n"
             "`/setengine telethon`\n"
-            "_(requires /setbot to be set up too)_"
+            "_(uploads are sent by the main bot)_"
         )
 
     await message.reply(

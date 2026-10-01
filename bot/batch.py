@@ -5,7 +5,6 @@ import logging
 from pyrogram import filters
 from bot.config import app, batch_cancel_flags, batch_sessions, cancel_flags
 from bot.database import get_user
-from bot.transfer import get_user_bot
 from bot.link_utils import TG_LINK_HOST_RE, normalize_telegram_link
 
 
@@ -56,26 +55,6 @@ async def batch_handler(client, message):
         await message.reply(
             "❌ **Batch download is for Premium users only.**\n\n"
             "👉 Use /upgrade to see plans."
-        )
-        return
-
-    try:
-        user_bot = await get_user_bot(user_id)
-    except Exception:
-        await message.reply(
-            "❌ **Your upload bot token is invalid or expired.**\n\n"
-            "Use /rembot to clear it, then /setbot to register a new one."
-        )
-        return
-    if user_bot is None:
-        await message.reply(
-            "❌ **Upload bot not set up.**\n\n"
-            "Batch download requires your own upload bot.\n"
-            "Use /setbot to register one before running /batch.\n\n"
-            "1. Open @BotFather → `/newbot`\n"
-            "2. Copy the token\n"
-            "3. Run /setbot and send the token when prompted\n"
-            "4. Press **Start** on your bot"
         )
         return
 
@@ -226,26 +205,6 @@ async def mlinks_handler(client, message):
         await message.reply(
             "❌ **Multi-link download is for Premium users only.**\n\n"
             "👉 Use /upgrade to see plans."
-        )
-        return
-
-    try:
-        user_bot = await get_user_bot(user_id)
-    except Exception:
-        await message.reply(
-            "❌ **Your upload bot token is invalid or expired.**\n\n"
-            "Use /rembot to clear it, then /setbot to register a new one."
-        )
-        return
-    if user_bot is None:
-        await message.reply(
-            "❌ **Upload bot not set up.**\n\n"
-            "Multi-link download requires your own upload bot.\n"
-            "Use /setbot to register one before running /mlinks.\n\n"
-            "1. Open @BotFather → `/newbot`\n"
-            "2. Copy the token\n"
-            "3. Run /setbot and send the token when prompted\n"
-            "4. Press **Start** on your bot"
         )
         return
 

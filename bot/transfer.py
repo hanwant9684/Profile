@@ -13,127 +13,11 @@ from pyrogram.errors.exceptions.bad_request_400 import (
 from pyrogram.errors import (
     AuthKeyUnregistered, SessionRevoked, SessionExpired,
     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated,
-    AccessTokenExpired, AccessTokenInvalid,
 )
 
-import time
-from bot.config import API_ID, API_HASH, user_bots, user_bots_last_used
-
 # Upload size limits
-BOT_MAX_FILE_SIZE  = 2_000_000_000   # 2 GB  — hard cap for bot accounts
-PART_SAFE_SIZE     = 1_990_000_000   # ~1.99 GB — safe split boundary (free account)
-
-
-# --- Per-user bot management ---
-# Each user registers their own @BotFather bot via /setbot. We instantiate
-# their bot Client lazily on first use and keep it cached. Their bot is the
-# one that performs all uploads and copies — the shared owner bot only routes
-# commands and never uploads bytes.
-
-_user_bot_locks: dict = {}
-
-
-def _bot_lock_for(user_id: int) -> asyncio.Lock:
-    lock = _user_bot_locks.get(user_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _user_bot_locks[user_id] = lock
-    return lock
-
-
-async def validate_bot_token(bot_token: str):
-    """Spin up a temporary Client to confirm the token is valid.
-    Returns the bot's `me` object on success, raises on failure.
-    """
-    probe = Client(
-        f"probe_{bot_token.split(':')[0]}",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=bot_token,
-        in_memory=True,
-        no_updates=True,
-        workers=4,
-    )
-    try:
-        await asyncio.wait_for(probe.start(), timeout=20)
-        me = await asyncio.wait_for(probe.get_me(), timeout=10)
-        logging.info(f"Bot token validated: @{me.username if me.username else me.id}")
-        return me
-    finally:
-        try:
-            await asyncio.wait_for(probe.stop(), timeout=10)
-        except Exception:
-            pass
-
-
-async def get_user_bot(user_id: int):
-    """Return the user's started bot Client, or None if they haven't run /setbot.
-    Lazily instantiates and starts on first call; cached afterwards.
-    Re-raises AccessTokenExpired/Invalid so callers can show a user-facing message.
-    """
-    cached = user_bots.get(user_id)
-    if cached is not None:
-        # Fix 5: verify the cached client is still connected; evict and re-instantiate if not.
-        try:
-            if not cached.is_connected:
-                logging.warning(f"Cached user bot for {user_id} is disconnected — evicting and reconnecting")
-                user_bots.pop(user_id, None)
-                user_bots_last_used.pop(user_id, None)
-                cached = None
-            else:
-                user_bots_last_used[user_id] = time.time()
-                return cached
-        except Exception:
-            user_bots.pop(user_id, None)
-            user_bots_last_used.pop(user_id, None)
-            cached = None
-
-    from bot.database import get_bot_token  # lazy to avoid circular import
-    bot_token = await get_bot_token(user_id)
-    if not bot_token:
-        return None
-
-    async with _bot_lock_for(user_id):
-        cached = user_bots.get(user_id)
-        if cached is not None:
-            return cached
-        client = Client(
-            f"user_bot_{user_id}",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            bot_token=bot_token,
-            in_memory=True,
-            no_updates=True,
-            sleep_threshold=30,
-            workers=4,
-        )
-        try:
-            await asyncio.wait_for(client.start(), timeout=30)
-        except (AccessTokenExpired, AccessTokenInvalid) as e:
-            # Fix 4: re-raise so batch/mlinks callers can show a clear user-facing message.
-            logging.error(f"Bot token invalid for user {user_id}: {type(e).__name__} — clearing stored token")
-            from bot.database import remove_bot_token
-            await remove_bot_token(user_id)
-            raise
-        except Exception as e:
-            logging.error(f"Failed to start user bot for {user_id}: {e!r}")
-            return None
-        user_bots[user_id] = client
-        user_bots_last_used[user_id] = time.time()
-        logging.info(f"Started per-user bot client for user {user_id}")
-        return client
-
-
-async def stop_user_bot(user_id: int):
-    """Stop & evict the cached bot client. Call from /rembot."""
-    client = user_bots.pop(user_id, None)
-    if client is not None:
-        logging.info(f"Stopping user bot for user {user_id}")
-        try:
-            await client.stop()
-        except Exception:
-            pass
-    _user_bot_locks.pop(user_id, None)
+BOT_MAX_FILE_SIZE  = 2_000_000_000   # 2 GB — hard cap for bot accounts
+PART_SAFE_SIZE     = 1_990_000_000   # ~1.99 GB — safe split boundary for bot uploads
 
 
 def _parse_media_info_sync(path: str) -> tuple[int, int, int]:
@@ -232,16 +116,6 @@ def truncate_caption(caption, max_length=1024):
         return ""
     s = str(caption)
     return s if len(s) <= max_length else s[:max_length - 3] + "..."
-
-
-async def check_user_premium(user_client) -> bool:
-    """Return True if the user's Telegram account has an active Premium subscription."""
-    try:
-        me = await user_client.get_me()
-        return bool(getattr(me, "is_premium", False))
-    except Exception as e:
-        logging.warning(f"check_user_premium failed: {e!r} — treating as non-premium")
-        return False
 
 
 _SPLIT_BUFFER = 16 * 1024 * 1024  # 16 MB read buffer — avoids loading GB into RAM
