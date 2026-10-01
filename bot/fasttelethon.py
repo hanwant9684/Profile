@@ -17,7 +17,6 @@ import logging
 import math
 import os
 from pyrogram import StopTransmission
-from bot.transfer import cleanup_download_artifacts, client_download_semaphore
 
 logger = logging.getLogger(__name__)
 
@@ -158,31 +157,26 @@ async def download_file_fast(
 
     part_paths = [f"{out_path}.seg{i}" for i in range(len(segments))]
     downloaded_ref = [0]   # shared byte counter across workers
-    client_slot = client_download_semaphore(client)
-    client_slot_acquired = False
-    tasks = []
-    completed = False
+
+    tasks = [
+        asyncio.ensure_future(_download_segment(
+            client=client,
+            message=message,
+            start_offset=seg[0],
+            chunk_size=request_size,
+            n_chunks=seg[1],
+            out_path=part_paths[i],
+            file_size=file_size,
+            downloaded_ref=downloaded_ref,
+            progress_callback=progress_callback,
+        ))
+        for i, seg in enumerate(segments)
+    ]
     try:
-        await client_slot.acquire()
-        client_slot_acquired = True
-        tasks = [
-            asyncio.ensure_future(_download_segment(
-                client=client,
-                message=message,
-                start_offset=start_offset,
-                chunk_size=request_size,
-                n_chunks=n_chunks,
-                out_path=part_paths[i],
-                file_size=file_size,
-                downloaded_ref=downloaded_ref,
-                progress_callback=progress_callback,
-            ))
-            for i, (start_offset, n_chunks) in enumerate(segments)
-        ]
         # Run all segment workers in parallel; cancel all if any one fails or is cancelled
         try:
             await asyncio.gather(*tasks)
-        except BaseException:
+        except Exception:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -201,18 +195,13 @@ async def download_file_fast(
         logger.debug(
             "Fast-TL download complete: %s (%.1f MB)", out_path, file_size / 1_000_000
         )
-        if os.path.getsize(out_path) != file_size:
-            raise IOError(
-                f"Incomplete download: expected {file_size} bytes, "
-                f"got {os.path.getsize(out_path)}"
-            )
-        completed = True
         return out_path
 
     finally:
         # Always clean up part files, even on error
-        cleanup_download_artifacts(*part_paths)
-        if not completed:
-            cleanup_download_artifacts(out_path)
-        if client_slot_acquired:
-            client_slot.release()
+        for part_path in part_paths:
+            try:
+                if os.path.exists(part_path):
+                    os.remove(part_path)
+            except Exception:
+                pass
