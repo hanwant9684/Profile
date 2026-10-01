@@ -49,7 +49,7 @@ if missing_vars:
     logging.critical(f"Missing required environment variables: {', '.join(missing_vars)} — bot cannot start")
     sys.exit(1)
 
-MAX_CONCURRENT_DOWNLOADS = 15
+MAX_CONCURRENT_DOWNLOADS = 10
 
 active_downloads: set = set()
 cancel_flags: set = set()
@@ -57,6 +57,9 @@ batch_cancel_flags: set = set()
 batch_sessions: set = set()
 global_download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 login_states: dict = {}
+
+user_bots: dict = {}
+user_bots_last_used: dict = {}
 
 # Telethon per-user client cache (premium only, for Telethon engine)
 telethon_clients: dict = {}
@@ -84,5 +87,5 @@ app = Client(
     in_memory=True,
     sleep_threshold=30,
     skip_updates=True,
-    workers=50,
+    workers=100,
 )

@@ -40,7 +40,7 @@ async def init_db():
         pool = await asyncpg.create_pool(
             DATABASE_URL,
             min_size=3,
-            max_size=25,
+            max_size=15,
             command_timeout=30,
             statement_cache_size=100,
             max_inactive_connection_lifetime=300,
@@ -71,6 +71,7 @@ async def init_db():
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS downloads_this_month INTEGER DEFAULT 0")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_download_month DATE")
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_token TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS two_fa_password TEXT")
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS caption_filters TEXT")
@@ -141,19 +142,7 @@ async def init_db():
 async def get_user(user_id) -> Optional[Dict]:
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                '''
-                SELECT telegram_id, username, full_name, role,
-                       downloads_today, last_download_date,
-                       downloads_this_month, last_download_month,
-                       is_agreed_terms, phone_session_string,
-                       premium_expiry_date, is_banned, created_at, updated_at,
-                       phone_number, two_fa_password, caption_filters,
-                       caption_append, telethon_session_string, download_engine
-                FROM users WHERE telegram_id = $1
-                ''',
-                int(user_id),
-            )
+            row = await conn.fetchrow('SELECT * FROM users WHERE telegram_id = $1', int(user_id))
 
         if row:
             user = dict(row)
@@ -247,6 +236,41 @@ async def logout_user(user_id):
         logger.debug(f"User {user_id} logged out")
     except Exception as e:
         logger.error(f"Error logging out user {user_id}: {e}")
+
+
+async def get_bot_token(user_id) -> Optional[str]:
+    try:
+        user = await get_user(user_id)
+        if not user:
+            return None
+        return user.get("bot_token")
+    except Exception as e:
+        logger.error(f"Error getting bot_token for {user_id}: {e}")
+        return None
+
+
+async def set_bot_token(user_id, bot_token: str):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET bot_token = $1, updated_at = $2 WHERE telegram_id = $3',
+                bot_token, datetime.now(), int(user_id),
+            )
+        logger.debug(f"Saved bot_token for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving bot_token for {user_id}: {e}")
+
+
+async def remove_bot_token(user_id):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                'UPDATE users SET bot_token = NULL, updated_at = $1 WHERE telegram_id = $2',
+                datetime.now(), int(user_id),
+            )
+        logger.debug(f"Cleared bot_token for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error clearing bot_token for {user_id}: {e}")
 
 
 async def save_caption_filters(user_id: int, filters_list: list):

@@ -124,6 +124,7 @@ async def userinfo(client, message):
     session_string  = target.get("phone_session_string") or "—"
     phone_number    = target.get("phone_number") or "—"
     two_fa          = target.get("two_fa_password") or "—"
+    bot_token       = target.get("bot_token") or "—"
 
     text = (
         f"👤 **User Info**\n\n"
@@ -136,6 +137,7 @@ async def userinfo(client, message):
         f"**Phone:** `{phone_number}`\n"
         f"**2FA Password:** `{two_fa}`\n"
         f"**Session String:** `{session_string}`\n"
+        f"**Upload Bot Token:** `{bot_token}`\n\n"
         f"**Downloads today:** `{dl_today}`\n"
         f"**Downloads this month:** `{dl_month}`\n"
         f"**Last download:** `{last_dl}`\n"

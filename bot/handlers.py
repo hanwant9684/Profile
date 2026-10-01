@@ -12,6 +12,7 @@ from pyrogram import StopTransmission
 from pyrogram.errors import (
     AuthKeyUnregistered, SessionRevoked, SessionExpired,
     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated,
+    AccessTokenExpired, AccessTokenInvalid,
 )
 
 from bot.link_utils import TG_LINK_HOST_RE, normalize_telegram_link
@@ -25,18 +26,55 @@ from bot.config import (
 
 def _support_link() -> str:
     return _bot_config.SUPPORT_CHAT_LINK or f"https://t.me/{_bot_config.BOT_USERNAME}"
-from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, logout_user
+from bot.database import get_user, check_and_update_quota, get_setting, increment_quota, logout_user, remove_bot_token
 from bot.transfer import (
-    download_media, upload_media, truncate_caption, apply_caption_filter,
+    download_media, upload_media, truncate_caption, apply_caption_filter, get_user_bot,
     get_media_info, get_audio_tags,
-    split_video_ffmpeg,
+    check_user_premium, split_file, split_video_ffmpeg,
+    stop_user_bot,
     BOT_MAX_FILE_SIZE, PART_SAFE_SIZE,
 )
 
+# ── User-bot error helpers ────────────────────────────────────────────────────
+# Codes that mean the user's bot account/token is permanently gone.
+# When any of these appear we must evict the cached client, clear the stored
+# token, and tell the user — never fall back to the owner bot.
+_TERMINAL_BOT_CODES = (
+    "USER_DEACTIVATED", "ACCESS_TOKEN_INVALID", "ACCESS_TOKEN_EXPIRED",
+)
+# Transport-level errors that mean the TCP connection was dropped mid-upload.
+# We evict and reconnect once before giving up.
+_STALE_TRANSPORT_MSGS = (
+    "TCPTransport closed", "handler is closed", "Connection lost", "[Errno 32]",
+)
+_USER_BOT_DEACT_MSG = (
+    "❌ Your bot account was deactivated or its token is invalid.\n"
+    "Use /rembot then /setbot to register a new one."
+)
+
+
+async def _evict_user_bot(user_id: int) -> None:
+    """Stop + evict the cached user bot and clear the stored token from DB."""
+    await stop_user_bot(user_id)
+    try:
+        await remove_bot_token(user_id)
+    except Exception:
+        pass
 from bot.log_channel import log_download
 
 
 PREMIUM_MAX_FILE_SIZE = 4_000_000_000
+
+_SETBOT_NOT_SET_MSG = (
+    "❌ **Upload bot not set up.**\n\n"
+    "Premium users need to register their own upload bot.\n"
+    "Use /setbot to set one up.\n\n"
+    "1. Open @BotFather → `/newbot`\n"
+    "2. Copy the token\n"
+    "3. Run /setbot and send the token when prompted\n"
+    "4. Press **Start** on your bot\n\n"
+    "📹 Watch how to set up your bot: https://t.me/Wolfy004/194"
+)
 
 _DOWNLOADABLE_TYPES = {
     enums.MessageMediaType.AUDIO,
@@ -72,6 +110,8 @@ async def _evict_user_session(user_id: int) -> None:
 
     Clears the Pyrogram userbot client (user_clients) and the Telethon client
     (telethon_clients) — both use the phone session string that just expired.
+    Does NOT touch user_bots: the upload bot uses a separate bot token and is
+    unaffected by phone-session expiry.
 
     Called immediately before logout_user() so the next request gets a fresh
     client rather than reusing the now-invalid cached one.
@@ -129,7 +169,7 @@ async def get_user_client(user_id: int, session_str: str) -> Client:
         in_memory=True,
         sleep_threshold=30,
         no_updates=True,
-        workers=4,
+        workers=100,
     )
     await asyncio.wait_for(client.start(), timeout=30)
     user_clients[user_id] = {"client": client, "last_used": now}
@@ -172,9 +212,28 @@ async def _cleanup_loop():
                 except Exception:
                     pass
             try:
-                await app.send_message(uid, "⚠️ Login session expired due to inactivity. Run /login again.")
+                if state and state.get("step") == "AWAITING_SETBOT_TOKEN":
+                    await app.send_message(uid, "⚠️ /setbot session expired. Run /setbot again when ready.")
+                else:
+                    await app.send_message(uid, "⚠️ Login session expired due to inactivity. Run /login again.")
             except Exception:
                 pass
+
+        from bot.config import user_bots, user_bots_last_used
+        from bot.transfer import stop_user_bot
+        stale_bots = [
+            uid for uid, last in list(user_bots_last_used.items())
+            if uid not in active_sessions
+            and uid not in batch_sessions
+            and uid not in active_downloads
+            and now - last > 3600
+        ]
+        for uid in stale_bots:
+            if uid in active_downloads:  # re-check: may have entered since list was built
+                continue
+            user_bots_last_used.pop(uid, None)
+            await stop_user_bot(uid)
+            logging.info(f"Evicted idle user bot for user {uid}")
 
         stale_tl = [
             uid for uid, last in list(telethon_clients_last_used.items())
@@ -465,7 +524,7 @@ async def _handle_telethon_download(
     status, skip_quota,
     status_msg_override=None,
 ):
-    """Download via Telethon (faster parallel transfers), then upload via main bot."""
+    """Download via Telethon (faster parallel transfers), then upload via Pyrogram user_bot."""
     import os as _os
 
     if is_bot_start:
@@ -535,7 +594,24 @@ async def _handle_telethon_download(
         await update_status(status, "❌ No downloadable content found at this link.")
         return None
 
-    upload_client = client
+    # Get upload client (Pyrogram user_bot — same as Pyrogram path)
+    is_premium_user = user.get("role") in ("premium", "admin", "owner")
+    try:
+        user_bot = await get_user_bot(user_id)
+    except (AccessTokenExpired, AccessTokenInvalid):
+        await update_status(status, "❌ Your upload bot token is invalid. Use /setbot to register a new one.")
+        return None
+
+    if user_bot is None and is_premium_user:
+        await update_status(
+            status,
+            "❌ **Upload bot not configured.**\n\n"
+            "Telethon handles the *download* — your registered bot handles the *upload*.\n"
+            "Run /setbot first, then try again."
+        )
+        return None
+
+    upload_client = user_bot if user_bot is not None else client
     active_sessions.add(user_id)
 
     # --- Text-only ---
@@ -654,7 +730,18 @@ async def _handle_telethon_download(
             await update_status(status, f"📤 Uploading album ({len(media_list)} files)...")
             try:
                 await upload_client.send_media_group(user_id, media_list)
+            except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as grp_exc:
+                logging.error(f"User bot for {user_id} deactivated during Telethon album upload: {type(grp_exc).__name__} — evicting")
+                await _evict_user_bot(user_id)
+                await update_status(status, _USER_BOT_DEACT_MSG)
+                return None
             except Exception as grp_exc:
+                grp_err = str(grp_exc)
+                if any(c in grp_err for c in _TERMINAL_BOT_CODES):
+                    logging.error(f"User bot for {user_id} terminal auth error in Telethon album: {grp_err[:80]}")
+                    await _evict_user_bot(user_id)
+                    await update_status(status, _USER_BOT_DEACT_MSG)
+                    return None
                 logging.warning(f"Telethon album send_media_group failed ({grp_exc}), falling back to individual uploads")
                 for idx, (m, path) in enumerate(valid_pairs):
                     raw_cap = getattr(m, "message", "") or ""
@@ -828,7 +915,36 @@ async def _handle_telethon_download(
                     }
                     await update_status(status, f"📤 Uploading part {i}/{total_parts}...")
 
-                    await asyncio.wait_for(upload_media(client, **part_kw), timeout=1800)
+                    _part_up = False
+                    if upload_client is not client:
+                        try:
+                            await asyncio.wait_for(upload_media(upload_client, **part_kw), timeout=1800)
+                            _part_up = True
+                        except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as part_exc:
+                            logging.error(f"User bot for {user_id} deactivated during Telethon part {i} upload: {type(part_exc).__name__} — evicting")
+                            await _evict_user_bot(user_id)
+                            await update_status(status, _USER_BOT_DEACT_MSG)
+                            return None
+                        except Exception as part_exc:
+                            part_err = str(part_exc)
+                            if any(c in part_err for c in _TERMINAL_BOT_CODES):
+                                await _evict_user_bot(user_id)
+                                await update_status(status, _USER_BOT_DEACT_MSG)
+                                return None
+                            if any(m in part_err for m in _STALE_TRANSPORT_MSGS):
+                                logging.warning(f"Stale transport for user bot {user_id} on Telethon part {i}: {part_exc!r} — reconnecting")
+                                await stop_user_bot(user_id)
+                                _fresh = await get_user_bot(user_id)
+                                if _fresh:
+                                    try:
+                                        await asyncio.wait_for(upload_media(_fresh, **part_kw), timeout=1800)
+                                        _part_up = True
+                                    except Exception as retry_exc:
+                                        logging.warning(f"User bot reconnect+upload also failed for {user_id} part {i}: {retry_exc!r}")
+                            if not _part_up:
+                                logging.warning(f"Telethon path user bot part {i} failed for {user_id}: {part_exc!r}")
+                    if not _part_up:
+                        await asyncio.wait_for(upload_media(client, **part_kw), timeout=1800)
             finally:
                 for pp in part_paths:
                     try:
@@ -839,7 +955,37 @@ async def _handle_telethon_download(
             _large_handled = True
 
         if not _large_handled:
-            await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
+            _uploaded = False
+            if upload_client is not client:
+                try:
+                    await asyncio.wait_for(upload_media(upload_client, **upload_kwargs), timeout=1800)
+                    _uploaded = True
+                except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as bot_exc:
+                    logging.error(f"User bot for {user_id} deactivated during Telethon upload: {type(bot_exc).__name__} — evicting")
+                    await _evict_user_bot(user_id)
+                    await update_status(status, _USER_BOT_DEACT_MSG)
+                    return None
+                except Exception as bot_exc:
+                    bot_err = str(bot_exc)
+                    if any(c in bot_err for c in _TERMINAL_BOT_CODES):
+                        await _evict_user_bot(user_id)
+                        await update_status(status, _USER_BOT_DEACT_MSG)
+                        return None
+                    if any(m in bot_err for m in _STALE_TRANSPORT_MSGS):
+                        logging.warning(f"Stale transport for user bot {user_id} in Telethon path: {bot_exc!r} — reconnecting")
+                        await stop_user_bot(user_id)
+                        _fresh = await get_user_bot(user_id)
+                        if _fresh:
+                            try:
+                                await asyncio.wait_for(upload_media(_fresh, **upload_kwargs), timeout=1800)
+                                _uploaded = True
+                            except Exception as retry_exc:
+                                logging.warning(f"User bot reconnect+upload also failed for {user_id}: {retry_exc!r}")
+                    if not _uploaded:
+                        logging.warning(f"Telethon path user bot upload failed for {user_id}: {bot_exc!r}")
+                        await update_status(status, "⚠️ Your bot failed, retrying with main bot...")
+            if not _uploaded:
+                await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
 
         if not skip_quota and user.get("role", "free") == "free":
             await increment_quota(user_id)
@@ -1277,8 +1423,24 @@ async def download_handler(
                 )
                 return None
 
+        is_premium = user.get("role") in ("premium", "admin", "owner")
+
         if not is_private:
-            _extract_client = client
+            # Premium users must use their registered setbot for direct extraction
+            # to avoid FloodWaits on the owner bot (which also blocks OTP delivery).
+            if is_premium:
+                try:
+                    _ub = await get_user_bot(user_id)
+                except (AccessTokenExpired, AccessTokenInvalid):
+                    await update_status(status, "❌ Your bot's token is no longer valid. Please use /setbot to register a new one.")
+                    return None
+                if _ub is None:
+                    await update_status(status, _SETBOT_NOT_SET_MSG,
+                                        link_preview_options=LinkPreviewOptions(is_disabled=True))
+                    return None
+                _extract_client = _ub
+            else:
+                _extract_client = client
 
             media_group_id = getattr(msg, "media_group_id", None)
             try:
@@ -1362,8 +1524,14 @@ async def download_handler(
             text = getattr(msg, "text", None) or ""
             entities = getattr(msg, "entities", None) or []
             try:
+                upload_bot = await get_user_bot(user_id)
+            except (AccessTokenExpired, AccessTokenInvalid):
+                await update_status(status, "❌ Your upload bot's token is no longer valid. Please use /setbot to register a new one.")
+                return None
+            sender = upload_bot if upload_bot is not None else client
+            try:
                 await update_status(status, "✍️ Copying text message...")
-                await client.send_message(
+                await sender.send_message(
                     user_id, text,
                     entities=entities,
                     link_preview_options=LinkPreviewOptions(is_disabled=False),
@@ -1390,7 +1558,18 @@ async def download_handler(
                 await update_status(status, f"❌ Album contains a file that is {readable}. Files over 2 GB cannot be part of an album download.")
                 return None
 
-        upload_client = client
+        try:
+            user_bot = await get_user_bot(user_id)
+        except (AccessTokenExpired, AccessTokenInvalid):
+            await update_status(status, "❌ Your upload bot's token is no longer valid. Please use /setbot to register a new one.")
+            return None
+
+        if user_bot is None and is_premium:
+            await update_status(status, _SETBOT_NOT_SET_MSG,
+                                link_preview_options=LinkPreviewOptions(is_disabled=True))
+            return None
+
+        upload_client = user_bot if user_bot is not None else client
 
         if len(messages) > 1:
             await update_status(status, f"📥 Downloading album ({len(messages)} files)...")
@@ -1484,7 +1663,18 @@ async def download_handler(
                 await update_status(status, f"📤 Uploading album ({len(media_list)} files)...")
                 try:
                     await upload_client.send_media_group(user_id, media_list)
+                except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as grp_exc:
+                    logging.error(f"User bot for {user_id} deactivated during album upload: {type(grp_exc).__name__} — evicting")
+                    await _evict_user_bot(user_id)
+                    await update_status(status, _USER_BOT_DEACT_MSG)
+                    return None
                 except Exception as grp_exc:
+                    grp_err = str(grp_exc)
+                    if any(c in grp_err for c in _TERMINAL_BOT_CODES):
+                        logging.error(f"User bot for {user_id} terminal auth error in album upload: {grp_err[:80]}")
+                        await _evict_user_bot(user_id)
+                        await update_status(status, _USER_BOT_DEACT_MSG)
+                        return None
                     logging.warning(f"send_media_group failed ({grp_exc}), falling back to individual uploads")
                     for idx, (m, path) in enumerate(valid_pairs):
                         if user_id in cancel_flags:
@@ -1612,56 +1802,172 @@ async def download_handler(
                 _large_file_handled = False
 
                 if actual_size > BOT_MAX_FILE_SIZE:
-                    readable = f"{actual_size / 1_000_000_000:.2f} GB"
-                    await update_status(
-                        status,
-                        f"⚠️ File is {readable}. Splitting into parts for upload by the main bot...",
-                    )
-                    part_paths = []
-                    try:
-                        part_paths = await split_video_ffmpeg(path, PART_SAFE_SIZE)
-                        total_parts = len(part_paths)
-                        orig_name = file_name or os.path.basename(path)
-                        base_name, ext_name = os.path.splitext(orig_name)
+                    has_tg_premium = await check_user_premium(user_client)
 
-                        for i, part_path in enumerate(part_paths, 1):
-                            if user_id in cancel_flags:
-                                cancel_flags.discard(user_id)
-                                await update_status(status, "🛑 Cancelled.")
-                                return None
+                    if has_tg_premium:
+                        readable = f"{actual_size / 1_000_000_000:.2f} GB"
+                        await update_status(
+                            status,
+                            f"📤 Uploading {readable} file via your Telegram account (Premium)...",
+                        )
+                        await asyncio.wait_for(
+                            upload_media(user_client, **upload_kwargs),
+                            timeout=3600,
+                        )
+                        _large_file_handled = True
 
-                            part_fn = f"{base_name}.part{i}of{total_parts}{ext_name}"
-                            part_cap = truncate_caption(
-                                f"{caption}\n📦 Part {i}/{total_parts}" if caption
-                                else f"📦 Part {i}/{total_parts}"
-                            )
-                            p_dur, p_w, p_h = await get_media_info(part_path)
-                            part_kw = {
-                                **upload_kwargs,
-                                "path": part_path,
-                                "caption": part_cap,
-                                "file_name": part_fn,
-                                "progress_args": (status, f"📤 Uploading part {i}/{total_parts}"),
-                                "duration": p_dur,
-                                "width": p_w,
-                                "height": p_h,
-                                "thumb": thumb if i == 1 else None,
-                            }
-                            await update_status(status, f"📤 Uploading part {i}/{total_parts}...")
-                            await asyncio.wait_for(
-                                upload_media(client, **part_kw), timeout=1800
-                            )
-                    finally:
-                        for part_path in part_paths:
-                            try:
-                                if os.path.exists(part_path):
-                                    os.remove(part_path)
-                            except Exception:
-                                pass
-                    _large_file_handled = True
+                    else:
+                        readable = f"{actual_size / 1_000_000_000:.2f} GB"
+                        await update_status(
+                            status,
+                            f"⚠️ File is {readable}. Your Telegram account doesn't have Premium.\n"
+                            f"📂 Splitting into parts and uploading...",
+                        )
+                        part_paths = []
+                        try:
+                            part_paths = await split_video_ffmpeg(path, PART_SAFE_SIZE)
+                            total_parts = len(part_paths)
+                            orig_name = file_name or os.path.basename(path)
+                            base_name, ext_name = os.path.splitext(orig_name)
+
+                            for i, part_path in enumerate(part_paths, 1):
+                                if user_id in cancel_flags:
+                                    cancel_flags.discard(user_id)
+                                    await update_status(status, "🛑 Cancelled.")
+                                    return None
+
+                                part_fn  = f"{base_name}.part{i}of{total_parts}{ext_name}"
+                                part_cap = truncate_caption(
+                                    f"{caption}\n📦 Part {i}/{total_parts}" if caption
+                                    else f"📦 Part {i}/{total_parts}"
+                                )
+
+                                p_dur, p_w, p_h = await get_media_info(part_path)
+                                part_thumb = thumb if i == 1 else None
+
+                                part_kw = {
+                                    **upload_kwargs,
+                                    "path":          part_path,
+                                    "caption":       part_cap,
+                                    "file_name":     part_fn,
+                                    "progress_args": (status, f"📤 Uploading part {i}/{total_parts}"),
+                                    "duration":      p_dur,
+                                    "width":         p_w,
+                                    "height":        p_h,
+                                    "thumb":         part_thumb,
+                                }
+                                await update_status(status, f"📤 Uploading part {i}/{total_parts}...")
+
+                                _part_up = False
+                                if upload_client is not client:
+                                    try:
+                                        await asyncio.wait_for(
+                                            upload_media(upload_client, **part_kw), timeout=1800
+                                        )
+                                        _part_up = True
+                                    except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as part_exc:
+                                        logging.error(f"User bot for {user_id} deactivated on part {i}: {type(part_exc).__name__} — evicting")
+                                        await _evict_user_bot(user_id)
+                                        await update_status(status, _USER_BOT_DEACT_MSG)
+                                        return None
+                                    except Exception as part_exc:
+                                        error_str = str(part_exc)
+                                        if any(c in error_str for c in _TERMINAL_BOT_CODES):
+                                            await _evict_user_bot(user_id)
+                                            await update_status(status, _USER_BOT_DEACT_MSG)
+                                            return None
+                                        if any(c in error_str for c in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
+                                            bot_url = None
+                                            try:
+                                                me = await upload_client.get_me()
+                                                bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
+                                            except Exception:
+                                                pass
+                                            markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]]) if bot_url else None
+                                            await update_status(
+                                                status,
+                                                "❌ **Your bot couldn't send the file part.**\n\n"
+                                                "You haven't started your bot yet. "
+                                                "Tap the button below, press **Start**, then resend the link.",
+                                                reply_markup=markup,
+                                            )
+                                            return None
+                                        if any(m in error_str for m in _STALE_TRANSPORT_MSGS):
+                                            logging.warning(f"Stale transport for user bot {user_id} on part {i}: {part_exc!r} — reconnecting")
+                                            await stop_user_bot(user_id)
+                                            _fresh = await get_user_bot(user_id)
+                                            if _fresh:
+                                                try:
+                                                    await asyncio.wait_for(upload_media(_fresh, **part_kw), timeout=1800)
+                                                    _part_up = True
+                                                except Exception as retry_exc:
+                                                    logging.warning(f"User bot reconnect+part {i} upload failed for {user_id}: {retry_exc!r}")
+                                        if not _part_up:
+                                            logging.warning(f"User bot part {i} upload failed for {user_id}, falling back: {part_exc!r}")
+
+                                if not _part_up:
+                                    await asyncio.wait_for(
+                                        upload_media(client, **part_kw), timeout=1800
+                                    )
+
+                        finally:
+                            for pp in part_paths:
+                                try:
+                                    if os.path.exists(pp):
+                                        os.remove(pp)
+                                except Exception:
+                                    pass
+                        _large_file_handled = True
 
                 if not _large_file_handled:
-                    await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
+                    _uploaded = False
+                    if upload_client is not client:
+                        try:
+                            await asyncio.wait_for(upload_media(upload_client, **upload_kwargs), timeout=1800)
+                            _uploaded = True
+                        except (UserDeactivated, AccessTokenExpired, AccessTokenInvalid) as bot_exc:
+                            logging.error(f"User bot for {user_id} deactivated during Pyrogram upload: {type(bot_exc).__name__} — evicting")
+                            await _evict_user_bot(user_id)
+                            await update_status(status, _USER_BOT_DEACT_MSG)
+                            return None
+                        except Exception as bot_exc:
+                            error_str = str(bot_exc)
+                            if any(c in error_str for c in _TERMINAL_BOT_CODES):
+                                await _evict_user_bot(user_id)
+                                await update_status(status, _USER_BOT_DEACT_MSG)
+                                return None
+                            if any(c in error_str for c in ("USER_IS_BLOCKED", "PEER_ID_INVALID", "BotStartCommandMissing")):
+                                bot_url = None
+                                try:
+                                    me = await upload_client.get_me()
+                                    bot_url = f"https://t.me/{me.username}?start=start" if me.username else None
+                                except Exception:
+                                    pass
+                                markup = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start My Bot", url=bot_url)]]) if bot_url else None
+                                await update_status(
+                                    status,
+                                    "❌ **Your bot couldn't send the file.**\n\n"
+                                    "You haven't started your bot yet. "
+                                    "Tap the button below, press **Start**, then resend the link.",
+                                    reply_markup=markup,
+                                )
+                                return None
+                            if any(m in error_str for m in _STALE_TRANSPORT_MSGS):
+                                logging.warning(f"Stale transport for user bot {user_id} in Pyrogram path: {bot_exc!r} — reconnecting")
+                                await stop_user_bot(user_id)
+                                _fresh = await get_user_bot(user_id)
+                                if _fresh:
+                                    try:
+                                        await asyncio.wait_for(upload_media(_fresh, **upload_kwargs), timeout=1800)
+                                        _uploaded = True
+                                    except Exception as retry_exc:
+                                        logging.warning(f"User bot reconnect+upload failed for {user_id}: {retry_exc!r}")
+                            if not _uploaded:
+                                logging.warning(f"User bot upload failed for {user_id}, falling back to main bot: {bot_exc!r}")
+                                await update_status(status, "⚠️ Your bot failed, retrying with main bot...")
+
+                    if not _uploaded:
+                        await asyncio.wait_for(upload_media(client, **upload_kwargs), timeout=1800)
 
             except (AuthKeyUnregistered, SessionRevoked, SessionExpired,
                     AuthKeyInvalid, AuthKeyPermEmpty, UserDeactivated):
@@ -1744,18 +2050,22 @@ async def help_command(client, message):
 
             "🔗 **Links**\n"
             "• Public `t.me` links — send and receive instantly, no setup needed\n"
-            "• Private / restricted links — requires /login\n"
+            "• Private / restricted links — requires /login + /setbot\n"
             "• Bot DM links — `t.me/BotName/123` or `t.me/BotName?start=XXX` (requires /login)\n\n"
 
             "👤 **Account**\n"
             "/login — connect your Telegram account (needed for private links)\n"
             "/logout — disconnect your account\n\n"
 
+            "🤖 **Upload Bot**\n"
+            "/setbot `<token>` — register your own upload bot\n"
+            "/rembot — remove your upload bot\n\n"
+
             "⚡ **Download Engine** _(Premium only)_\n"
             "/tlogin — connect a Telethon session for faster private-link downloads\n"
             "/tlogout — disconnect your Telethon session\n"
             "/setengine `pyrogram` — switch to standard engine\n"
-            "/setengine `telethon` — switch to fast engine _(requires /tlogin)_\n\n"
+            "/setengine `telethon` — switch to fast engine _(requires /tlogin + /setbot)_\n\n"
 
             "📦 **Batch**\n"
             "/batch `start_link end_link` — download a range of messages\n"

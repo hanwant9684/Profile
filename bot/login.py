@@ -5,8 +5,10 @@ from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHas
 from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import (
     get_user, create_user, save_session_string, logout_user,
+    set_bot_token, remove_bot_token, get_bot_token,
     save_phone_number, save_two_fa_password,
 )
+from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
 from bot.link_utils import TG_LINK_HOST_RE
 
@@ -52,25 +54,45 @@ async def start(client, message):
             await create_user(user_id, username, full_name)
             user = await get_user(user_id) or user
 
+    has_bot = bool(user.get("bot_token"))
     logged_in = bool(user.get("phone_session_string"))
     role = user.get("role", "free")
     role_display = role.capitalize()
+    is_premium = role in ("premium", "admin", "owner")
 
-    if not is_new_user or logged_in or role in ("premium", "admin", "owner"):
+    if not is_new_user or has_bot or logged_in or is_premium:
         buttons = []
-        if logged_in:
-            status_line = "🔐 Account connected · private links enabled"
+
+        if is_premium:
+            if has_bot and logged_in:
+                status_line = "✅ All set · private links enabled"
+            elif has_bot:
+                status_line = "🤖 Bot set · ⚠️ Connect account for private links"
+            elif logged_in:
+                status_line = "🔐 Account connected · ⚠️ Set up your bot for private links"
+            else:
+                status_line = "⚠️ Set up your bot and connect account for private links"
+            if not has_bot:
+                buttons.append([InlineKeyboardButton("🤖 Set Up Upload Bot", callback_data="onboard_setbot")])
+            if not logged_in:
+                buttons.append([InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")])
         else:
-            status_line = "⚠️ Connect your account to access private / restricted links"
-            buttons.append([InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")])
+            if logged_in:
+                status_line = "🔐 Account connected · private links enabled"
+            else:
+                status_line = "⚠️ Connect your account to access private links"
+            if not logged_in:
+                buttons.append([InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")])
 
         buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
+        needs_setup = is_premium and not (has_bot and logged_in)
 
         try:
             await message.reply(
                 f"👋 **Welcome back!**\n\n"
                 f"Role: **{role_display}**\n"
                 f"Status: {status_line}\n\n"
+                + ("📹 [Setup guide for private links](https://t.me/Wolfy004/155)\n\n" if needs_setup else "")
                 + "Send any Telegram link to download.",
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -93,12 +115,32 @@ async def start(client, message):
 
 
 # Onboarding callbacks
+@app.on_callback_query(filters.regex("onboard_skip_bot"))
+async def onboard_skip_bot(client, callback_query):
+    user_id = callback_query.from_user.id
+    login_states.pop(user_id, None)
+    try:
+        await callback_query.message.edit_text(
+            "✅ **You're all set!**\n\n"
+            "Send any public `t.me` link and the file will be delivered here.\n\n"
+            "🔒 **For private or restricted links**, use /login to connect your account."
+        )
+    except Exception as e:
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            logger.error(f"onboard_skip_bot edit error: {e}")
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+
+
 @app.on_callback_query(filters.regex("onboard_skip_login"))
 async def onboard_skip_login(client, callback_query):
     login_states.pop(callback_query.from_user.id, None)
     try:
         await callback_query.message.edit_text(
-            "✅ **You're all set for public links.**\n\n"
+            "✅ **Upload bot registered!**\n\n"
+            "Your bot is set up and public links are ready to go.\n\n"
             "🔒 When you need **private or restricted** links, run /login to connect your Telegram account."
         )
     except Exception as e:
@@ -136,6 +178,45 @@ async def onboard_login(client, callback_query):
     except Exception as e:
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"onboard_login edit error: {e}")
+    try:
+        await callback_query.answer()
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex("onboard_setbot"))
+async def onboard_setbot(client, callback_query):
+    user_id = callback_query.from_user.id
+    user = await get_user(user_id)
+    if not user or user.get("role") not in ("premium", "admin", "owner"):
+        await callback_query.answer("❌ /setbot is a Premium feature.", show_alert=True)
+        return
+
+    existing = login_states.get(user_id)
+    if existing and existing.get("step") == "AWAITING_SETBOT_TOKEN":
+        await callback_query.answer(
+            "You already have a /setbot session waiting for your token. Send it now or use /cancel_login to cancel.",
+            show_alert=True
+        )
+        return
+
+    login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
+    try:
+        await callback_query.message.edit_text(
+            "🤖 **Set Up Your Upload Bot** _(for private links)_\n\n"
+            "This is only needed for **private or restricted** links.\n"
+            "Public links are already delivered here by the main bot.\n\n"
+            "1. Open @BotFather → `/newbot`\n"
+            "2. Choose a name and username\n"
+            "3. Copy the token and paste it here\n\n"
+            "_Token looks like: `123456789:AABbCc...`_",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏭ Skip for now", callback_data="onboard_skip_bot")]
+            ])
+        )
+    except Exception as e:
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            logger.error(f"onboard_setbot edit error: {e}")
     try:
         await callback_query.answer()
     except Exception:
@@ -202,6 +283,13 @@ async def login_start(client, message):
         return
 
     if user_id in login_states:
+        existing_step = login_states[user_id].get("step", "")
+        if existing_step == "AWAITING_SETBOT_TOKEN":
+            await message.reply(
+                "⚠️ You have a /setbot session waiting for your bot token.\n"
+                "Use /cancel_login to cancel it first, then run /login."
+            )
+            return
         old_state = login_states.pop(user_id, {})
         if "client" in old_state:
             try:
@@ -219,7 +307,7 @@ async def login_start(client, message):
     )
 
 
-# Login step handler — processes PHONE / CODE / PASSWORD states
+# Login step handler — processes PHONE / CODE / PASSWORD / bot token states
 @app.on_message(
     filters.private & filters.text
     & ~filters.command([
@@ -228,7 +316,7 @@ async def login_start(client, message):
         "myinfo", "setrole", "download", "upgrade", "broadcast", "ban", "unban",
         "settings", "set_force_sub", "userinfo",
         "help", "batch", "mlinks", "stats", "killall", "premium_users",
-        "caprem", "capadd",
+        "setbot", "rembot", "caprem", "capadd",
     ])
     & ~filters.regex(TG_LINK_HOST_RE)
 )
@@ -244,6 +332,106 @@ async def handle_login_steps(client, message: Message):
 
     state = login_states[user_id]
     step = state["step"]
+
+    if step == "AWAITING_SETBOT_TOKEN":
+        state["timestamp"] = time.time()
+        token = message.text.strip()
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        _u = await get_user(user_id)
+        if not _u or _u.get("role") not in ("premium", "admin", "owner"):
+            login_states.pop(user_id, None)
+            await message.reply("❌ /setbot is only available to Premium users.")
+            return
+
+        if ":" not in token:
+            await message.reply(
+                "❌ That doesn't look like a bot token.\n"
+                "A valid token looks like: `123456789:AABbCc...`\n\n"
+                "Try again or send /cancel_login to cancel."
+            )
+            return
+
+        status = await message.reply("🔍 Validating token...")
+        try:
+            me = await validate_bot_token(token)
+        except Exception as e:
+            await status.edit_text(
+                f"❌ **Invalid token.** Telegram rejected it:\n`{e}`\n\n"
+                "Copy the full token from @BotFather and try again, or send /cancel_login to cancel."
+            )
+            return
+
+        await stop_user_bot(user_id)
+        await set_bot_token(user_id, token)
+        login_states.pop(user_id, None)
+
+        bot_username = f"@{me.username}" if me.username else str(me.id)
+        logger.info(f"Bot registered via /setbot: user={user_id} bot={bot_username}")
+        await status.edit_text(
+            f"✅ **Bot registered:** {bot_username}\n\n"
+            f"Open {bot_username} and press **Start** so it can DM you.\n"
+            "Then send any Telegram link to start downloading.\n\n"
+            "To change your bot: run /setbot again · To remove: /rembot ",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        return
+
+    if step == "AWAITING_BOT_TOKEN":
+        state["timestamp"] = time.time()
+        token = message.text.strip()
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        status = await message.reply("🔍 Validating bot token...")
+        try:
+            me = await validate_bot_token(token)
+        except Exception as e:
+            await status.edit_text(
+                f"❌ **Invalid token.** Telegram rejected it:\n`{e}`\n\n"
+                "Copy the full token from @BotFather and try again, or tap Skip.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏭ Skip for now", callback_data="onboard_skip_bot")]
+                ])
+            )
+            return
+
+        await stop_user_bot(user_id)
+        await set_bot_token(user_id, token)
+        login_states.pop(user_id, None)
+
+        bot_username = f"@{me.username}" if me.username else str(me.id)
+        logger.info(f"Bot registered via onboarding: user={user_id} bot={bot_username}")
+
+        user = await get_user(user_id)
+        if user and user.get("phone_session_string"):
+            await status.edit_text(
+                f"✅ **Bot registered:** {bot_username}\n\n"
+                f"Open {bot_username} and press **Start** so it can DM you.\n\n"
+                "🚀 **You're fully set up!** Send any Telegram link to start downloading.",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        else:
+            await status.edit_text(
+                f"✅ **Bot registered:** {bot_username}\n\n"
+                f"Open {bot_username} and press **Start** so it can DM you.\n\n"
+                "**Step 2 of 2 — Connect Your Account** _(optional)_\n"
+                "Only needed for **private or restricted** links.\n"
+                "Public links already work — you can skip this.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")],
+                    [InlineKeyboardButton("⚡ Skip — Public Links Only", callback_data="onboard_skip_login")],
+                ]),
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        return
 
     try:
         if step == "PHONE":
@@ -376,9 +564,28 @@ async def _finish_login(user_id: int, temp_client, message: Message):
     login_states.pop(user_id, None)
     logger.info(f"Login successful: user={user_id}")
 
+    user = await get_user(user_id)
+    is_premium = user and user.get("role") in ("premium", "admin", "owner")
+
+    existing_token = await get_bot_token(user_id)
+    if existing_token or not is_premium:
+        await message.reply(
+            "✅ **Account connected!**\n\n"
+            "🚀 You're all set! Send any Telegram link to start downloading."
+        )
+        return
+
+    login_states[user_id] = {"step": "AWAITING_BOT_TOKEN", "timestamp": time.time()}
     await message.reply(
         "✅ **Account connected!**\n\n"
-        "Private and restricted links are now available. Send any Telegram link to start downloading."
+        "One more step: register your upload bot.\n"
+        "This is required for downloading private / restricted links.\n\n"
+        "1. Open @BotFather → `/newbot`\n"
+        "2. Copy the token (e.g. `123456789:AABbCc...`)\n"
+        "3. Paste it here",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ Skip for now", callback_data="onboard_skip_bot")]
+        ])
     )
 
 
@@ -394,9 +601,83 @@ async def cancel_login(client, message):
             except Exception:
                 pass
         logger.info(f"Login cancelled by user {user_id}")
-        await message.reply("✅ Login process cancelled.")
+        if state.get("step") == "AWAITING_SETBOT_TOKEN":
+            await message.reply("✅ /setbot cancelled.")
+        else:
+            await message.reply("✅ Login process cancelled.")
     else:
         await message.reply("No active session to cancel.")
+
+
+# /setbot — register user's upload bot token
+@app.on_message(filters.command("setbot") & filters.private)
+async def setbot_command(client, message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    if not user:
+        await message.reply("Please run /start first.")
+        return
+
+    if user.get("role") not in ("premium", "admin", "owner"):
+        await message.reply(
+            "❌ **/setbot is a Premium feature.**\n\n"
+            "Free users are served directly by the main bot — no setup needed.\n\n"
+            "Upgrade to Premium to register your own upload bot.\n"
+            "👉 /upgrade"
+        )
+        return
+
+    existing = login_states.get(user_id)
+    if existing and existing.get("step") != "AWAITING_SETBOT_TOKEN":
+        if existing.get("step") == "AWAITING_BOT_TOKEN":
+            await message.reply(
+                "⚠️ You're already being asked for your bot token as part of setup.\n"
+                "Just send the token directly here."
+            )
+        else:
+            await message.reply(
+                "⚠️ You have an active login session in progress.\n"
+                "Use /cancel_login to cancel it first, then run /setbot again."
+            )
+        return
+
+    login_states[user_id] = {"step": "AWAITING_SETBOT_TOKEN", "timestamp": time.time()}
+    await message.reply(
+        "🤖 **Register Your Upload Bot**\n\n"
+        "Send your bot token now.\n"
+        "It looks like: `123456789:AABbCcDdEeFfGg...`\n\n"
+        "Don't have one?\n"
+        "1. Open @BotFather → /newbot\n"
+        "2. Follow the steps and copy the token\n"
+        "3. Paste it here\n\n"
+        "📹 **Watch how to set up your bot:** https://t.me/Wolfy004/194\n\n"
+        "⏱ This prompt expires in 5 minutes.\n"
+        "Send /cancel_login to cancel.",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+
+
+# /rembot — remove user's upload bot token
+@app.on_message(filters.command("rembot") & filters.private)
+async def rembot_command(client, message: Message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    if not user or user.get("role") not in ("premium", "admin", "owner"):
+        await message.reply("❌ /rembot is only available to Premium users.")
+        return
+
+    token = await get_bot_token(user_id)
+    if not token:
+        await message.reply("ℹ️ No bot registered. Use /setbot to add one.")
+        return
+
+    await stop_user_bot(user_id)
+    await remove_bot_token(user_id)
+    logger.info(f"Bot removed via /rembot: user={user_id}")
+    await message.reply(
+        "✅ Upload bot removed.\n\n"
+        "You won't be able to download anything until you run /setbot again."
+    )
 
 
 # /logout
