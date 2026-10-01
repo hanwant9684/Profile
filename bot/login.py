@@ -11,6 +11,7 @@ from bot.database import (
 from bot.transfer import validate_bot_token, stop_user_bot
 from bot.logger import logger
 from bot.link_utils import TG_LINK_HOST_RE
+from bot.status_utils import is_stale_status_error
 
 
 # /start
@@ -126,7 +127,7 @@ async def onboard_skip_bot(client, callback_query):
             "🔒 **For private or restricted links**, use /login to connect your account."
         )
     except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
+        if not is_stale_status_error(e):
             logger.error(f"onboard_skip_bot edit error: {e}")
     try:
         await callback_query.answer()
@@ -144,7 +145,7 @@ async def onboard_skip_login(client, callback_query):
             "🔒 When you need **private or restricted** links, run /login to connect your Telegram account."
         )
     except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
+        if not is_stale_status_error(e):
             logger.error(f"onboard_skip_login edit error: {e}")
     try:
         await callback_query.answer()
@@ -176,7 +177,7 @@ async def onboard_login(client, callback_query):
             "_Type /cancel_login to abort at any time._"
         )
     except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
+        if not is_stale_status_error(e):
             logger.error(f"onboard_login edit error: {e}")
     try:
         await callback_query.answer()
@@ -215,7 +216,7 @@ async def onboard_setbot(client, callback_query):
             ])
         )
     except Exception as e:
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
+        if not is_stale_status_error(e):
             logger.error(f"onboard_setbot edit error: {e}")
     try:
         await callback_query.answer()

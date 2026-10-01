@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 from pyrogram.types import LinkPreviewOptions
+from bot.task_supervisor import create_background_task
 
 _RAW = os.environ.get("LOG_CHANNEL_ID", "").strip()
 LOG_CHANNEL_ID = (
@@ -52,6 +53,7 @@ def log_download(user_id: int, username, link: str, link_type: str, success: boo
         f"🔗 {link[:120]}"
     )
     try:
-        asyncio.create_task(_post(text))
+        asyncio.get_running_loop()
+        create_background_task(_post(text), name="log-channel-post")
     except RuntimeError:
         pass
