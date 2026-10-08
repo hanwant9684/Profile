@@ -48,7 +48,7 @@ def _plan_keyboard() -> InlineKeyboardMarkup:
     """Inline keyboard showing all available plans."""
     buttons = []
     for key, p in PLANS.items():
-        label = f"{'🔥 ' if key == '365' else '⚡ '}{p['label']}  —  ${p['usd']:.0f}  /  ₹{p['inr']}"
+        label = f"{'🔥 ' if key == '365' else '⚡ '}{p['label']}  —  ${p['usd']:.2f}  /  ₹{p['inr']}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"upg_plan_{key}")])
     buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="upg_cancel")])
     return InlineKeyboardMarkup(buttons)
@@ -69,22 +69,22 @@ def _method_keyboard(days: str) -> InlineKeyboardMarkup:
     # Crypto — Oxapay
     if _gateway_ok("oxapay"):
         rows.append([InlineKeyboardButton(
-            f"🪙 Crypto — ${p['usd']:.0f}  (BTC/ETH/USDT…)",
+            f"🪙 Crypto — ${p['usd']:.2f}  (BTC/ETH/USDT…)",
             callback_data=f"pay_oxapay_{days}"
         )])
 
     # PayPal / Card / Apple Pay — one PayPal checkout covers all
     if _gateway_ok("paypal"):
         rows.append([InlineKeyboardButton(
-            f"💲 PayPal — ${p['usd']:.0f}",
+            f"💲 PayPal — ${p['usd']:.2f}",
             callback_data=f"pay_paypal_{days}"
         )])
         rows.append([InlineKeyboardButton(
-            f"💳 Credit/Debit Card — ${p['usd']:.0f}",
+            f"💳 Credit/Debit Card — ${p['usd']:.2f}",
             callback_data=f"pay_card_{days}"
         )])
         rows.append([InlineKeyboardButton(
-            f"🍎 Apple Pay — ${p['usd']:.0f}",
+            f"🍎 Apple Pay — ${p['usd']:.2f}",
             callback_data=f"pay_apple_{days}"
         )])
 
@@ -99,11 +99,11 @@ def _plan_text() -> str:
     return (
         "💎 **Premium Plans**\n\n"
         "⚡ **Standard**\n"
-        "🔸 10 days — $3.59 / ₹300\n"
-        "🔸 30 days — $4.99 / ₹400\n"
-        "🔸 60 days — $9.99 / ₹800\n"
-        "🔸 90 days — $14.99 / ₹1200\n\n"
-        "🔥 **1 Year — $54.99 / ₹4500**\n\n"
+        f"🔸 {PLANS['10']['label']} — ${PLANS['10']['usd']:.2f} / ₹{PLANS['10']['inr']}\n"
+        f"🔸 {PLANS['30']['label']} — ${PLANS['30']['usd']:.2f} / ₹{PLANS['30']['inr']}\n"
+        f"🔸 {PLANS['60']['label']} — ${PLANS['60']['usd']:.2f} / ₹{PLANS['60']['inr']}\n"
+        f"🔸 {PLANS['90']['label']} — ${PLANS['90']['usd']:.2f} / ₹{PLANS['90']['inr']}\n\n"
+        f"🔥 **{PLANS['365']['label']} — ${PLANS['365']['usd']:.2f} / ₹{PLANS['365']['inr']}**\n\n"
         "✅ **What you get:**\n"
         "• ♾ Unlimited downloads\n"
         "• 📦 Batch up to 50 files\n"
@@ -164,7 +164,7 @@ async def on_plan_selected(client, cq: CallbackQuery):
 
     text = (
         f"💎 **{p['label']} Plan**\n\n"
-        f"💵 **Price:** ${p['usd']:.0f} USD  /  ₹{p['inr']} INR\n\n"
+        f"💵 **Price:** ${p['usd']:.2f} USD  /  ₹{p['inr']} INR\n\n"
         f"👇 **Choose your payment method:**"
     )
     await cq.edit_message_text(
@@ -225,7 +225,7 @@ async def _send_payment_link(cq: CallbackQuery, gateway: str, days: str):
         elif gateway == "oxapay":
             result = await create_oxapay_invoice(user_id, days_int)
             method_label = "🪙 Crypto (Oxapay)"
-            amount_str = f"${p['usd']:.0f}"
+            amount_str = f"${p['usd']:.2f}"
 
         elif gateway in ("paypal", "card", "apple"):
             base = p["usd"]
