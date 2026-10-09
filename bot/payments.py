@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 # ── Plan definitions ──────────────────────────────────────────────────────────
 PLANS: dict[str, dict] = {
-    "10":  {"days": 10,  "usd": 3.59,  "inr": 300,  "label": "10 days"},
-    "30":  {"days": 30,  "usd": 4.99,  "inr": 400,  "label": "30 days"},
-    "60":  {"days": 60,  "usd": 9.99,  "inr": 800,  "label": "60 days"},
-    "90":  {"days": 90,  "usd": 14.99, "inr": 1200, "label": "90 days"},
-    "365": {"days": 365, "usd": 54.99, "inr": 4500, "label": "365 days"},
+    "10":  {"days": 10,  "usd": 3.69,  "inr": 299,  "label": "10 days"},
+    "30":  {"days": 30,  "usd": 4.99,  "inr": 399,  "label": "30 days"},
+    "60":  {"days": 60,  "usd": 9.99,  "inr": 799,  "label": "60 days"},
+    "90":  {"days": 90,  "usd": 14.99, "inr": 1199, "label": "90 days"},
+    "365": {"days": 365, "usd": 54.99, "inr": 4499, "label": "365 days"},
 }
 
 # ── Env vars ──────────────────────────────────────────────────────────────────
