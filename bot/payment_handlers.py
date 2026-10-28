@@ -23,7 +23,6 @@ from bot.config import (
     UPI_ID,
     UPI_QR_CODE_URL,
     BINANCE_ID,
-    BINANCE_QR_CODE_URL,
     BINANCE_GIFT_CARD_URL,
 )
 from bot.payments import PLANS, create_zapupi_payment, create_oxapay_invoice, create_paypal_order, paypal_total
@@ -73,7 +72,6 @@ def _manual_methods_available() -> bool:
         UPI_ID,
         UPI_QR_CODE_URL,
         BINANCE_ID,
-        BINANCE_QR_CODE_URL,
         BINANCE_GIFT_CARD_URL,
     ))
 
@@ -139,7 +137,7 @@ def _manual_method_keyboard(days: str) -> InlineKeyboardMarkup:
     rows = []
     if UPI_ID or UPI_QR_CODE_URL:
         rows.append([InlineKeyboardButton("🇮🇳 UPI", callback_data=f"manual_detail_upi_{days}")])
-    if BINANCE_ID or BINANCE_QR_CODE_URL:
+    if BINANCE_ID:
         rows.append([InlineKeyboardButton("🟡 Binance Pay", callback_data=f"manual_detail_binance_{days}")])
     if BINANCE_GIFT_CARD_URL:
         rows.append([InlineKeyboardButton(
@@ -169,8 +167,6 @@ def _manual_detail(days: str, method: str) -> tuple[str, list]:
         text = f"Manual Binance Pay for {plan['label']} — {price}\n\n"
         if BINANCE_ID:
             text += f"Binance Pay ID: {BINANCE_ID}\n"
-        if BINANCE_QR_CODE_URL:
-            button_rows.append([InlineKeyboardButton("View Binance QR code", url=BINANCE_QR_CODE_URL)])
         text += "\nAfter paying, message the owner with your transaction reference. Payment is verified manually; Premium is not activated automatically."
     else:
         text = (
@@ -295,7 +291,7 @@ async def on_manual_payment_detail(client, cq: CallbackQuery):
         return
     available = {
         "upi": bool(UPI_ID or UPI_QR_CODE_URL),
-        "binance": bool(BINANCE_ID or BINANCE_QR_CODE_URL),
+        "binance": bool(BINANCE_ID),
         "giftcard": bool(BINANCE_GIFT_CARD_URL),
     }
     if not available[method]:

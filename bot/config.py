@@ -36,7 +36,6 @@ PAYPAL_WEBHOOK_ID      = os.environ.get("PAYPAL_WEBHOOK_ID", "")
 UPI_ID = os.environ.get("UPI_ID", "").strip()
 UPI_QR_CODE_URL = os.environ.get("UPI_QR_CODE_URL", "").strip()
 BINANCE_ID = os.environ.get("BINANCE_ID", "").strip()
-BINANCE_QR_CODE_URL = os.environ.get("BINANCE_QR_CODE_URL", "").strip()
 BINANCE_GIFT_CARD_URL = os.environ.get("BINANCE_GIFT_CARD_URL", "").strip()
 
 # ── Webhook server ────────────────────────────────────────────────────────────
