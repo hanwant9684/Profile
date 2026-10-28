@@ -2,6 +2,7 @@ import time
 from pyrogram import filters, Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LinkPreviewOptions
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeInvalid, PasswordHashInvalid
+import bot.config as _bot_config
 from bot.config import app, login_states, API_ID, API_HASH
 from bot.database import (
     get_user, create_user, save_session_string, logout_user,
@@ -85,6 +86,13 @@ async def start(client, message):
                 buttons.append([InlineKeyboardButton("🔐 Connect Account", callback_data="onboard_login")])
 
         buttons.append([InlineKeyboardButton("📊 My Stats", callback_data="show_myinfo")])
+        contact_buttons = []
+        if _bot_config.OWNER_LINK:
+            contact_buttons.append(InlineKeyboardButton("👤 Owner", url=_bot_config.OWNER_LINK))
+        if _bot_config.SUPPORT_CHAT_LINK:
+            contact_buttons.append(InlineKeyboardButton("💬 Support Bot", url=_bot_config.SUPPORT_CHAT_LINK))
+        if contact_buttons:
+            buttons.append(contact_buttons)
         needs_setup = is_premium and not (has_bot and logged_in)
 
         try:
@@ -101,6 +109,12 @@ async def start(client, message):
             pass
         return
 
+    contact_buttons = []
+    if _bot_config.OWNER_LINK:
+        contact_buttons.append([InlineKeyboardButton("👤 Owner", url=_bot_config.OWNER_LINK)])
+    if _bot_config.SUPPORT_CHAT_LINK:
+        contact_buttons.append([InlineKeyboardButton("💬 Support Bot", url=_bot_config.SUPPORT_CHAT_LINK)])
+
     try:
         await message.reply(
             "👋 **Welcome to the Downloader Bot!**\n\n"
@@ -108,6 +122,7 @@ async def start(client, message):
             "📎 **Public links work right away** — just send any `t.me` link.\n\n"
             "🔒 **For private / restricted links**, connect your Telegram account with /login.\n\n"
             "Send a link to get started!",
+            reply_markup=InlineKeyboardMarkup(contact_buttons) if contact_buttons else None,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
     except Exception:

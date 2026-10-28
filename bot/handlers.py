@@ -2101,6 +2101,9 @@ async def help_command(client, message):
             "📊 **Quota**\n"
             "Free plan: 2 files/day · 5 files/month\n\n"
 
+            "💬 **Support**\n"
+            "Use the Owner or Support Bot buttons below to ask a question.\n\n"
+
             "/cancel — stop an active download\n\n"
 
             "💎 **Want unlimited downloads + batch + fast engine?** → /upgrade"
@@ -2109,8 +2112,8 @@ async def help_command(client, message):
     await message.reply(
         text,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("👑 Owner", url="https://t.me/Owner_wolfy")],
-            [InlineKeyboardButton("💬 Support", url=_support_link())],
+            *([[InlineKeyboardButton("👤 Owner", url=_bot_config.OWNER_LINK)]] if _bot_config.OWNER_LINK else []),
+            *([[InlineKeyboardButton("💬 Support Bot", url=_support_link())]] if _support_link() else []),
         ]),
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )

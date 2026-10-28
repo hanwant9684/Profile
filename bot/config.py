@@ -21,6 +21,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 OWNER_ID_RAW = os.environ.get("OWNER_ID")
 OWNER_ID = int(OWNER_ID_RAW) if OWNER_ID_RAW and OWNER_ID_RAW.isdigit() else None
+OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "Owner_wolfy").strip().lstrip("@")
+OWNER_LINK = f"https://t.me/{OWNER_USERNAME}" if OWNER_USERNAME else ""
 SUPPORT_CHAT_LINK = os.environ.get("SUPPORT_CHAT_LINK", "https://t.me/Wolfy004chatbot")
 
 # ── Payment gateway keys ──────────────────────────────────────────────────────
@@ -29,6 +31,13 @@ OXAPAY_MERCHANT_KEY    = os.environ.get("OXAPAY_MERCHANT_KEY", "")
 PAYPAL_CLIENT_ID       = os.environ.get("PAYPAL_CLIENT_ID", "")
 PAYPAL_CLIENT_SECRET   = os.environ.get("PAYPAL_CLIENT_SECRET", "")
 PAYPAL_WEBHOOK_ID      = os.environ.get("PAYPAL_WEBHOOK_ID", "")
+
+# ── Manually verified payment methods ────────────────────────────────────────
+UPI_ID = os.environ.get("UPI_ID", "").strip()
+UPI_QR_CODE_URL = os.environ.get("UPI_QR_CODE_URL", "").strip()
+BINANCE_ID = os.environ.get("BINANCE_ID", "").strip()
+BINANCE_QR_CODE_URL = os.environ.get("BINANCE_QR_CODE_URL", "").strip()
+BINANCE_GIFT_CARD_URL = os.environ.get("BINANCE_GIFT_CARD_URL", "").strip()
 
 # ── Webhook server ────────────────────────────────────────────────────────────
 WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "https://wolfy004bot.duckdns.org")

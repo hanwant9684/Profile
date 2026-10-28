@@ -20,6 +20,11 @@ from bot.config import (
     OXAPAY_MERCHANT_KEY,
     PAYPAL_CLIENT_ID,
     PAYPAL_CLIENT_SECRET,
+    UPI_ID,
+    UPI_QR_CODE_URL,
+    BINANCE_ID,
+    BINANCE_QR_CODE_URL,
+    BINANCE_GIFT_CARD_URL,
 )
 from bot.payments import PLANS, create_zapupi_payment, create_oxapay_invoice, create_paypal_order, paypal_total
 from bot.database import get_user
@@ -28,6 +33,25 @@ from bot.database import get_user
 def _support_link() -> str:
     """Always return the live SUPPORT_CHAT_LINK (set after bot.start())."""
     return _bot_config.SUPPORT_CHAT_LINK or f"https://t.me/{_bot_config.BOT_USERNAME}"
+
+
+def _contact_rows() -> list:
+    rows = []
+    if _bot_config.OWNER_LINK:
+        rows.append([InlineKeyboardButton("👤 Ask owner about another payment", url=_bot_config.OWNER_LINK)])
+    if _support_link():
+        rows.append([InlineKeyboardButton("💬 Ask support bot about payments", url=_support_link())])
+    return rows
+
+
+def _payment_proof_rows() -> list:
+    rows = []
+    if _bot_config.OWNER_LINK:
+        rows.append([InlineKeyboardButton("📨 Payment Proof to Owner", url=_bot_config.OWNER_LINK)])
+    if _support_link():
+        rows.append([InlineKeyboardButton("💬 Payment Proof to Chatbot", url=_support_link())])
+    return rows
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +66,16 @@ def _gateway_ok(gw: str) -> bool:
     if gw == "paypal":
         return bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET)
     return False
+
+
+def _manual_methods_available() -> bool:
+    return any((
+        UPI_ID,
+        UPI_QR_CODE_URL,
+        BINANCE_ID,
+        BINANCE_QR_CODE_URL,
+        BINANCE_GIFT_CARD_URL,
+    ))
 
 
 def _plan_keyboard() -> InlineKeyboardMarkup:
@@ -92,7 +126,63 @@ def _method_keyboard(days: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("◀ Back", callback_data="upg_back"),
         InlineKeyboardButton("❌ Cancel", callback_data="upg_cancel"),
     ])
+    if _manual_methods_available():
+        rows.insert(-1, [InlineKeyboardButton(
+            "✨ Other Payment Options",
+            callback_data=f"other_payments_{days}",
+        )])
+    rows[-1:-1] = _contact_rows()
     return InlineKeyboardMarkup(rows)
+
+
+def _manual_method_keyboard(days: str) -> InlineKeyboardMarkup:
+    rows = []
+    if UPI_ID or UPI_QR_CODE_URL:
+        rows.append([InlineKeyboardButton("🇮🇳 UPI", callback_data=f"manual_detail_upi_{days}")])
+    if BINANCE_ID or BINANCE_QR_CODE_URL:
+        rows.append([InlineKeyboardButton("🟡 Binance Pay", callback_data=f"manual_detail_binance_{days}")])
+    if BINANCE_GIFT_CARD_URL:
+        rows.append([InlineKeyboardButton(
+            "🎁 Binance Gift Card",
+            callback_data=f"manual_detail_giftcard_{days}",
+        )])
+    rows.extend([
+        [InlineKeyboardButton("◀ Back to payment methods", callback_data=f"upg_plan_{days}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="upg_cancel")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _manual_detail(days: str, method: str) -> tuple[str, list]:
+    plan = PLANS[days]
+    price = f"₹{plan['inr']}" if method == "upi" else f"${plan['usd']:.2f}"
+    button_rows = []
+
+    if method == "upi":
+        text = f"Manual UPI payment for {plan['label']} — {price}\n\n"
+        if UPI_ID:
+            text += f"UPI ID: {UPI_ID}\n"
+        if UPI_QR_CODE_URL:
+            button_rows.append([InlineKeyboardButton("View UPI QR code", url=UPI_QR_CODE_URL)])
+        text += "\nAfter paying, message the owner with your transaction reference. Payment is verified manually; Premium is not activated automatically."
+    elif method == "binance":
+        text = f"Manual Binance Pay for {plan['label']} — {price}\n\n"
+        if BINANCE_ID:
+            text += f"Binance Pay ID: {BINANCE_ID}\n"
+        if BINANCE_QR_CODE_URL:
+            button_rows.append([InlineKeyboardButton("View Binance QR code", url=BINANCE_QR_CODE_URL)])
+        text += "\nAfter paying, message the owner with your transaction reference. Payment is verified manually; Premium is not activated automatically."
+    else:
+        text = (
+            f"Binance Gift Card for {plan['label']} — {price}\n\n"
+            "Open the gift-card site and message the owner to confirm the amount and instructions before purchasing. "
+            "After purchase, share the receipt with the owner. Do not send gift-card redemption codes in chat."
+        )
+        button_rows.append([InlineKeyboardButton("Open Binance Gift Cards", url=BINANCE_GIFT_CARD_URL)])
+
+    button_rows.extend(_payment_proof_rows())
+    button_rows.append([InlineKeyboardButton("◀ Back", callback_data=f"other_payments_{days}")])
+    return text, button_rows
 
 
 def _plan_text() -> str:
@@ -154,12 +244,18 @@ async def on_plan_selected(client, cq: CallbackQuery):
         return
 
     p = PLANS[days]
-    any_configured = any(_gateway_ok(g) for g in ("zapupi", "oxapay", "paypal"))
-    if not any_configured:
-        await cq.answer(
-            "No payment gateways are configured yet. Contact the owner.",
-            show_alert=True
+    payment_configured = (
+        any(_gateway_ok(g) for g in ("zapupi", "oxapay", "paypal"))
+        or _manual_methods_available()
+    )
+    if not payment_configured:
+        await cq.edit_message_text(
+            "No checkout is configured yet. Ask the owner or support bot whether another payment method is available.",
+            reply_markup=InlineKeyboardMarkup(
+                _contact_rows() + [[InlineKeyboardButton("◀ Back", callback_data="upg_back")]]
+            ),
         )
+        await cq.answer()
         return
 
     text = (
@@ -167,9 +263,49 @@ async def on_plan_selected(client, cq: CallbackQuery):
         f"💵 **Price:** ${p['usd']:.2f} USD  /  ₹{p['inr']} INR\n\n"
         f"👇 **Choose your payment method:**"
     )
+    if _manual_methods_available():
+        text += "\n\n✨ **Other Payment Options** are listed below and contain the direct payment methods configured by the owner."
     await cq.edit_message_text(
         text,
         reply_markup=_method_keyboard(days),
+    )
+    await cq.answer()
+
+
+@app.on_callback_query(filters.regex(r"^other_payments_(\d+)$"))
+async def on_other_payment_options(client, cq: CallbackQuery):
+    days = cq.matches[0].group(1)
+    if days not in PLANS or not _manual_methods_available():
+        await cq.answer("No manual payment methods are configured.", show_alert=True)
+        return
+    await cq.edit_message_text(
+        "✨ **Other Payment Options**\n\n"
+        "Choose a direct payment method below. The owner checks these payments manually; they are not activated automatically.",
+        reply_markup=_manual_method_keyboard(days),
+    )
+    await cq.answer()
+
+
+@app.on_callback_query(filters.regex(r"^manual_detail_(upi|binance|giftcard)_(\d+)$"))
+async def on_manual_payment_detail(client, cq: CallbackQuery):
+    method = cq.matches[0].group(1)
+    days = cq.matches[0].group(2)
+    if days not in PLANS:
+        await cq.answer("Unknown plan.", show_alert=True)
+        return
+    available = {
+        "upi": bool(UPI_ID or UPI_QR_CODE_URL),
+        "binance": bool(BINANCE_ID or BINANCE_QR_CODE_URL),
+        "giftcard": bool(BINANCE_GIFT_CARD_URL),
+    }
+    if not available[method]:
+        await cq.answer("This manual payment method is not configured.", show_alert=True)
+        return
+    text, button_rows = _manual_detail(days, method)
+    await cq.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(button_rows),
+        parse_mode=None,
     )
     await cq.answer()
 
